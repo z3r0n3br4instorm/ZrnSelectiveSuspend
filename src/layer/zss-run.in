@@ -1,0 +1,11 @@
+#!/bin/sh
+# Runs a program with the ZSS graphics layer as its only Vulkan driver, which
+# is what makes the program migratable. Usage: zss-run <program> [args...]
+manifest="${ZSS_MANIFEST:-@MANIFEST@}"
+if [ $# -eq 0 ]; then
+    echo "usage: zss-run <program> [args...]" >&2
+    exit 2
+fi
+export VK_DRIVER_FILES="$manifest"
+export VK_ICD_FILENAMES="$manifest"
+exec "$@"

@@ -1,0 +1,15 @@
+layer_lib = shared_library('zss_vk',
+  'icd.c', 'gate.c', 'device.c', 'cmd.c', 'swapchain.c', 'format.c', 'migrate.c', 'control.c',
+  dependencies: [common_dep, vulkan_headers, wsi_headers, threads, dl],
+  c_args: ['-fvisibility=hidden'],
+  install: true)
+
+# The loader finds the layer through this manifest. zss-run points it here.
+manifest_conf = configuration_data()
+manifest_conf.set('LIB', layer_lib.full_path())
+layer_manifest = configure_file(input: 'zss_icd.json.in', output: 'zss_icd.json',
+  configuration: manifest_conf)
+
+run_conf = configuration_data()
+run_conf.set('MANIFEST', meson.current_build_dir() / 'zss_icd.json')
+configure_file(input: 'zss-run.in', output: 'zss-run', configuration: run_conf)
