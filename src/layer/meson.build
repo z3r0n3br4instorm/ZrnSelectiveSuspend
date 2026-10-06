@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: GPL-2.0-only
 layer_lib = shared_library('zss_vk',
   'icd.c', 'gate.c', 'device.c', 'cmd.c', 'swapchain.c', 'format.c', 'migrate.c', 'control.c', 'retain.c',
   dependencies: [common_dep, vulkan_headers, wsi_headers, threads, dl],

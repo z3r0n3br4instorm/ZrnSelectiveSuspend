@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-2.0
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Measures what retention costs an application at upload time.
  * Usage: bench_retain [megabytes] [blob-megabytes]   (uses $XDG_CACHE_HOME)

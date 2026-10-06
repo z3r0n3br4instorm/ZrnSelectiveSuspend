@@ -1,4 +1,5 @@
 #version 450
+// SPDX-License-Identifier: GPL-2.0-only
 layout(location = 0) in vec2 in_uv;
 layout(location = 0) out vec4 out_color;
 

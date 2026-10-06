@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: GPL-2.0
+# SPDX-License-Identifier: GPL-2.0-only
 """Shared helpers for the ZSS test harnesses."""
 import atexit
 import os

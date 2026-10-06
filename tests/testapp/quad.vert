@@ -1,4 +1,5 @@
 #version 450
+// SPDX-License-Identifier: GPL-2.0-only
 // One unit quad, placed by the per-frame uniform block.
 layout(location = 0) in vec2 in_pos;
 layout(location = 0) out vec2 out_uv;

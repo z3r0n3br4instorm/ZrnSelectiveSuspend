@@ -1,5 +1,5 @@
 #!/bin/bash
-# SPDX-License-Identifier: GPL-2.0
+# SPDX-License-Identifier: GPL-2.0-only
 #
 # zss-nvidia-patch: manages the wake-on-touch patch to the NVIDIA kernel modules.
 #

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-2.0
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Link to zssd: registers the process, reports which GPUs it holds, and
  * carries out migrate, restore and resume requests. Without a daemon the

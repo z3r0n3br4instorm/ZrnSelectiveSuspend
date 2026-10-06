@@ -1,4 +1,8 @@
-// SPDX-License-Identifier: GPL-2.0
+// SPDX-License-Identifier: GPL-2.0-only
+/*
+ * The hash is MurmurHash3 (x64, 128 bit) by Austin Appleby, who placed it in
+ * the public domain. This file is a rewrite of it for this project.
+ */
 #include "zss_hash.h"
 
 #include <string.h>

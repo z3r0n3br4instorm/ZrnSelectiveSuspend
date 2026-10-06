@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# SPDX-License-Identifier: GPL-2.0
+# SPDX-License-Identifier: GPL-2.0-only
 """Tests for the installer and for the NVIDIA patch tool.
 
 Nothing here touches the running system: the installer works in a staging

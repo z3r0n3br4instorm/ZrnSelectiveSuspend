@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-2.0
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Command buffers. Every command is stored with the application's handles
  * and then executed through the same routine that replays it on another

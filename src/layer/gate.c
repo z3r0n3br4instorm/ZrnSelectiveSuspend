@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-2.0
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * The gate. Every entry point passes through it, so a migration can wait
  * until no application thread is inside the layer and keep it that way.

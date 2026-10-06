@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# SPDX-License-Identifier: GPL-2.0
+# SPDX-License-Identifier: GPL-2.0-only
 """Track B, guest side. Runs as root inside the QEMU guest started by track_b.py.
 
 Exercises what cannot be done safely on the host: releasing a display card

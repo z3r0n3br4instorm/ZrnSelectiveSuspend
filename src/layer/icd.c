@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-2.0
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Loader-facing side: driver discovery, virtual GPUs, instance and
  * physical-device entry points, surfaces, and the entry-point table.

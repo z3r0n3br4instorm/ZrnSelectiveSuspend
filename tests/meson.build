@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: GPL-2.0-only
 glslang = find_program('glslangValidator')
 vulkan_loader = dependency('vulkan')
 

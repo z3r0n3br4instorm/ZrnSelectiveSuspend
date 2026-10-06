@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-2.0
+// SPDX-License-Identifier: GPL-2.0-only
 /* Unit tests for the wire encoding. */
 #include <stdio.h>
 #include <stdlib.h>

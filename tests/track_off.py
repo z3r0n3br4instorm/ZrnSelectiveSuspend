@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# SPDX-License-Identifier: GPL-2.0
+# SPDX-License-Identifier: GPL-2.0-only
 """Powering a suspend-in-place GPU off and on under a running desktop.
 
 Runs on the host with the `fake` backend, a device made of files, so the

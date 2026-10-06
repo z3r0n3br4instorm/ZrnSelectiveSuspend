@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-2.0
+// SPDX-License-Identifier: GPL-2.0-only
 /* Unit tests for who may keep a device open across a power-off. */
 #include <stdio.h>
 #include <string.h>

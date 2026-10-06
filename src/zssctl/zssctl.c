@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-2.0
+// SPDX-License-Identifier: GPL-2.0-only
 /* zssctl: command-line client for zssd. */
 #include <stdbool.h>
 #include <stdio.h>

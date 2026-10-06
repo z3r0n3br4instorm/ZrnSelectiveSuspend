@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: GPL-2.0-only
 # Maintainer: zerone
 # Builds ZrnSelectiveSuspend from this checkout: run `makepkg -si` in this directory.
 pkgname=zrn-selective-suspend

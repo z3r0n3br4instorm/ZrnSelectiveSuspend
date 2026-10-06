@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-2.0
+// SPDX-License-Identifier: GPL-2.0-only
 /* Everything zssd learns from, or does through, /sys and /proc. */
 #include "zssd.h"
 

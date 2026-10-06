@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-2.0
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Power backends, and the two ways of quiescing a kernel driver in place.
  * A backend only switches power; zssd decides when that is allowed.

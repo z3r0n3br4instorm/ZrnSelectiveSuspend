@@ -203,3 +203,26 @@ newer Vulkan version do not start under it yet.
 | `ZSS_BIND_PCI` | Test aid: makes the software renderer pose as the PCI device at that address |
 | `ZSS_TEST_LOSE_AT_SUBMIT` | Test aid: the layer behaves as if the GPU died at that submit |
 | `ZSS_TEST_STUCK_MS`, `ZSS_LOSS_GRACE_MS` | Test aids: hold a thread inside the layer during a loss; how long recovery waits for such threads (3000) |
+
+## Licence
+
+ZrnSelectiveSuspend is free software, Copyright (c) 2026 Zerone Laboratories,
+released under the **GNU General Public License, version 2 only**. The full
+text is in [`LICENSE`](LICENSE); every source file names it in an
+`SPDX-License-Identifier` line. It comes with no warranty: it cuts power to
+hardware and patches a kernel driver, and you use it at your own risk.
+
+Two things are not under that licence:
+
+- **The NVIDIA driver patch** in [`patches/`](patches/). The lines it adds are
+  ours and are under the MIT licence, so that they can be built into NVIDIA's
+  driver; the lines of NVIDIA's code it quotes remain NVIDIA's. See
+  [`patches/LICENSE`](patches/LICENSE). ZSS does not ship or modify NVIDIA's
+  driver itself: the patch is applied on your machine to the copy you
+  installed.
+- **Vulkan-Headers**, fetched at build time by Meson from Khronos, under its
+  own licences (Apache-2.0 or MIT).
+
+The hash in `src/common/zss_hash.c` is MurmurHash3 by Austin Appleby, which is
+in the public domain.
+

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-2.0
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * What zssd needs around a power-off under a running desktop: who may keep
  * the device open, where wake requests show up, whether the device is

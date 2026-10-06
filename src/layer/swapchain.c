@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-2.0
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Swapchains cannot be moved: the image count and formats belong to one
  * driver. After a migration the old swapchain is "retired": its images are

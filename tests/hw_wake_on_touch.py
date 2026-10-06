@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# SPDX-License-Identifier: GPL-2.0
+# SPDX-License-Identifier: GPL-2.0-only
 """Track C: wake-on-touch with the patched NVIDIA driver.
 
 REAL HARDWARE, ROOT ONLY, Apple classic-gmux laptops only, and only with the

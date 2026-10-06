@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: GPL-2.0 */
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * Minimal JSON for the ZSS wire protocol. Every message is one flat object
  * on one line: string, integer and boolean values only. See docs/protocol.md.

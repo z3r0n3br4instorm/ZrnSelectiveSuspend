@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# SPDX-License-Identifier: GPL-2.0
+# SPDX-License-Identifier: GPL-2.0-only
 """Track A: graphics migration on the host, with nothing powered off.
 
 Each scenario runs zss-testapp under the layer, asks zssd (dry-run backend)

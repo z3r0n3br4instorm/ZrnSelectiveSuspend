@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# SPDX-License-Identifier: GPL-2.0
+# SPDX-License-Identifier: GPL-2.0-only
 """Compares the frames of two zss-testapp runs.
 
 Exact mode requires every byte to match, and is right when both runs used the

@@ -1,4 +1,5 @@
 #!/bin/sh
+# SPDX-License-Identifier: GPL-2.0-only
 # Runs a program with the ZSS graphics layer as its only Vulkan driver, which
 # is what makes the program migratable. Usage: zss-run <program> [args...]
 manifest="${ZSS_MANIFEST:-@MANIFEST@}"

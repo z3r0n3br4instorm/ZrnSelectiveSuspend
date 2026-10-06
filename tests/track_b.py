@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# SPDX-License-Identifier: GPL-2.0
+# SPDX-License-Identifier: GPL-2.0-only
 """Track B: the full detach and attach sequence, in a QEMU guest.
 
 The guest boots the host's kernel with a tiny initramfs (tests/qemu/init.c)

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-2.0
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Texel sizes, needed to copy image contents through buffers. A format that
  * is missing here makes its device non-migratable rather than risking a

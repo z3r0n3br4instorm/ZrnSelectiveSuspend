@@ -22,6 +22,9 @@ display server).
 Nothing changes while the driver is running: the fast path is the same single
 trylock as before. Only the open kernel-interface layer is touched.
 
+Licence: the added lines are Copyright (c) 2026 Zerone Laboratories, MIT; the
+rest is NVIDIA's. See patches/LICENSE.
+
 Apply with -p1 in the driver source directory, or through DKMS (see
 packaging/zss-nvidia-patch).
 

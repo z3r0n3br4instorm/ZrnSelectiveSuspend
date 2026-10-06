@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-2.0
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Unit tests for the hash and the retention store. The store reads its
  * settings once per process, so each case runs in a child process started

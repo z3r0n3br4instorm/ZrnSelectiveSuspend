@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: GPL-2.0 */
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * Retention store: keeps a copy of data uploaded to the GPU so it can be
  * put back after the device is lost. Content-addressed, on disk by default,

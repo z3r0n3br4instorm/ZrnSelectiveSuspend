@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# SPDX-License-Identifier: GPL-2.0
+# SPDX-License-Identifier: GPL-2.0-only
 """Track C experiment: is the X session usable while the dGPU is powered off?
 
 REAL HARDWARE, ROOT ONLY, Apple classic-gmux laptops only.

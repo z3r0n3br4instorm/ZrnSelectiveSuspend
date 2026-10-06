@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# SPDX-License-Identifier: GPL-2.0
+# SPDX-License-Identifier: GPL-2.0-only
 """Device loss on the host, by fault injection.
 
 ZSS_TEST_LOSE_AT_SUBMIT makes the layer behave as if the real driver had

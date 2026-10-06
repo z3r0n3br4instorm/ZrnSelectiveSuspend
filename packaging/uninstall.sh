@@ -1,5 +1,5 @@
 #!/bin/bash
-# SPDX-License-Identifier: GPL-2.0
+# SPDX-License-Identifier: GPL-2.0-only
 #
 # Removes ZrnSelectiveSuspend: powers on any GPU that is off, stops the
 # service, rebuilds the stock GPU driver, and deletes what install.sh added.
