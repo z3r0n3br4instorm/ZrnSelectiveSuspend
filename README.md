@@ -1,51 +1,84 @@
 # ZrnSelectiveSuspend
 ### By Zerone Laboratories
 
-**Universal Linux In-Kernel GPU Runtime Power-Gating, MMIO Virtualization & Surprise-Removal Architecture**
+**Power a GPU off, or lose it, while the desktop and its applications keep running.**
 
-> **Status (October 2026).** The first milestone is the orderly path: the user
-> asks for a GPU to be detached, its applications move to another GPU, and the
-> device is released and powered off. It is implemented in userspace (`src/`)
-> and specified in `openspec/changes/zss-happy-path/`. The surprise-removal
-> subsystems described below (PCIe shield, MMIO shadow, DMA isolator,
-> resurrection engine) are **deferred** and not part of that milestone.
+ZSS lets you take a graphics card out of service on a live Linux system: its
+applications move to another GPU, the card is powered off, and everything
+moves back when it returns. It is meant to work with any GPU and any driver.
+Today some parts do, and some work only on the one machine they were built on.
+The table below says which.
 
----
-
-## Overview
-
-`ZrnSelectiveSuspend` is an in-kernel virtualization and power-orchestration shim. It decouples the physical hardware power state and link status of a PCIe Graphics Processing Unit (GPU) from the software state of the operating system, display servers (Xorg / Wayland), and user applications.
-
-While initially built and validated against the dual-GPU architecture of the **Apple MacBookPro9,1** (Mid-2012 15-inch Unibody, Ivy Bridge + Kepler GT 650M + Intel **Lightridge** Thunderbolt silicon), **the architecture is designed to support any GPU stack**:
-* **NVIDIA Proprietary (`nvidia.ko` / NVRM):** Kepler through Blackwell
-* **Open-Source Linux DRM:** `nouveau`, `amdgpu` (Radeon / ROCm), `xe` / `i915` (Intel Arc / Iris)
-* **External GPUs (eGPU):** Thunderbolt 3/4, USB4, and OCuLink surprise hot-unplug protection
-
-For the complete architectural blueprints, hardware register maps, and subsystem specifications, see [SPEC.md](file:///home/zerone/Documents/Projects/ZrnSelectiveSuspend/SPEC.md).
+> **Status (October 2026).** Working on real hardware: a MacBookPro9,1 powers
+> its NVIDIA GT 650M off and on under a running X session in about 0.3 s, with
+> applications moved to the Intel GPU and back. Working in a virtual machine
+> only: hot-removal of a PCIe card, and recovery when a card disappears without
+> warning. There is no ZSS kernel module; see "What runs where".
 
 ---
 
-## Operating Modes
+## What is universal and what is not
 
-| Mode | dGPU Power | Display Server Status | Primary Screen | External Ports |
-| :--- | :--- | :--- | :--- | :--- |
-| **State 0: Eco / Pure Intel** | **0.00 W** | Driver frozen, MMIO in RAM | Primary iGPU | Inactive |
-| **State 1: PRIME Offload** | **Dynamic** | Active for offload (`prime-run`) | Primary iGPU | Inactive |
-| **State 2: Lightridge Docked** | **Active** | Secondary Provider Attached | Primary iGPU | **Active (Lightridge / DP)** |
+| Part | Works with | Tested on |
+| :--- | :--- | :--- |
+| Moving applications between GPUs (the layer) | Any Vulkan driver: NVIDIA, Mesa (Intel, AMD, Nouveau), software | NVIDIA 470, Intel `anv`, llvmpipe |
+| Recovering applications when a GPU vanishes | Any Vulkan driver | QEMU, by pulling a virtual card |
+| Daemon, `zssctl`, rules for who may hold a GPU, freezing, idle timer | Any GPU | Host tests and QEMU |
+| Detach by unbinding the driver and cutting slot power | Any driver, on a PCIe hot-plug slot (`pciehp-slot` backend) | QEMU only |
+| Power-off with the driver suspended in place | **NVIDIA proprietary driver on an Apple classic gmux only** (`apple-gmux` backend) | MacBookPro9,1 |
+| Power-off under a running display server | **NVIDIA 470.256.02 only**: needs the wake-on-touch driver patch | MacBookPro9,1 |
+| Hiding a switched-off GPU from new programs | Device nodes: any driver. Loader files and `/proc` files: **NVIDIA only** | MacBookPro9,1 |
+
+What it would take to cover more hardware:
+
+- **Another laptop or desktop**: a power backend for its platform (ACPI
+  `_PR3`, another mux, a Thunderbolt or OCuLink slot). The backend interface
+  is small: probe, power off, power on, is it powered.
+- **`amdgpu`, `i915`/`xe`, `nouveau`**: these are open drivers with runtime
+  power management, so suspend-in-place should need no driver patch, only a
+  backend that asks the kernel to do it. Not written yet.
+- **Other NVIDIA versions**: the patch has to be checked against each one and
+  added to `patches/validated-versions`.
+
+## What runs where
+
+- **The layer** (`libzss_vk.so`, started with `zss-run`) is a Vulkan driver
+  shim in user space. It sits between an application and the real driver,
+  keeps enough state to rebuild the application on another GPU, and does so
+  when asked or when the GPU is lost.
+- **The daemon** (`zssd`) decides and sequences: who is using the GPU, what to
+  move, freeze or stop, then driver suspend and the power cut, and the reverse.
+- **In the kernel there is no ZSS module.** The only kernel change is a small
+  patch to NVIDIA's own driver, so that a caller arriving while the driver is
+  suspended asks for a wake and sleeps instead of spinning for ever.
+
+Consequences worth knowing:
+
+- Only applications started under the layer can be moved. Anything else that
+  holds the GPU is frozen while it is off, or blocks a detach.
+- The layer offers Vulkan 1.0 with swapchains. Programs that need a newer
+  Vulkan, and OpenGL programs, are not covered by it.
+- A card that vanishes without warning is handled in user space only. Nothing
+  protects the kernel driver of the vanished card; that has never been tried
+  on real hardware.
+
+[`SPEC.md`](SPEC.md) describes the long-term design, including in-kernel
+protection against surprise removal (PCIe shield, MMIO shadow, DMA isolation).
+None of that is implemented.
 
 ---
 
 ## Project Structure
 
-* [`SPEC.md`](SPEC.md) - Long-term architecture, multi-vendor design, and failure analysis.
-* [`openspec/changes/zss-happy-path/`](openspec/changes/zss-happy-path/) - Proposal, design, specs and tasks for the current milestone.
+* [`SPEC.md`](SPEC.md) - Long-term architecture, multi-vendor design, and failure analysis. Not a description of what exists.
+* [`openspec/changes/`](openspec/changes/) - Proposal, design, specs and tasks for each milestone: `zss-happy-path` (orderly detach and attach), `zss-device-loss` (a GPU that disappears), `zss-system-integration` (service, installer, power-off under a desktop).
 * [`src/layer/`](src/layer/) - The graphics layer: a Vulkan driver shim that makes applications migratable.
-* [`src/daemon/`](src/daemon/) - `zssd`, which runs detach and attach, and the power backends.
+* [`src/daemon/`](src/daemon/) - `zssd`, which runs detach, attach, off and on, and the power backends.
 * [`src/zssctl/`](src/zssctl/) - Command-line client.
 * [`packaging/`](packaging/) - Installer, service units, the NVIDIA patch tool, and an Arch package.
 * [`patches/`](patches/) - The wake-on-touch patch to the NVIDIA driver.
-* [`tests/`](tests/) - Test application, frame comparison, and the host and QEMU harnesses.
-* [`docs/`](docs/) - Wire protocol, test notes, and what happens when a GPU is lost.
+* [`tests/`](tests/) - Test application, frame comparison, and the host, QEMU and hardware harnesses.
+* [`docs/`](docs/) - Wire protocol, test notes, hardware results, and what happens when a GPU is lost.
 * [`include/`](include/) - Register maps for the reference platform.
 
 ## Installing
@@ -72,8 +105,9 @@ Remove everything with `sudo ./packaging/uninstall.sh` (add `--purge` to drop
 the configuration and the group too). On Arch, `packaging/arch/` builds a
 package instead.
 
-Power-off works today only on Apple laptops with a classic gmux. On other
-machines the installer says so and installs application migration only.
+Power-off works today only on Apple laptops with a classic gmux and the NVIDIA
+proprietary driver. On other machines the installer says so and installs
+application migration only.
 
 ## Powering the GPU off and on
 
@@ -88,24 +122,41 @@ Each step is printed as it happens:
 ```
 [ZrnSelectiveSuspend] Suspending device: 0000:01:00.0  NVIDIA Corporation GK107M [GeForce GT 650M Mac Edition]
 [ZrnSelectiveSuspend]   driver nvidia, power through apple-gmux, wake on demand: yes
-[ZrnSelectiveSuspend]   [1/7] In use by: Xorg (display server, idle), nvidia-persiste (service, will be stopped)
-[ZrnSelectiveSuspend]   [2/7] Applications: 0 moved to 0000:00:02.0, 0 parked
-  ...
-[ZrnSelectiveSuspend] Device 0000:01:00.0 is powered off (0.42 s).
-[ZrnSelectiveSuspend] It powers on by itself when needed, or with: zssctl on 0000:01:00.0
+[ZrnSelectiveSuspend]   [1/7] In use by: Xorg (display server, idle), vkcube (application, will be moved)
+[ZrnSelectiveSuspend]   [2/7] Applications: 1 moved to 0000:00:02.0, 0 parked
+[ZrnSelectiveSuspend]   [3/7] Services stopped: nvidia-persistenced; processes frozen: none
+[ZrnSelectiveSuspend]         Hidden from new programs (17): /dev/nvidia0, /dev/dri/card2, ...
+[ZrnSelectiveSuspend]   [4/7] PCI configuration saved: 256 bytes
+[ZrnSelectiveSuspend]   [5/7] Driver nvidia suspended (0.12 s)
+[ZrnSelectiveSuspend]   [6/7] Power cut through apple-gmux (0.12 s); the device has left the bus
+[ZrnSelectiveSuspend]   [7/7] Watching for wake requests
+[ZrnSelectiveSuspend] Device 0000:01:00.0 is powered off (0.43 s).
+[ZrnSelectiveSuspend] It stays off (the display server may borrow it for a moment) until: zssctl on 0000:01:00.0
 ```
 
-With the patched driver the screen stays on the desktop. A GPU you switched off
-stays off, and is hidden from programs you start meanwhile, as if it had been
-unplugged: Vulkan and OpenGL programs run on the other GPU, and `nvidia-smi`
-says it cannot reach the device. If X itself needs the GPU for a moment it gets
-it, and the GPU switches off again a second or two later; `zssctl status`
-counts these as `served=`. (`hide_while_off = no` in the configuration
-turns the hiding off; a program that then reaches the driver waits until you
-run `zssctl on`, and `zssctl status` shows `waiting=`.) The one exception is the display server: if X itself needs the GPU
-(you ask it about displays, for instance) the GPU comes back, because the
-desktop would otherwise stand still. A GPU switched off by the idle timer comes
-back for anyone.
+**A GPU you switch off stays off.** The screen stays on the desktop, and:
+
+- Programs you start meanwhile do not see the GPU, as if it had been
+  unplugged: Vulkan and OpenGL programs run on the other GPU, and `nvidia-smi`
+  says it cannot reach the device.
+- If the display server itself needs the GPU for a moment, it gets it, and the
+  GPU switches off again a second or two later. `zssctl status` counts these
+  as `served=`.
+- If the GPU has started driving a display by then, it stays on.
+- `hide_while_off = no` in the configuration turns the hiding off. A program
+  that then reaches the driver waits until you run `zssctl on`, and
+  `zssctl status` shows it as `waiting=`.
+
+A GPU switched off by the idle timer is different: it is not hidden, and it
+comes back for anyone who asks.
+
+**Is it really off?** `lspci` keeps listing the card, because the kernel keeps
+its entry for a card that cannot be removed. Ask the card itself instead:
+
+```sh
+lspci -x -s 01:00.0 | head -3     # all "ff" means no power; real bytes mean it is on
+```
+
 `zssctl off --console` shows the same report on a text console instead and
 keeps the screen there while the GPU is off; press a key to power it on.
 
