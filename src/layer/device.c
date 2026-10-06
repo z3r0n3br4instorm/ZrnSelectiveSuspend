@@ -9,6 +9,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <unistd.h>
 
 #define ENTER(devh) struct zss_dev *dev = (struct zss_dev *)(devh); zss_enter()
 #define TRANSFER_BOTH (VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT)
@@ -86,8 +87,18 @@ void zss_obj_unref(struct zss_obj *o)
 
     switch (o->kind) {
     case ZK_MEMORY: free(o->u.mem.shadow); break;
-    case ZK_BUFFER: free(o->u.buf.saved); break;
-    case ZK_IMAGE: free(o->u.img.layout); free(o->u.img.saved); break;
+    case ZK_BUFFER:
+        free(o->u.buf.saved);
+        zss_retain_release(&o->u.buf.ret);
+        break;
+    case ZK_IMAGE:
+        if (o->u.img.ret)
+            for (uint32_t i = 0; i < 2 * o->u.img.ci.mipLevels * o->u.img.ci.arrayLayers; i++)
+                zss_retain_release(&o->u.img.ret[i]);
+        free(o->u.img.ret);
+        free(o->u.img.layout);
+        free(o->u.img.saved);
+        break;
     case ZK_DSET: slots_free(o); break;
     case ZK_CMDBUF: zss_cmd_reset(o); free(o->u.cb.refs); break;
     case ZK_SWAPCHAIN: free(o->u.sc.images); break;
@@ -513,6 +524,9 @@ static uint8_t *shadow_of(const struct zss_obj *o, const struct zss_obj *only_me
 
 void zss_sync_to_device(struct zss_dev *dev, struct zss_obj *only_mem)
 {
+    /* A lost device's mappings may no longer be backed by anything. */
+    if (dev->lost || !dev->real)
+        return;
     pthread_mutex_lock(&zss_lock);
     for (struct zss_obj *o = dev->head; o; o = o->next) {
         VkDeviceSize size;
@@ -526,6 +540,8 @@ void zss_sync_to_device(struct zss_dev *dev, struct zss_obj *only_mem)
 
 void zss_sync_from_device(struct zss_dev *dev, struct zss_obj *only_mem)
 {
+    if (dev->lost || !dev->real)
+        return;
     pthread_mutex_lock(&zss_lock);
     for (struct zss_obj *o = dev->head; o; o = o->next) {
         if (o->kind != ZK_BUFFER || !o->u.buf.gpu_written || o->dead || !o->r.map ||
@@ -652,6 +668,9 @@ static VkResult real_buffer(struct zss_dev *dev, struct zss_obj *o)
     r = dev->fn.CreateBuffer(dev->real, &ci, NULL, &b);
     if (r != VK_SUCCESS)
         return r;
+    /* Came back from a driver that was replaced meanwhile: `b` belongs to the old device. */
+    if (zss_stale())
+        return VK_ERROR_DEVICE_LOST;
     o->r.h = (uint64_t)(uintptr_t)b;
     if (!o->u.buf.mem)
         return VK_SUCCESS;
@@ -683,6 +702,8 @@ static VkResult real_image(struct zss_dev *dev, struct zss_obj *o)
     r = dev->fn.CreateImage(dev->real, &ci, NULL, &img);
     if (r != VK_SUCCESS)
         return r;
+    if (zss_stale())
+        return VK_ERROR_DEVICE_LOST;
     o->r.h = (uint64_t)(uintptr_t)img;
     o->r.standin = o->u.img.swapchain != NULL;
     if (!o->u.img.mem && !o->u.img.swapchain)
@@ -899,9 +920,23 @@ out:
 }
 
 /* Shared tail of every create entry point. */
-static VkResult finish_create(struct zss_dev *dev, struct zss_obj *o, uint64_t *out)
+/*
+ * If the device was lost under a create call, recovery has rebuilt every
+ * object in the list, including the one being created. Nothing to repeat:
+ * the object either exists on the new device or could not be made there.
+ */
+static VkResult create_real(struct zss_dev *dev, struct zss_obj *o)
 {
     VkResult r = zss_real_create(dev, o);
+
+    if (zss_lost(dev, r))
+        r = o->r.h ? VK_SUCCESS : VK_ERROR_DEVICE_LOST;
+    return r;
+}
+
+static VkResult finish_create(struct zss_dev *dev, struct zss_obj *o, uint64_t *out)
+{
+    VkResult r = create_real(dev, o);
 
     if (r != VK_SUCCESS) {
         zss_real_destroy(dev, o->kind, &o->r);
@@ -991,10 +1026,14 @@ VKAPI_ATTR VkResult VKAPI_CALL zss_BindBufferMemory(VkDevice device, VkBuffer bu
     o->u.buf.mem_off = offset;
     zss_obj_dep(o, m);
     dev->fn.GetBufferMemoryRequirements(dev->real, ZREAL(VkBuffer, buffer), &req);
-    r = zss_backing_alloc(dev, &req, m->u.mem.flags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT,
-                          &o->r.backing, &o->r.map);
+    /* If the device was replaced under this thread, the rebuild has already done the binding. */
+    r = zss_stale() ? VK_ERROR_DEVICE_LOST
+                    : zss_backing_alloc(dev, &req, m->u.mem.flags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT,
+                                        &o->r.backing, &o->r.map);
     if (r == VK_SUCCESS)
         r = dev->fn.BindBufferMemory(dev->real, ZREAL(VkBuffer, buffer), o->r.backing, 0);
+    if (zss_lost(dev, r))
+        r = o->r.backing ? VK_SUCCESS : VK_ERROR_DEVICE_LOST;
     zss_leave();
     return r;
 }
@@ -1016,6 +1055,7 @@ VKAPI_ATTR VkResult VKAPI_CALL zss_CreateImage(VkDevice device, const VkImageCre
             ? zss_obj_dup(o, ci->pQueueFamilyIndices, ci->queueFamilyIndexCount * sizeof(uint32_t))
             : NULL;
     o->u.img.layout = calloc(n ? n : 1, sizeof(VkImageLayout));
+    o->u.img.ret = calloc(2 * (n ? n : 1), sizeof(struct zss_ret));
     for (uint32_t i = 0; i < n; i++)
         o->u.img.layout[i] = ci->initialLayout;
 
@@ -1074,9 +1114,11 @@ VKAPI_ATTR VkResult VKAPI_CALL zss_BindImageMemory(VkDevice device, VkImage imag
     zss_obj_dep(o, m);
     dev->fn.GetImageMemoryRequirements(dev->real, ZREAL(VkImage, image), &req);
     o->u.img.map_size = req.size;
-    r = zss_backing_alloc(dev, &req, host, &o->r.backing, &o->r.map);
+    r = zss_stale() ? VK_ERROR_DEVICE_LOST : zss_backing_alloc(dev, &req, host, &o->r.backing, &o->r.map);
     if (r == VK_SUCCESS)
         r = dev->fn.BindImageMemory(dev->real, ZREAL(VkImage, image), o->r.backing, 0);
+    if (zss_lost(dev, r))
+        r = o->r.backing ? VK_SUCCESS : VK_ERROR_DEVICE_LOST;
     zss_leave();
     return r;
 }
@@ -1277,7 +1319,9 @@ VKAPI_ATTR VkResult VKAPI_CALL zss_ResetDescriptorPool(VkDevice device, VkDescri
                                                        VkDescriptorPoolResetFlags flags)
 {
     ENTER(device);
-    VkResult r = dev->fn.ResetDescriptorPool(dev->real, ZREAL(VkDescriptorPool, pool), flags);
+    VkResult r;
+
+    ZSS_RETRY(dev, r, dev->fn.ResetDescriptorPool(dev->real, ZREAL(VkDescriptorPool, pool), flags));
 
     kill_children(dev, ZK_DSET, ZOBJ(pool));
     zss_leave();
@@ -1313,7 +1357,7 @@ VKAPI_ATTR VkResult VKAPI_CALL zss_AllocateDescriptorSets(VkDevice device,
             s->count = lci->pBindings[b].descriptorCount;
             s->e = calloc(s->count ? s->count : 1, sizeof(*s->e));
         }
-        r = zss_real_create(dev, o);
+        r = create_real(dev, o);
         if (r != VK_SUCCESS)
             zss_obj_kill(o);
         else
@@ -1461,8 +1505,12 @@ VKAPI_ATTR void VKAPI_CALL zss_UpdateDescriptorSets(VkDevice device, uint32_t nw
                 entry_set(e, ZOBJ(w->pImageInfo[j].sampler), ZOBJ(w->pImageInfo[j].imageView), NULL);
                 e->layout = w->pImageInfo[j].imageLayout;
                 break;
-            case VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE:
             case VK_DESCRIPTOR_TYPE_STORAGE_IMAGE:
+                /* Shaders may write it at any time from now on. */
+                if (w->pImageInfo[j].imageView)
+                    zss_image_dirty(ZOBJ(ZOBJ(w->pImageInfo[j].imageView)->u.view.ci.image), true);
+                /* fall through */
+            case VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE:
             case VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT:
                 entry_set(e, NULL, ZOBJ(w->pImageInfo[j].imageView), NULL);
                 e->layout = w->pImageInfo[j].imageLayout;
@@ -1558,7 +1606,9 @@ VKAPI_ATTR VkResult VKAPI_CALL zss_GetPipelineCacheData(VkDevice device, VkPipel
                                                         size_t *size, void *data)
 {
     ENTER(device);
-    VkResult r = dev->fn.GetPipelineCacheData(dev->real, ZREAL(VkPipelineCache, cache), size, data);
+    VkResult r;
+
+    ZSS_RETRY(dev, r, dev->fn.GetPipelineCacheData(dev->real, ZREAL(VkPipelineCache, cache), size, data));
 
     zss_leave();
     return r;
@@ -1683,7 +1733,7 @@ VKAPI_ATTR VkResult VKAPI_CALL zss_CreateGraphicsPipelines(
         VkResult r;
 
         pipeline_copy(o, &infos[i]);
-        r = zss_real_create(dev, o);
+        r = create_real(dev, o);
         if (r != VK_SUCCESS) {
             zss_obj_kill(o);
             out[i] = VK_NULL_HANDLE;
@@ -1760,7 +1810,9 @@ VKAPI_ATTR VkResult VKAPI_CALL zss_ResetCommandPool(VkDevice device, VkCommandPo
                                                     VkCommandPoolResetFlags flags)
 {
     ENTER(device);
-    VkResult r = dev->fn.ResetCommandPool(dev->real, ZREAL(VkCommandPool, pool), flags);
+    VkResult r;
+
+    ZSS_RETRY(dev, r, dev->fn.ResetCommandPool(dev->real, ZREAL(VkCommandPool, pool), flags));
 
     pthread_mutex_lock(&zss_lock);
     for (struct zss_obj *o = dev->head; o; o = o->next) {
@@ -1790,7 +1842,7 @@ VKAPI_ATTR VkResult VKAPI_CALL zss_AllocateCommandBuffers(VkDevice device,
         o->u.cb.pool = ZOBJ(info->commandPool);
         o->u.cb.level = info->level;
         zss_obj_dep(o, o->u.cb.pool);
-        r = zss_real_create(dev, o);
+        r = create_real(dev, o);
         if (r != VK_SUCCESS)
             zss_obj_kill(o);
         else
@@ -1850,10 +1902,14 @@ VKAPI_ATTR VkResult VKAPI_CALL zss_ResetFences(VkDevice device, uint32_t n, cons
     for (uint32_t i = 0; i < n; i += 64) {
         uint32_t c = n - i < 64 ? n - i : 64;
 
-        for (uint32_t j = 0; j < c; j++)
-            real[j] = ZREAL(VkFence, fences[i + j]);
-        r = dev->fn.ResetFences(dev->real, c, real);
+        do {
+            for (uint32_t j = 0; j < c; j++)
+                real[j] = ZREAL(VkFence, fences[i + j]);
+            r = dev->fn.ResetFences(dev->real, c, real);
+        } while (zss_lost(dev, r));
     }
+    for (uint32_t i = 0; i < n; i++)
+        ZOBJ(fences[i])->u.fence.signaled = ZOBJ(fences[i])->u.fence.pending = false;
     zss_leave();
     return r;
 }
@@ -1861,10 +1917,14 @@ VKAPI_ATTR VkResult VKAPI_CALL zss_ResetFences(VkDevice device, uint32_t n, cons
 VKAPI_ATTR VkResult VKAPI_CALL zss_GetFenceStatus(VkDevice device, VkFence fence)
 {
     ENTER(device);
-    VkResult r = dev->fn.GetFenceStatus(dev->real, ZREAL(VkFence, fence));
+    VkResult r;
 
-    if (r == VK_SUCCESS)
+    ZSS_RETRY(dev, r, dev->fn.GetFenceStatus(dev->real, ZREAL(VkFence, fence)));
+    if (r == VK_SUCCESS) {
+        ZOBJ(fence)->u.fence.signaled = true;
+        ZOBJ(fence)->u.fence.pending = false;
         zss_sync_from_device(dev, NULL);
+    }
     zss_leave();
     return r;
 }
@@ -1900,8 +1960,19 @@ VKAPI_ATTR VkResult VKAPI_CALL zss_WaitForFences(VkDevice device, uint32_t n, co
         for (uint32_t i = 0; i < n; i++)
             real[i] = ZREAL(VkFence, fences[i]);
         r = dev->fn.WaitForFences(dev->real, n, real, wait_all, slice);
-        if (r == VK_SUCCESS)
+        if (zss_lost(dev, r)) {
+            /* The fences were rebuilt, and those tied to lost work are now signalled. */
+            zss_leave();
+            continue;
+        }
+        if (r == VK_SUCCESS) {
+            if (wait_all || n == 1)
+                for (uint32_t i = 0; i < n; i++) {
+                    ZOBJ(fences[i])->u.fence.signaled = true;
+                    ZOBJ(fences[i])->u.fence.pending = false;
+                }
             zss_sync_from_device(dev, NULL);
+        }
         zss_leave();
         if (r != VK_TIMEOUT || left <= slice)
             break;
@@ -1925,54 +1996,107 @@ VKAPI_ATTR VkResult VKAPI_CALL zss_CreateSemaphore(VkDevice device, const VkSema
 
 /* ---- queues ------------------------------------------------------------------ */
 
+uint32_t zss_submits;
+
+static void *stuck_thread(void *arg)
+{
+    usleep((useconds_t)(intptr_t)arg * 1000);
+    zss_leave();
+    return NULL;
+}
+
+/*
+ * Test aid. ZSS_TEST_LOSE_AT_SUBMIT=N makes the Nth submit behave as if the
+ * driver had reported the device lost, without issuing it. ZSS_TEST_STUCK_MS
+ * additionally keeps one thread inside the layer for that long, as a thread
+ * blocked in a dead driver would be.
+ */
+static bool inject_loss(void)
+{
+    static int at = -2;
+    static bool done;
+    const char *stuck = getenv("ZSS_TEST_STUCK_MS");
+
+    if (at == -2) {
+        const char *e = getenv("ZSS_TEST_LOSE_AT_SUBMIT");
+
+        at = e ? atoi(e) : -1;
+    }
+    if (done || at < 0 || (int)zss_submits + 1 != at)
+        return false;
+    done = true;
+    if (stuck) {
+        pthread_t tid;
+
+        /* Entered here, on behalf of the thread that will leave later. */
+        zss_enter();
+        if (pthread_create(&tid, NULL, stuck_thread, (void *)(intptr_t)atoi(stuck)) == 0)
+            pthread_detach(tid);
+        else
+            zss_leave();
+    }
+    return true;
+}
+
 VKAPI_ATTR VkResult VKAPI_CALL zss_QueueSubmit(VkQueue queue, uint32_t n, const VkSubmitInfo *submits,
                                                VkFence fence)
 {
     struct zss_queue *q = (struct zss_queue *)queue;
     struct zss_dev *dev = q->dev;
-    VkSubmitInfo *real;
-    void **scratch;
     VkResult r;
 
     zss_enter();
-    zss_sync_to_device(dev, NULL);
-    real = calloc(n + 1, sizeof(*real));
-    scratch = calloc(3 * (size_t)n + 1, sizeof(*scratch));
+    /* Repeated from the top after a loss: by then every real handle is new. */
+    do {
+        VkSubmitInfo *real = calloc(n + 1, sizeof(*real));
+        void **scratch = calloc(3 * (size_t)n + 1, sizeof(*scratch));
 
-    for (uint32_t i = 0; i < n; i++) {
-        const VkSubmitInfo *s = &submits[i];
-        VkSemaphore *waits = malloc((s->waitSemaphoreCount + 1) * sizeof(*waits));
-        VkCommandBuffer *cbs = malloc((s->commandBufferCount + 1) * sizeof(*cbs));
-        VkSemaphore *signals = malloc((s->signalSemaphoreCount + 1) * sizeof(*signals));
+        zss_sync_to_device(dev, NULL);
+        for (uint32_t i = 0; i < n; i++) {
+            const VkSubmitInfo *s = &submits[i];
+            VkSemaphore *waits = malloc((s->waitSemaphoreCount + 1) * sizeof(*waits));
+            VkCommandBuffer *cbs = malloc((s->commandBufferCount + 1) * sizeof(*cbs));
+            VkSemaphore *signals = malloc((s->signalSemaphoreCount + 1) * sizeof(*signals));
 
-        for (uint32_t j = 0; j < s->waitSemaphoreCount; j++) {
-            waits[j] = ZREAL(VkSemaphore, s->pWaitSemaphores[j]);
-            ZOBJ(s->pWaitSemaphores[j])->u.sem.signaled = false;
+            for (uint32_t j = 0; j < s->waitSemaphoreCount; j++)
+                waits[j] = ZREAL(VkSemaphore, s->pWaitSemaphores[j]);
+            for (uint32_t j = 0; j < s->commandBufferCount; j++)
+                cbs[j] = (VkCommandBuffer)(uintptr_t)((struct zss_obj *)s->pCommandBuffers[j])->r.h;
+            for (uint32_t j = 0; j < s->signalSemaphoreCount; j++)
+                signals[j] = ZREAL(VkSemaphore, s->pSignalSemaphores[j]);
+            real[i] = *s;
+            real[i].pNext = NULL;
+            real[i].pWaitSemaphores = waits;
+            real[i].pCommandBuffers = cbs;
+            real[i].pSignalSemaphores = signals;
+            scratch[3 * i] = waits;
+            scratch[3 * i + 1] = cbs;
+            scratch[3 * i + 2] = signals;
         }
-        for (uint32_t j = 0; j < s->commandBufferCount; j++) {
-            struct zss_obj *cb = (struct zss_obj *)s->pCommandBuffers[j];
+        r = inject_loss() ? VK_ERROR_DEVICE_LOST
+                          : dev->fn.QueueSubmit(q->real, n, real, ZREAL(VkFence, fence));
+        for (uint32_t i = 0; i < 3 * n; i++)
+            free(scratch[i]);
+        free(scratch);
+        free(real);
+    } while (zss_lost(dev, r));
 
-            cbs[j] = (VkCommandBuffer)(uintptr_t)cb->r.h;
-            zss_cmd_track_submit(dev, cb);
+    /* Bookkeeping only for work the device really accepted. */
+    if (r == VK_SUCCESS) {
+        zss_submits++;
+        for (uint32_t i = 0; i < n; i++) {
+            const VkSubmitInfo *s = &submits[i];
+
+            for (uint32_t j = 0; j < s->waitSemaphoreCount; j++)
+                ZOBJ(s->pWaitSemaphores[j])->u.sem.signaled = false;
+            for (uint32_t j = 0; j < s->commandBufferCount; j++)
+                zss_cmd_track_submit(dev, (struct zss_obj *)s->pCommandBuffers[j]);
+            for (uint32_t j = 0; j < s->signalSemaphoreCount; j++)
+                ZOBJ(s->pSignalSemaphores[j])->u.sem.signaled = true;
         }
-        for (uint32_t j = 0; j < s->signalSemaphoreCount; j++) {
-            signals[j] = ZREAL(VkSemaphore, s->pSignalSemaphores[j]);
-            ZOBJ(s->pSignalSemaphores[j])->u.sem.signaled = true;
-        }
-        real[i] = *s;
-        real[i].pNext = NULL;
-        real[i].pWaitSemaphores = waits;
-        real[i].pCommandBuffers = cbs;
-        real[i].pSignalSemaphores = signals;
-        scratch[3 * i] = waits;
-        scratch[3 * i + 1] = cbs;
-        scratch[3 * i + 2] = signals;
+        if (fence)
+            ZOBJ(fence)->u.fence.pending = true;
     }
-    r = dev->fn.QueueSubmit(q->real, n, real, ZREAL(VkFence, fence));
-    for (uint32_t i = 0; i < 3 * n; i++)
-        free(scratch[i]);
-    free(scratch);
-    free(real);
     zss_leave();
     return r;
 }
@@ -1983,7 +2107,7 @@ VKAPI_ATTR VkResult VKAPI_CALL zss_QueueWaitIdle(VkQueue queue)
     VkResult r;
 
     zss_enter();
-    r = q->dev->fn.QueueWaitIdle(q->real);
+    ZSS_RETRY(q->dev, r, q->dev->fn.QueueWaitIdle(q->real));
     zss_sync_from_device(q->dev, NULL);
     zss_leave();
     return r;
@@ -1992,8 +2116,9 @@ VKAPI_ATTR VkResult VKAPI_CALL zss_QueueWaitIdle(VkQueue queue)
 VKAPI_ATTR VkResult VKAPI_CALL zss_DeviceWaitIdle(VkDevice device)
 {
     ENTER(device);
-    VkResult r = dev->fn.DeviceWaitIdle(dev->real);
+    VkResult r;
 
+    ZSS_RETRY(dev, r, dev->fn.DeviceWaitIdle(dev->real));
     zss_sync_from_device(dev, NULL);
     zss_leave();
     return r;

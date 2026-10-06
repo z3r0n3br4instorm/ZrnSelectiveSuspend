@@ -22,6 +22,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "zss_retain.h"
+
 /* Every real-driver device entry point the layer calls. */
 #define ZSS_DEV_FNS(X) \
     X(DestroyDevice) X(GetDeviceQueue) X(QueueSubmit) X(QueueWaitIdle) X(DeviceWaitIdle) \
@@ -100,6 +102,7 @@ struct zss_surface {
     uintptr_t native[2];
     VkSurfaceKHR real;
     bool owned; /* created through the driver, so we destroy it */
+    void *link; /* the layer's own connection to the display server for this driver, or NULL */
 };
 
 /* One real vendor driver library. */
@@ -195,6 +198,8 @@ struct zss_obj {
             struct zss_obj *mem;
             VkDeviceSize mem_off;
             bool gpu_written;
+            bool filled; /* the GPU has written it, and no copy of that exists outside */
+            struct zss_ret ret; /* retained upload covering the whole buffer */
             uint8_t *saved;
         } buf;
         struct {
@@ -205,6 +210,10 @@ struct zss_obj {
             VkImageLayout *layout; /* [mip * arrayLayers + layer] */
             uint8_t *saved;
             VkDeviceSize saved_size;
+            /* Retained uploads, indexed [(mip * arrayLayers + layer) * 2 + (stencil ? 1 : 0)]. */
+            struct zss_ret *ret;
+            bool carried;    /* holds GPU-generated contents that later frames depend on */
+            bool unretained; /* received an upload that could not be retained */
         } img;
         struct { VkImageViewCreateInfo ci; } view;
         struct { VkSamplerCreateInfo ci; } sampler;
@@ -230,7 +239,7 @@ struct zss_obj {
             struct zss_obj **refs;
             uint32_t nrefs, caprefs;
         } cb;
-        struct { bool signaled; } fence;
+        struct { bool signaled, pending; } fence;
         struct { bool signaled; } sem;
         struct {
             VkSwapchainCreateInfoKHR ci;
@@ -270,6 +279,12 @@ struct zss_dev {
     bool migratable;
     char reason[128];
 
+    /* Loss handling (see migrate.c). */
+    bool lost;           /* the real device is gone; recovery is due */
+    bool dead;           /* recovery is impossible: the application gets the error */
+    uint32_t generation; /* bumped every time the real device is replaced */
+    int lost_contents;   /* objects zero-filled by the last recovery */
+
     /* Helpers on the current real device for copies during migration. */
     VkQueue util_queue;
     VkCommandPool util_pool;
@@ -308,7 +323,11 @@ PFN_vkVoidFunction zss_device_proc(const char *name);
 void zss_enter(void);
 void zss_leave(void);
 void zss_hold_begin(void);
+/* Gives up waiting after ms; the gate is closed either way. False if threads are still inside. */
+bool zss_hold_begin_timed(int ms);
 void zss_hold_end(void);
+extern uint32_t zss_epoch;
+bool zss_stale(void);
 
 /* device.c */
 VkResult zss_dev_create_real(struct zss_dev *dev, struct zss_gpu *gpu);
@@ -335,6 +354,7 @@ VkImageAspectFlags zss_format_aspects(VkFormat f);
 void zss_cmd_reset(struct zss_obj *cb);
 void zss_cmd_replay(struct zss_dev *dev, struct zss_obj *cb);
 void zss_cmd_track_submit(struct zss_dev *dev, struct zss_obj *cb);
+void zss_image_dirty(struct zss_obj *img, bool carried);
 
 /* swapchain.c */
 void zss_swapchain_retire(struct zss_dev *dev, struct zss_obj *sc);
@@ -351,10 +371,32 @@ enum zss_outcome { ZO_MIGRATED, ZO_PARKED, ZO_FAILED };
 enum zss_outcome zss_migrate(struct zss_dev *dev, struct zss_gpu *target, char *reason, size_t rlen);
 enum zss_outcome zss_resume(struct zss_dev *dev, struct zss_gpu *target, char *reason, size_t rlen);
 bool zss_compatible(struct zss_dev *dev, struct zss_gpu *target, char *reason, size_t rlen);
+/*
+ * The real device is lost: rebuild on target from what is held in memory.
+ * `abandon` leaves the old device alone because a thread is stuck inside it.
+ * Returns ZO_MIGRATED, ZO_PARKED, or ZO_FAILED for a device that cannot be recovered.
+ */
+enum zss_outcome zss_recover(struct zss_dev *dev, struct zss_gpu *target, bool abandon, char *reason,
+                             size_t rlen);
+/*
+ * For entry points: given the result of a real call, decides whether the
+ * call must be repeated because the device was lost and has been replaced.
+ * Called and returns inside the gate.
+ */
+bool zss_lost(struct zss_dev *dev, VkResult r);
+void zss_dev_unrecoverable(struct zss_dev *dev);
+VkDeviceSize zss_sub_size(const VkImageCreateInfo *ci, VkImageAspectFlags aspect, uint32_t mip);
+extern uint32_t zss_submits; /* submits completed by this process, for logs and tests */
+/* Repeats a real call for as long as the device it was made on turns out to be lost. */
+#define ZSS_RETRY(dev, r, call) do { (r) = (call); } while (zss_lost((dev), (r)))
 
 /* control.c */
 void zss_control_start(void);
 void zss_control_state_changed(void);
 bool zss_control_detached(const char *pci);
+bool zss_control_connected(void);
+void zss_control_report_lost(struct zss_dev *dev);
+/* No answer from a daemon: pick a target here. */
+void zss_control_recover_local(struct zss_dev *dev);
 
 #endif

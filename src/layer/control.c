@@ -19,6 +19,8 @@ static pthread_mutex_t send_lock = PTHREAD_MUTEX_INITIALIZER;
 static char detached[256]; /* comma-separated PCI addresses, from the welcome */
 static char last_state[ZSS_MAX_GPUS][256];
 static bool holding; /* gate held because something is parked */
+/* One relocation at a time, whether the daemon asked for it or a thread hit a lost device. */
+static pthread_mutex_t op_lock = PTHREAD_MUTEX_INITIALIZER;
 
 bool zss_control_detached(const char *pci)
 {
@@ -110,6 +112,27 @@ static bool any_parked(void)
     return false;
 }
 
+bool zss_control_connected(void)
+{
+    return sock >= 0;
+}
+
+/*
+ * Closes the gate for a recovery. Unlike a migration this cannot wait for
+ * ever: a thread may be stuck inside the dead driver. Returns false if the
+ * grace period ran out with threads still inside.
+ */
+static bool hold_for_loss(void)
+{
+    const char *grace = getenv("ZSS_LOSS_GRACE_MS");
+    bool empty = true;
+
+    if (!holding)
+        empty = zss_hold_begin_timed(grace ? atoi(grace) : 3000);
+    holding = true;
+    return empty;
+}
+
 static void hold(void)
 {
     if (!holding)
@@ -126,6 +149,8 @@ static void release(void)
     }
 }
 
+static int reply_lost_contents = -1; /* set by a recovery, sent with its outcome */
+
 static void reply(long long id, const char *result, const char *target, const char *error,
                   const char *reason)
 {
@@ -135,6 +160,9 @@ static void reply(long long id, const char *result, const char *target, const ch
     zj_add_int(&o, "id", id);
     zj_add_str(&o, "result", result);
     zj_add_str(&o, "target", target);
+    if (reply_lost_contents >= 0)
+        zj_add_int(&o, "lost_contents", reply_lost_contents);
+    reply_lost_contents = -1;
     if (error[0])
         zj_add_str(&o, "error", error);
     zj_add_str(&o, "reason", reason);
@@ -184,6 +212,106 @@ static void do_migrate(const struct zj_msg *m)
           worst == ZO_MIGRATED ? "migrated" : worst == ZO_PARKED ? "parked" : "failed",
           worst == ZO_MIGRATED ? gpu_name(target) : "", "", reason);
     zss_control_state_changed();
+}
+
+/*
+ * The GPU is lost. Nothing can be read from it, so each device on it is
+ * rebuilt from memory: on `to`, on the same GPU after a driver reset, or
+ * parked if there is nowhere suitable.
+ */
+static void do_evacuate(const struct zj_msg *m)
+{
+    struct zss_gpu *from = zss_gpu_by_pci(zj_str(m, "from", ""));
+    const char *to = zj_str(m, "to", "");
+    struct zss_gpu *target = from && !strcmp(to, from->pci) ? from : resolve_target(to);
+    enum zss_outcome worst = ZO_MIGRATED;
+    char reason[256] = "";
+    int lost = 0;
+    bool empty;
+
+    if (!from) {
+        reply(zj_int(m, "id", 0), "migrated", "", "", "this process does not use that GPU");
+        return;
+    }
+    empty = hold_for_loss();
+    for (struct zss_dev *d = zss_devices; d; d = d->next_dev) {
+        enum zss_outcome out;
+
+        if (d->gpu != from)
+            continue;
+        /* A reset that hit some other application: this device is fine where it is. */
+        if (target == from && !d->lost)
+            continue;
+        out = zss_recover(d, target, !empty, reason, sizeof(reason));
+        lost += d->lost_contents;
+        if (out == ZO_FAILED)
+            worst = ZO_FAILED;
+        else if (out == ZO_PARKED && worst != ZO_FAILED)
+            worst = ZO_PARKED;
+    }
+    if (target != from) {
+        from->detached = true;
+        zss_gpu_hold(from, false);
+        if (empty)
+            zss_driver_close(from->drv);
+    }
+    release();
+    reply_lost_contents = lost;
+    reply(zj_int(m, "id", 0),
+          worst == ZO_MIGRATED ? "migrated" : worst == ZO_PARKED ? "parked" : "failed",
+          worst == ZO_MIGRATED ? gpu_name(target) : "", "", reason);
+    zss_control_state_changed();
+}
+
+void zss_control_report_lost(struct zss_dev *dev)
+{
+    struct zj_out o;
+
+    if (sock < 0 || !dev->gpu || !dev->gpu->pci[0])
+        return;
+    zj_begin(&o, "lost");
+    zj_add_str(&o, "gpu", dev->gpu->pci);
+    send_msg(&o);
+}
+
+/*
+ * A thread hit a lost device and no daemon said where to go. Rebuild in
+ * place if the GPU still answers, otherwise on any other suitable GPU. If
+ * there is none, the device is left as it is and the application gets the
+ * error, exactly as it would without the layer.
+ */
+void zss_control_recover_local(struct zss_dev *dev)
+{
+    bool allow_software = getenv("ZSS_ALLOW_SOFTWARE") != NULL;
+    struct zss_gpu *target = NULL;
+    char reason[256] = "";
+
+    pthread_mutex_lock(&op_lock);
+    if (!dev->lost || dev->dead || !dev->gpu) {
+        pthread_mutex_unlock(&op_lock);
+        return;
+    }
+    if (!dev->gpu->detached && zss_compatible(dev, dev->gpu, reason, sizeof(reason)))
+        target = dev->gpu;
+    for (int i = 0; i < zss_ngpus && !target; i++) {
+        struct zss_gpu *g = zss_gpus[i];
+
+        if (g->detached || g == dev->gpu || (g->software && !allow_software))
+            continue;
+        if (zss_compatible(dev, g, reason, sizeof(reason)))
+            target = g;
+    }
+    if (!target) {
+        zss_log("no GPU can take over from the lost device: %s", reason[0] ? reason : "none is available");
+        zss_dev_unrecoverable(dev);
+    } else {
+        bool empty = hold_for_loss();
+
+        zss_recover(dev, target, !empty, reason, sizeof(reason));
+        release();
+        zss_control_state_changed();
+    }
+    pthread_mutex_unlock(&op_lock);
 }
 
 /* The GPU is back: bring home everything that started on it. */
@@ -262,12 +390,16 @@ static void *control_thread(void *arg)
 
     (void)arg;
     while (zss_recv(&reader, &m, -1) == 1) {
+        pthread_mutex_lock(&op_lock);
         if (zj_is(&m, "migrate"))
             do_migrate(&m);
+        else if (zj_is(&m, "evacuate"))
+            do_evacuate(&m);
         else if (zj_is(&m, "restore"))
             do_restore(&m);
         else if (zj_is(&m, "resume"))
             do_resume(&m);
+        pthread_mutex_unlock(&op_lock);
         zj_free(&m);
     }
     /* The daemon is gone. Do not leave a parked application stuck forever. */
@@ -275,6 +407,7 @@ static void *control_thread(void *arg)
     close(sock);
     sock = -1;
     pthread_mutex_unlock(&send_lock);
+    pthread_mutex_lock(&op_lock);
     if (holding) {
         char reason[256];
 
@@ -283,6 +416,7 @@ static void *control_thread(void *arg)
         resume_anywhere(reason, sizeof(reason));
         release();
     }
+    pthread_mutex_unlock(&op_lock);
     return NULL;
 }
 

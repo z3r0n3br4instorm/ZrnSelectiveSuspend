@@ -258,7 +258,155 @@ static const struct backend apple_gmux = {
     .is_powered = gmux_powered,
 };
 
-static const struct backend *const backends[] = { &dry_run, &pciehp_slot, &apple_gmux };
+/* ---- fake: a suspend-in-place device made of files, for tests ------------------------- */
+/*
+ * $ZSSD_FAKE_DIR holds:  power ("1"/"0")   events (appended log)   wake (counter)
+ *                        display (connector name, if "driving a display")
+ *                        fail_suspend (present: the driver refuses to suspend)
+ */
+
+static void fake_path(const char *name, char *out, size_t n)
+{
+    const char *dir = getenv("ZSSD_FAKE_DIR");
+
+    snprintf(out, n, "%s/%s", dir ? dir : "/nonexistent", name);
+}
+
+static void fake_event(const char *what)
+{
+    char path[400];
+    FILE *f;
+
+    fake_path("events", path, sizeof(path));
+    f = fopen(path, "a");
+    if (f) {
+        fprintf(f, "%s\n", what);
+        fclose(f);
+    }
+}
+
+static int fake_set(const char *value)
+{
+    char path[400];
+    FILE *f;
+
+    fake_path("power", path, sizeof(path));
+    f = fopen(path, "w");
+    if (!f)
+        return -1;
+    fputs(value, f);
+    fclose(f);
+    return 0;
+}
+
+static int fake_probe(struct gpu *g, char *err)
+{
+    (void)g;
+    if (!getenv("ZSSD_FAKE_DIR")) {
+        snprintf(err, ZSSD_ERR, "the fake backend needs ZSSD_FAKE_DIR");
+        return -1;
+    }
+    return 0;
+}
+
+static int fake_off(struct gpu *g, char *err)
+{
+    (void)g;
+    (void)err;
+    fake_event("power off");
+    return fake_set("0");
+}
+
+static int fake_on(struct gpu *g, char *err)
+{
+    (void)g;
+    (void)err;
+    fake_event("power on");
+    return fake_set("1");
+}
+
+static int fake_powered(struct gpu *g)
+{
+    char path[400], text[8];
+
+    (void)g;
+    fake_path("power", path, sizeof(path));
+    if (read_text(path, text, sizeof(text)) < 0)
+        return 1;
+    return text[0] != '0';
+}
+
+static int fake_suspend(struct gpu *g, char *err)
+{
+    char path[400];
+
+    (void)g;
+    fake_path("fail_suspend", path, sizeof(path));
+    if (path_exists(path)) {
+        snprintf(err, ZSSD_ERR, "the fake driver refused to suspend");
+        return -1;
+    }
+    fake_event("suspend");
+    return 0;
+}
+
+static int fake_resume(struct gpu *g, char *err)
+{
+    (void)g;
+    (void)err;
+    fake_event("resume");
+    return 0;
+}
+
+static bool fake_display(struct gpu *g, char *which, size_t n)
+{
+    char path[400];
+
+    (void)g;
+    fake_path("display", path, sizeof(path));
+    return read_text(path, which, n) == 0 && which[0];
+}
+
+static const char *fake_wake(struct gpu *g)
+{
+    static char path[400];
+
+    (void)g;
+    fake_path("wake", path, sizeof(path));
+    return path;
+}
+
+/* $ZSSD_FAKE_DIR/holders: process IDs to treat as having the device open. */
+static int fake_holders(struct gpu *g, pid_t *pids, int max)
+{
+    char path[400], text[256], *save = NULL;
+    int n = 0;
+
+    (void)g;
+    fake_path("holders", path, sizeof(path));
+    if (read_text(path, text, sizeof(text)) < 0)
+        return 0;
+    for (char *tok = strtok_r(text, " ,\n", &save); tok && n < max; tok = strtok_r(NULL, " ,\n", &save))
+        if (atoi(tok) > 0)
+            pids[n++] = (pid_t)atoi(tok);
+    return n;
+}
+
+static const struct backend fake = {
+    .name = "fake",
+    .strategy = RS_SUSPEND,
+    .probe = fake_probe,
+    .power_off = fake_off,
+    .power_on = fake_on,
+    .is_powered = fake_powered,
+    .suspend = fake_suspend,
+    .resume = fake_resume,
+    .drives_display = fake_display,
+    .wake_file = fake_wake,
+    .extra_holders = fake_holders,
+};
+
+static const struct backend *const backends[] = { &dry_run, &pciehp_slot, &apple_gmux, &fake };
 
 const struct backend *backend_by_name(const char *name)
 {
@@ -384,7 +532,14 @@ static int nvidia_resume(struct gpu *g, char *err)
 
     snprintf(path, sizeof(path), "/sys/bus/pci/devices/%s/config", g->pci);
     fd = open(path, O_WRONLY | O_CLOEXEC);
-    if (fd < 0 || pwrite(fd, g->config, g->config_len, 0) != (ssize_t)g->config_len) {
+    /*
+     * The card comes back blank. Base addresses and capabilities go in first
+     * and the command register last, so decoding is never enabled on unset
+     * addresses. This is the order run on the reference laptop.
+     */
+    if (fd < 0 || g->config_len < 64 ||
+        pwrite(fd, g->config + 0x10, g->config_len - 0x10, 0x10) != (ssize_t)(g->config_len - 0x10) ||
+        pwrite(fd, g->config + 0x0c, 4, 0x0c) != 4 || pwrite(fd, g->config + 0x04, 2, 0x04) != 2) {
         snprintf(err, ZSSD_ERR, "cannot restore PCI configuration of %s: %s", g->pci, strerror(errno));
         rc = -1;
     }
@@ -406,6 +561,8 @@ static int nvidia_resume(struct gpu *g, char *err)
 
 int driver_suspend(struct gpu *g, char *err)
 {
+    if (g->backend && g->backend->suspend)
+        return g->backend->suspend(g, err);
     if (!g->driver[0])
         return 0; /* nothing bound, nothing to quiesce */
     if (!strcmp(g->driver, "nvidia") && path_exists(NVIDIA_SUSPEND))
@@ -415,6 +572,8 @@ int driver_suspend(struct gpu *g, char *err)
 
 int driver_resume(struct gpu *g, char *err)
 {
+    if (g->backend && g->backend->resume)
+        return g->backend->resume(g, err);
     if (g->nvidia_suspended)
         return nvidia_resume(g, err);
     if (g->rpm_suspended)

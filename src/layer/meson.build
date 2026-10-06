@@ -1,5 +1,5 @@
 layer_lib = shared_library('zss_vk',
-  'icd.c', 'gate.c', 'device.c', 'cmd.c', 'swapchain.c', 'format.c', 'migrate.c', 'control.c',
+  'icd.c', 'gate.c', 'device.c', 'cmd.c', 'swapchain.c', 'format.c', 'migrate.c', 'control.c', 'retain.c',
   dependencies: [common_dep, vulkan_headers, wsi_headers, threads, dl],
   c_args: ['-fvisibility=hidden'],
   install: true)

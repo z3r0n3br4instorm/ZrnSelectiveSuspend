@@ -1,0 +1,317 @@
+ZSS wake-on-touch for the NVIDIA 470.256.02 kernel modules (revision 3)
+
+While the driver is suspended through /proc/driver/nvidia/suspend, every
+caller waits on a lock until the driver is resumed, in a loop with no timeout.
+The driver assumes a whole-system sleep, where callers are frozen; used to
+power one GPU off under a running desktop, it leaves X spinning for ever.
+
+With this patch a caller that finds the driver suspended records a wake
+request and sleeps. A daemon (zssd) waits on /proc/driver/nvidia/zss_wake,
+powers the GPU back on and resumes the driver, and the caller continues.
+
+  /proc/driver/nvidia/zss_wake                    first line: the request count; then
+                                                  "waiting N" and the process id of each
+                                                  waiting caller, one per line; poll()
+                                                  reports a change since the last read
+  /sys/module/nvidia/parameters/zss_wake_requests the same count, for diagnostics
+
+The list of waiters lets the daemon keep a GPU off that was switched off on
+request, and power it on only for a caller that cannot be left waiting (the
+display server).
+
+Nothing changes while the driver is running: the fast path is the same single
+trylock as before. Only the open kernel-interface layer is touched.
+
+Apply with -p1 in the driver source directory, or through DKMS (see
+packaging/zss-nvidia-patch).
+
+diff -u a/common/inc/nv-linux.h b/common/inc/nv-linux.h
+--- a/common/inc/nv-linux.h
++++ b/common/inc/nv-linux.h
+@@ -1628,18 +1628,39 @@
+  * the fake signals sent from the freezer in the kernel's system
+  * suspend/hibernate paths.
+  */
++void nv_zss_request_wake(void);
++void nv_zss_wait_done(void);
++unsigned int nv_zss_wake_count(void);
++int nv_zss_wake_text(char *text, int size);
++extern wait_queue_head_t nv_zss_wake_wq;
++
++/*
++ * ZSS: instead of spinning until a resume that may never come, ask for one
++ * and sleep. The fast path, taken whenever the driver is running, is the
++ * same single trylock as before.
++ */
+ static inline int nv_read_lock_system_pm_lock_interruptible(void)
+ {
+-    while (!down_read_trylock(&nv_system_pm_lock))
+-    {
+-        if (signal_pending(current))
+-            return -EINTR;
+-        cond_resched();
+-    }
+-    return 0;
++    int ret;
++
++    if (down_read_trylock(&nv_system_pm_lock))
++        return 0;
++    nv_zss_request_wake();
++    ret = down_read_interruptible(&nv_system_pm_lock) ? -EINTR : 0;
++    nv_zss_wait_done();
++    return ret;
++}
++
++static inline void nv_read_lock_system_pm_lock(void)
++{
++    if (down_read_trylock(&nv_system_pm_lock))
++        return;
++    nv_zss_request_wake();
++    down_read(&nv_system_pm_lock);
++    nv_zss_wait_done();
+ }
+ 
+-#define NV_READ_LOCK_SYSTEM_PM_LOCK()   down_read(&nv_system_pm_lock)
++#define NV_READ_LOCK_SYSTEM_PM_LOCK()   nv_read_lock_system_pm_lock()
+ #define NV_READ_LOCK_SYSTEM_PM_LOCK_INTERRUPTIBLE() \
+     nv_read_lock_system_pm_lock_interruptible()
+ #define NV_READ_UNLOCK_SYSTEM_PM_LOCK() up_read(&nv_system_pm_lock)
+diff -u a/nvidia/nv.c b/nvidia/nv.c
+--- a/nvidia/nv.c
++++ b/nvidia/nv.c
+@@ -106,6 +106,103 @@
+ 
+ struct rw_semaphore nv_system_pm_lock;
+ 
++/*
++ * ZSS wake-on-touch.
++ *
++ * While the driver is suspended through /proc/driver/nvidia/suspend, every
++ * caller waits on nv_system_pm_lock until someone writes "resume". Outside a
++ * real system sleep nobody will, unless told that a caller is waiting. Each
++ * caller that finds the lock held counts itself here and wakes anyone polling
++ * /proc/driver/nvidia/zss_wake; a daemon waiting there powers the GPU back on
++ * and resumes the driver. The same count is readable, for diagnostics, in
++ * /sys/module/nvidia/parameters/zss_wake_requests. Nothing changes while the
++ * driver is running.
++ *
++ * The file also lists who is waiting, so that the daemon can decide whose
++ * request is worth powering the GPU on for. A caller is listed from
++ * nv_zss_request_wake() until nv_zss_wait_done().
++ */
++#define NV_ZSS_MAX_WAITERS 32
++
++static unsigned int zss_wake_requests;
++module_param(zss_wake_requests, uint, 0444);
++DECLARE_WAIT_QUEUE_HEAD(nv_zss_wake_wq);
++
++static DEFINE_SPINLOCK(zss_waiters_lock);
++static unsigned int zss_waiting;
++static struct {
++    pid_t thread;
++    pid_t process;
++} zss_waiters[NV_ZSS_MAX_WAITERS];
++
++void nv_zss_request_wake(void)
++{
++    unsigned long flags;
++    int i;
++
++    spin_lock_irqsave(&zss_waiters_lock, flags);
++    zss_waiting++;
++    for (i = 0; i < NV_ZSS_MAX_WAITERS; i++)
++    {
++        if (zss_waiters[i].thread == 0)
++        {
++            zss_waiters[i].thread = current->pid;
++            zss_waiters[i].process = current->tgid;
++            break;
++        }
++    }
++    zss_wake_requests++;
++    spin_unlock_irqrestore(&zss_waiters_lock, flags);
++    wake_up_interruptible(&nv_zss_wake_wq);
++}
++EXPORT_SYMBOL(nv_zss_request_wake);
++
++void nv_zss_wait_done(void)
++{
++    unsigned long flags;
++    int i;
++
++    spin_lock_irqsave(&zss_waiters_lock, flags);
++    if (zss_waiting > 0)
++        zss_waiting--;
++    for (i = 0; i < NV_ZSS_MAX_WAITERS; i++)
++    {
++        if (zss_waiters[i].thread == current->pid)
++        {
++            zss_waiters[i].thread = 0;
++            break;
++        }
++    }
++    spin_unlock_irqrestore(&zss_waiters_lock, flags);
++}
++EXPORT_SYMBOL(nv_zss_wait_done);
++
++/*
++ * The contents of /proc/driver/nvidia/zss_wake: the request count, then
++ * "waiting N", then the process id of each listed waiter, one per line.
++ * N exceeds the number of lines when more callers wait than can be listed.
++ */
++int nv_zss_wake_text(char *text, int size)
++{
++    unsigned long flags;
++    int i, len;
++
++    spin_lock_irqsave(&zss_waiters_lock, flags);
++    len = scnprintf(text, size, "%u\nwaiting %u\n", zss_wake_requests, zss_waiting);
++    for (i = 0; i < NV_ZSS_MAX_WAITERS; i++)
++    {
++        if (zss_waiters[i].thread != 0)
++            len += scnprintf(text + len, size - len, "%d\n", zss_waiters[i].process);
++    }
++    spin_unlock_irqrestore(&zss_waiters_lock, flags);
++    return len;
++}
++
++unsigned int nv_zss_wake_count(void)
++{
++    return READ_ONCE(zss_wake_requests);
++}
++
+ #if defined(CONFIG_PM)
+ static nv_power_state_t nv_system_power_state;
+ static nv_pm_action_depth_t nv_system_pm_action_depth;
+diff -u a/nvidia/nv-mmap.c b/nvidia/nv-mmap.c
+--- a/nvidia/nv-mmap.c
++++ b/nvidia/nv-mmap.c
+@@ -230,6 +230,13 @@
+     // Wake up GPU and reinstate mappings only if we are not in S3/S4 entry
+     if (!down_read_trylock(&nv_system_pm_lock))
+     {
++        /*
++         * ZSS: the fault is retried as soon as this returns. Ask for a wake
++         * and give the resume a moment, rather than spin on the fault.
++         */
++        nv_zss_request_wake();
++        msleep_interruptible(20);
++        nv_zss_wait_done();
+         return VM_FAULT_NOPAGE;
+     }
+ 
+diff -u a/nvidia/nv-procfs.c b/nvidia/nv-procfs.c
+--- a/nvidia/nv-procfs.c
++++ b/nvidia/nv-procfs.c
+@@ -671,6 +671,58 @@
+     return single_open(file, nv_procfs_show_suspend, NULL);
+ }
+ 
++/*
++ * ZSS: /proc/driver/nvidia/zss_wake. Reads as the number of wake requests so
++ * far, followed by who is waiting; poll() reports it readable when that number
++ * has changed since this open file last read it. See nv_zss_request_wake()
++ * in nv.c.
++ */
++static int
++nv_procfs_open_zss_wake(
++    struct inode *inode,
++    struct file *file
++)
++{
++    file->private_data = (void *)(unsigned long)nv_zss_wake_count();
++    return 0;
++}
++
++static ssize_t
++nv_procfs_read_zss_wake(
++    struct file *file,
++    char __user *buffer,
++    size_t count,
++    loff_t *pos
++)
++{
++    unsigned int requests = nv_zss_wake_count();
++    char text[512];
++    int len = nv_zss_wake_text(text, sizeof(text));
++
++    file->private_data = (void *)(unsigned long)requests;
++    return simple_read_from_buffer(buffer, count, pos, text, len);
++}
++
++static __poll_t
++nv_procfs_poll_zss_wake(
++    struct file *file,
++    poll_table *wait
++)
++{
++    poll_wait(file, &nv_zss_wake_wq, wait);
++    if (nv_zss_wake_count() != (unsigned int)(unsigned long)file->private_data)
++        return EPOLLIN | EPOLLRDNORM | EPOLLPRI;
++    return 0;
++}
++
++static const nv_proc_ops_t nv_procfs_zss_wake_fops = {
++    NV_PROC_OPS_SET_OWNER()
++    .NV_PROC_OPS_OPEN    = nv_procfs_open_zss_wake,
++    .NV_PROC_OPS_READ    = nv_procfs_read_zss_wake,
++    .NV_PROC_OPS_LSEEK   = default_llseek,
++    .proc_poll           = nv_procfs_poll_zss_wake,
++};
++
+ static nv_proc_ops_t nv_procfs_suspend_fops = {
+      NV_PROC_OPS_SET_OWNER()
+     .NV_PROC_OPS_OPEN    = nv_procfs_open_suspend,
+@@ -1328,6 +1380,10 @@
+     if (!entry)
+         goto failed;
+ 
++    entry = NV_CREATE_PROC_FILE("zss_wake", proc_nvidia, zss_wake, NULL);
++    if (!entry)
++        goto failed;
++
+     entry = NV_CREATE_PROC_FILE("suspend", proc_nvidia, suspend, NULL);
+     if (!entry)
+         goto failed;
+diff -u a/nvidia-modeset/nvidia-modeset-linux.c b/nvidia-modeset/nvidia-modeset-linux.c
+--- a/nvidia-modeset/nvidia-modeset-linux.c
++++ b/nvidia-modeset/nvidia-modeset-linux.c
+@@ -281,21 +281,31 @@
+     return !down_read_trylock(&nvkms_pm_lock);
+ }
+ 
++/* ZSS wake-on-touch: see nv_zss_request_wake() in nvidia/nv.c. */
++extern void nv_zss_request_wake(void);
++extern void nv_zss_wait_done(void);
++
+ static inline int nvkms_read_lock_pm_lock_interruptible(void)
+ {
+-    while (!down_read_trylock(&nvkms_pm_lock)) {
+-        if (signal_pending(current)) {
+-            return -EINTR;
+-        }
+-        cond_resched();
+-    }
++    int ret;
+ 
+-    return 0;
++    if (down_read_trylock(&nvkms_pm_lock)) {
++        return 0;
++    }
++    nv_zss_request_wake();
++    ret = down_read_interruptible(&nvkms_pm_lock) ? -EINTR : 0;
++    nv_zss_wait_done();
++    return ret;
+ }
+ 
+ static inline void nvkms_read_lock_pm_lock(void)
+ {
++    if (down_read_trylock(&nvkms_pm_lock)) {
++        return;
++    }
++    nv_zss_request_wake();
+     down_read(&nvkms_pm_lock);
++    nv_zss_wait_done();
+ }
+ 
+ static inline void nvkms_read_unlock_pm_lock(void)

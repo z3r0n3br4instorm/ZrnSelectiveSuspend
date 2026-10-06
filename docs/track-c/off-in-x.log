@@ -1,0 +1,95 @@
+[  0.00] === dGPU off while the X session is on screen, for 60 s ===
+[  0.10] Xorg pid 1715077 on VT 2; gmux 0x03; vendor 0x10de; drivers nvidia / snd_hda_intel
+[  0.15] X check before, core protocol: ok in 0.02 s
+[  0.24] stop nvidia-persistenced: rc=0 
+[  0.46] chvt 63: rc=0 
+[  1.47] suspending the NVIDIA driver and cutting dGPU power
+[  1.53] unbind audio: ok
+[  1.60] nvidia suspend: ok
+[  1.94] gmux power off: port 0x00, vendor 0xffff
+[  1.95] returning to the desktop with the dGPU off
+[  1.98] chvt 2 with the dGPU off: rc=0  (0.01 s)
+[ 19.01] X check core protocol:         FAILED (rc 124) in 15.02 s -- timed out after 15 s
+[ 19.02] vendor still 0xffff; Xorg running; X NOT answering
+[ 24.04] ERROR: the X session stopped answering while the dGPU was off.
+[ 24.05] The dGPU is being powered back on now.
+[ 24.16] gmux power on: port 0x03, vendor 0x10de after 0.1 s
+[ 24.67] nvidia resume: ok
+[ 24.69] rebind audio: ok
+[ 24.71] chvt 2: rc=0 
+[ 24.79] start nvidia-persistenced: rc=0 
+[ 26.82] X check after, core protocol:  ok in 0.01 s
+[ 26.85] X check after, probe outputs:  ok in 0.02 s
+[ 26.86] after: gmux 0x03 vendor 0x10de drivers nvidia / snd_hda_intel
+[ 26.89] --- kernel log during the test ---
+[58037.707552] snd_hda_intel 0000:01:00.1: GPU sound probed, but not operational: please add a quirk to driver_denylist
+[58060.871093] snd_hda_intel 0000:01:00.1: Disabling MSI
+[58060.871107] snd_hda_intel 0000:01:00.1: Handle vga_switcheroo audio client
+[58060.902837] input: HDA NVidia HDMI/DP,pcm=3 as /devices/pci0000:00/0000:00:01.0/0000:01:00.1/sound/card1/input46
+[58060.903076] input: HDA NVidia HDMI/DP,pcm=7 as /devices/pci0000:00/0000:00:01.0/0000:01:00.1/sound/card1/input47
+[58060.907474] input: HDA NVidia HDMI/DP,pcm=8 as /devices/pci0000:00/0000:00:01.0/0000:01:00.1/sound/card1/input48
+[58060.907625] input: HDA NVidia HDMI/DP,pcm=9 as /devices/pci0000:00/0000:00:01.0/0000:01:00.1/sound/card1/input49
+[ 26.90] --- X log during the test ---
+18] (II) event2  - Sleep Button: device removed
+[ 58059.520] (II) AIGLX: Suspending AIGLX clients for VT switch
+[ 58059.675] (II) systemd-logind: got pause for 13:72
+[ 58059.675] (II) systemd-logind: got pause for 13:71
+[ 58059.675] (II) systemd-logind: got pause for 13:82
+[ 58059.675] (II) systemd-logind: got pause for 13:66
+[ 58059.675] (II) systemd-logind: got pause for 13:68
+[ 58059.675] (II) systemd-logind: got pause for 13:73
+[ 58059.675] (II) systemd-logind: got pause for 13:67
+[ 58059.675] (II) systemd-logind: got pause for 13:65
+[ 58059.696] (II) config/udev: Adding input device HDA NVidia HDMI/DP,pcm=7 (/dev/input/event6)
+[ 58059.697] (II) No input driver specified, ignoring this device.
+[ 58059.697] (II) This device may have been added with another device file.
+[ 58059.698] (II) config/udev: Adding input device HDA NVidia HDMI/DP,pcm=3 (/dev/input/event5)
+[ 58059.698] (II) No input driver specified, ignoring this device.
+[ 58059.698] (II) This device may have been added with another device file.
+[ 58059.701] (II) config/udev: Adding input device HDA NVidia HDMI/DP,pcm=8 (/dev/input/event13)
+[ 58059.701] (II) No input driver specified, ignoring this device.
+[ 58059.701] (II) This device may have been added with another device file.
+[ 58059.709] (II) config/udev: Adding input device HDA NVidia HDMI/DP,pcm=9 (/dev/input/event14)
+[ 58059.709] (II) No input driver specified, ignoring this device.
+[ 58059.709] (II) This device may have been added with another device file.
+[ 58061.573] (--) NVIDIA(GPU-0): DFP-0: disconnected
+[ 58061.573] (--) NVIDIA(GPU-0): DFP-0: Internal LVDS
+[ 58061.573] (--) NVIDIA(GPU-0): DFP-0: 330.0 MHz maximum pixel clock
+[ 58061.573] (--) NVIDIA(GPU-0): 
+[ 58061.573] (--) NVIDIA(GPU-0): DFP-1: disconnected
+[ 58061.573] (--) NVIDIA(GPU-0): DFP-1: Internal TMDS
+[ 58061.573] (--) NVIDIA(GPU-0): DFP-1: 165.0 MHz maximum pixel clock
+[ 58061.573] (--) NVIDIA(GPU-0): 
+[ 58061.573] (--) NVIDIA(GPU-0): DFP-2: disconnected
+[ 58061.573] (--) NVIDIA(GPU-0): DFP-2: Internal TMDS
+[ 58061.573] (--) NVIDIA(GPU-0): DFP-2: 165.0 MHz maximum pixel clock
+[ 58061.573] (--) NVIDIA(GPU-0): 
+[ 58061.574] (--) NVIDIA(GPU-0): DFP-3: disconnected
+[ 58061.574] (--) NVIDIA(GPU-0): DFP-3: Internal TMDS
+[ 58061.574] (--) NVIDIA(GPU-0): DFP-3: 165.0 MHz maximum pixel clock
+[ 58061.574] (--) NVIDIA(GPU-0): 
+[ 58061.574] (--) NVIDIA(GPU-0): DFP-4: disconnected
+[ 58061.574] (--) NVIDIA(GPU-0): DFP-4: Internal DisplayPort
+[ 58061.574] (--) NVIDIA(GPU-0): DFP-4: 480.0 MHz maximum pixel clock
+[ 58061.574] (--) NVIDIA(GPU-0): 
+[ 58061.574] (--) NVIDIA(GPU-0): DFP-5: disconnected
+[ 58061.574] (--) NVIDIA(GPU-0): DFP-5: Internal DisplayPort
+[ 58061.574] (--) NVIDIA(GPU-0): DFP-5: 480.0 MHz maximum pixel clock
+[ 58061.574] (--) NVIDIA(GPU-0): 
+[ 58061.574] (--) NVIDIA(GPU-0): DFP-6: disconnected
+[ 58061.574] (--) NVIDIA(GPU-0): DFP-6: Internal DisplayPort
+[ 58061.574] (--) NVIDIA(GPU-0): DFP-6: 480.0 MHz maximum pixel clock
+[ 58061.574] (--) NVIDIA(GPU-0):
+[ 26.92] === done: X STOPPED ANSWERING while the dGPU was off, fine afterwards ===
+
+[  0.00] === dGPU off while the X session is on screen, for 40 s ===
+[  0.07] Xorg pid 1715077 on VT 2; gmux 0x03; vendor 0x10de; drivers nvidia / snd_hda_intel
+[  0.11] X check before, core protocol: ok in 0.01 s
+[  0.18] stop nvidia-persistenced: rc=0 
+[  0.36] chvt 63: rc=0 
+[  1.38] suspending the NVIDIA driver and cutting dGPU power
+[  1.45] unbind audio: ok
+[  1.52] nvidia suspend: ok
+[  1.86] gmux power off: port 0x00, vendor 0xffff
+[  1.89] returning to the desktop with the dGPU off
+[  1.92] chvt 2 with the dGPU off: rc=0  (0.00 s)

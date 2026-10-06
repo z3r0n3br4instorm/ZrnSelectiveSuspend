@@ -1,0 +1,19 @@
+post_install() {
+    getent group zss >/dev/null || groupadd --system zss
+    echo "==> Set the GPU to manage in /etc/zss/zssd.conf, then: systemctl enable --now zssd"
+    echo "==> Add yourself to the 'zss' group to use 'zssctl off' and 'zssctl on'."
+    echo "==> To power the GPU off under a running desktop, the NVIDIA driver needs the"
+    echo "    wake-on-touch patch. See what applies with: zss-nvidia-patch status"
+    echo "    and apply it with:                          zss-nvidia-patch apply"
+}
+
+post_upgrade() {
+    systemctl daemon-reload
+}
+
+pre_remove() {
+    systemctl disable --now zssd.service >/dev/null 2>&1
+    /usr/local/sbin/zssd --recover >/dev/null 2>&1
+    /usr/local/sbin/zss-nvidia-patch remove
+    systemctl disable zss-nvidia-check.service >/dev/null 2>&1
+}

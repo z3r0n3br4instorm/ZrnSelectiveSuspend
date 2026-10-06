@@ -1,0 +1,155 @@
+#!/bin/bash
+# SPDX-License-Identifier: GPL-2.0
+#
+# zss-nvidia-patch: manages the wake-on-touch patch to the NVIDIA kernel modules.
+#
+#   status       what is installed, registered and running
+#   apply        register the patch with DKMS and rebuild the driver with it
+#   register     as apply, without rebuilding (for package-manager hooks that
+#                run before DKMS's own rebuild)
+#   remove       unregister the patch and rebuild the stock driver
+#   boot-check   load the driver; if it will not load, put the stock modules back
+#
+# The patch is applied by DKMS to its own copy of the source at build time;
+# the driver's source tree only gains the patch file and three lines in
+# dkms.conf, between markers. Only driver versions listed in
+# validated-versions are touched.
+#
+# Options: --source DIR      driver source (default /usr/src/nvidia-<version>)
+#          --patch-dir DIR   where the patch and validated-versions live
+#          --stock-dir DIR   where stock modules are kept (default /var/lib/zss)
+#          --no-dkms         change files only; do not build or install
+set -u
+
+PATCH_DIR="${ZSS_PATCH_DIR:-/usr/local/share/zss/patches}"
+STOCK_DIR=/var/lib/zss
+SOURCE=""
+USE_DKMS=1
+BEGIN="# >>> ZSS wake-on-touch (managed by zss-nvidia-patch; do not edit)"
+END="# <<< ZSS wake-on-touch"
+NAME=zss-wake-on-touch.patch
+
+say() { echo "zss-nvidia-patch: $*"; }
+die() { echo "zss-nvidia-patch: $*" >&2; exit 1; }
+
+cmd="${1:-}"; shift || true
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --source) SOURCE="$2"; shift 2 ;;
+        --patch-dir) PATCH_DIR="$2"; shift 2 ;;
+        --stock-dir) STOCK_DIR="$2"; shift 2 ;;
+        --no-dkms) USE_DKMS=0; shift ;;
+        *) die "unknown option $1" ;;
+    esac
+done
+
+find_source() {
+    [ -n "$SOURCE" ] && return 0
+    local d
+    for d in /usr/src/nvidia-[0-9]*; do
+        [ -f "$d/dkms.conf" ] && SOURCE="$d"
+    done
+    [ -n "$SOURCE" ]
+}
+
+version() { sed -n 's/^PACKAGE_VERSION="\(.*\)"/\1/p' "$SOURCE/dkms.conf" | head -1; }
+validated() { grep -qxF "$(version)" "$PATCH_DIR/validated-versions" 2>/dev/null; }
+patch_file() { echo "$PATCH_DIR/nvidia-$(version)-wake-on-touch.patch"; }
+registered() { grep -qF "$BEGIN" "$SOURCE/dkms.conf" 2>/dev/null; }
+running_has_wake() { [ -e /proc/driver/nvidia/zss_wake ] || [ -e /sys/module/nvidia/parameters/zss_wake_requests ]; }
+
+# The modules for one kernel, as the driver package's own build left them.
+keep_stock() {
+    local k="$1" dir="/usr/lib/modules/$1/updates/dkms" keep="$STOCK_DIR/nvidia-stock-$1"
+    [ -d "$keep" ] && return 0
+    ls "$dir"/nvidia*.ko* >/dev/null 2>&1 || return 0
+    # Never mistake an already patched build for the stock one.
+    modinfo -p "$dir"/nvidia.ko* 2>/dev/null | grep -q zss_wake && return 0
+    mkdir -p "$keep" && cp -a "$dir"/nvidia*.ko* "$keep"/ && say "stock modules for $k kept in $keep"
+}
+
+restore_stock() {
+    local k="$1" keep="$STOCK_DIR/nvidia-stock-$1"
+    [ -d "$keep" ] || return 1
+    cp -a "$keep"/nvidia*.ko* "/usr/lib/modules/$k/updates/dkms/" && depmod -a "$k"
+}
+
+rebuild() {
+    [ "$USE_DKMS" = 1 ] || return 0
+    local v k rc=0
+    v="$(version)"
+    for k in $(dkms status "nvidia/$v" 2>/dev/null | sed -n 's/^nvidia\/[^,]*, \([^,]*\),.*/\1/p'); do
+        [ -d "/usr/lib/modules/$k/build" ] || continue
+        say "rebuilding nvidia/$v for kernel $k"
+        dkms build "nvidia/$v" -k "$k" --force >/dev/null 2>&1 && dkms install "nvidia/$v" -k "$k" --force >/dev/null 2>&1 || rc=1
+    done
+    return $rc
+}
+
+do_register() {
+    find_source || die "no NVIDIA driver source with a dkms.conf found under /usr/src"
+    validated || die "driver version $(version) has not been validated with this patch; the driver is left as it is"
+    local p; p="$(patch_file)"
+    [ -f "$p" ] || die "no patch for driver version $(version) in $PATCH_DIR"
+    if registered; then
+        cmp -s "$p" "$SOURCE/patches/$NAME" && { say "already registered for $(version)"; return 0; }
+    fi
+    # The patch must apply to the source as shipped, or nothing is changed.
+    patch -p1 --dry-run -s -f -d "$SOURCE" < "$p" >/dev/null 2>&1 ||
+        die "the patch does not apply to the source in $SOURCE; the driver is left as it is"
+    mkdir -p "$SOURCE/patches" && cp "$p" "$SOURCE/patches/$NAME" || die "cannot write to $SOURCE"
+    if ! registered; then
+        cp -p "$SOURCE/dkms.conf" "$SOURCE/dkms.conf.zss-orig"
+        local n; n=$(grep -c '^PATCH\[' "$SOURCE/dkms.conf")
+        printf '%s\nPATCH[%s]="%s"\n%s\n' "$BEGIN" "$n" "$NAME" "$END" >> "$SOURCE/dkms.conf"
+    fi
+    say "registered with DKMS for driver $(version)"
+}
+
+case "$cmd" in
+status)
+    if ! find_source; then say "no NVIDIA driver source found"; exit 0; fi
+    say "driver source:        $SOURCE"
+    say "driver version:       $(version) ($(validated && echo validated || echo "not validated"))"
+    say "registered with DKMS: $(registered && echo yes || echo no)"
+    say "running driver:       $(running_has_wake && echo "has wake support" || echo "no wake support")"
+    ;;
+register)
+    do_register
+    ;;
+apply)
+    do_register
+    if [ "$USE_DKMS" = 1 ]; then
+        keep_stock "$(uname -r)"
+        rebuild || die "the patched driver did not build; run '$0 remove' to go back to the stock driver"
+        say "done; the patched driver loads at the next boot"
+    fi
+    ;;
+remove)
+    find_source || die "no NVIDIA driver source found"
+    if registered; then
+        sed -i "/^$(printf '%s' "$BEGIN" | sed 's/[][\/.*^$]/\\&/g')\$/,/^$(printf '%s' "$END" | sed 's/[][\/.*^$]/\\&/g')\$/d" "$SOURCE/dkms.conf"
+        rm -f "$SOURCE/patches/$NAME"
+        rmdir "$SOURCE/patches" 2>/dev/null
+        if [ -f "$SOURCE/dkms.conf.zss-orig" ]; then
+            cmp -s "$SOURCE/dkms.conf" "$SOURCE/dkms.conf.zss-orig" || say "warning: dkms.conf differs from the copy made before patching"
+            rm -f "$SOURCE/dkms.conf.zss-orig"
+        fi
+        say "unregistered"
+        rebuild || die "the stock driver did not rebuild; see 'dkms status'"
+    else
+        say "not registered; nothing to remove"
+    fi
+    ;;
+boot-check)
+    modprobe nvidia 2>/dev/null && exit 0
+    k="$(uname -r)"
+    say "the NVIDIA driver did not load; restoring the stock modules for $k"
+    restore_stock "$k" && modprobe nvidia && { say "stock driver loaded"; exit 0; }
+    die "could not restore a working driver for $k"
+    ;;
+*)
+    sed -n '3,22p' "$0" | sed 's/^# \{0,1\}//'
+    exit 2
+    ;;
+esac

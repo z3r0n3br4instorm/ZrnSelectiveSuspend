@@ -1,0 +1,47 @@
+[   0.00] === wake-on-touch, mode vt, at most 60 s off ===
+[   0.77] Xorg pid 996 on VT 2; gmux 0x03; vendor 0x10de; counter 0
+[   0.80] X check before:          ok in 0.01 s
+[   1.52] stop nvidia-persistenced: rc=0 
+[   2.37] chvt 63: rc=0 
+[   3.95] suspending the NVIDIA driver and cutting dGPU power
+[   4.61] unbind audio: ok
+[   5.37] nvidia suspend: ok (0.05 s)
+[   5.72] gmux power off: port 0x00, vendor 0xffff, counter 0
+[   6.18] returning to the desktop with the dGPU off
+[   6.21] chvt 2 with the dGPU off: rc=0 
+[   6.62] WAKE REQUEST: counter 0 -> 1, 0.92 s after power-off
+[   7.21]   waiting in the driver: Xorg(996): nvidia_ioctl
+[   8.35] power on and resume: gmux 0x03, vendor 0x10de, resume ok (0.54 s)
+[   8.49] rebind audio: ok
+[   8.56] start nvidia-persistenced: rc=0 
+[  11.17] X check after:           ok in 0.00 s
+[  11.69] X check after providers: ok in 0.29 s
+[  12.35] X check after outputs:   ok in 0.21 s
+[  12.77] after: gmux 0x03 vendor 0x10de drivers nvidia / snd_hda_intel; counter 1; active VT 2
+[  12.79] --- kernel log during the test (audio lines left out) ---
+(nothing)
+[  13.38] === done: X fine; wake request after 0.92 s ===
+
+[   0.00] === wake-on-touch, mode live, at most 60 s off ===
+[   0.68] Xorg pid 996 on VT 2; gmux 0x03; vendor 0x10de; counter 1
+[   1.33] X check before:          ok in 0.00 s
+[   1.98] stop nvidia-persistenced: rc=0 
+[   2.58] unbind audio: ok
+[   3.23] nvidia suspend with X on screen: ok (0.05 s)
+[   4.11] gmux power off: port 0x00, vendor 0xffff, counter 1
+[   9.11] probe started: xset q (counter 1)
+[   9.83] X check probe q:         ok in 0.00 s
+[  16.11] probe started: xrandr --listproviders (counter 1)
+[  16.84] WAKE REQUEST: counter 1 -> 2, 12.75 s after power-off
+[  17.44]   waiting in the driver: Xorg(996): nvkms_ioctl
+[  18.55] power on and resume: gmux 0x03, vendor 0x10de, resume ok (0.50 s)
+[  18.65] X check probe --listproviders: ok in 2.01 s
+[  18.72] rebind audio: ok
+[  18.81] start nvidia-persistenced: rc=0 
+[  21.44] X check after:           ok in 0.00 s
+[  21.83] X check after providers: ok in 0.30 s
+[  22.51] X check after outputs:   ok in 0.21 s
+[  23.03] after: gmux 0x03 vendor 0x10de drivers nvidia / snd_hda_intel; counter 343; active VT 2
+[  23.05] --- kernel log during the test (audio lines left out) ---
+(nothing)
+[  23.77] === done: X fine; wake request after 12.75 s ===

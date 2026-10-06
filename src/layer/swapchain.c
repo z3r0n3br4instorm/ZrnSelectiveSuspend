@@ -162,6 +162,11 @@ VKAPI_ATTR VkResult VKAPI_CALL zss_AcquireNextImageKHR(VkDevice device, VkSwapch
         }
         r = dev->fn.AcquireNextImageKHR(dev->real, ZREAL(VkSwapchainKHR, swapchain), slice,
                                         ZREAL(VkSemaphore, semaphore), ZREAL(VkFence, fence), index);
+        if (zss_lost(dev, r)) {
+            /* The swapchain went with the device; the application builds a new one. */
+            zss_leave();
+            return VK_ERROR_OUT_OF_DATE_KHR;
+        }
         if ((r == VK_SUCCESS || r == VK_SUBOPTIMAL_KHR) && semaphore)
             ZOBJ(semaphore)->u.sem.signaled = true;
         zss_leave();
@@ -216,6 +221,8 @@ VKAPI_ATTR VkResult VKAPI_CALL zss_QueuePresentKHR(VkQueue queue, const VkPresen
         real.pWaitSemaphores = waits;
         real.pSwapchains = chains;
         r = dev->fn.QueuePresentKHR(q->real, &real);
+        if (zss_lost(dev, r))
+            r = VK_ERROR_OUT_OF_DATE_KHR;
     }
     free(waits);
     free(chains);

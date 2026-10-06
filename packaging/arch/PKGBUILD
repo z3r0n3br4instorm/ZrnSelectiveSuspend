@@ -1,0 +1,24 @@
+# Maintainer: zerone
+# Builds ZrnSelectiveSuspend from this checkout: run `makepkg -si` in this directory.
+pkgname=zrn-selective-suspend
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="Move running Vulkan applications between GPUs and power a discrete GPU off under a running desktop"
+arch=('x86_64')
+license=('GPL-2.0-only')
+depends=('vulkan-icd-loader' 'systemd')
+makedepends=('meson' 'ninja' 'glslang' 'libxcb' 'libx11' 'wayland')
+optdepends=('dkms: to keep the NVIDIA wake-on-touch patch across kernel updates'
+            'pciutils: device names in progress messages')
+backup=('etc/zss/zssd.conf')
+install=zss.install
+
+build() {
+    meson setup "$srcdir/build" "$startdir/../.." --buildtype=release
+    ninja -C "$srcdir/build"
+}
+
+package() {
+    # The same script a manual install uses, pointed at the package root.
+    "$startdir/../install.sh" --build "$srcdir/build" --destdir "$pkgdir" --no-patch-driver
+}

@@ -281,9 +281,121 @@ static void set_layout(struct zss_obj *img, const VkImageSubresourceRange *r, Vk
             img->u.img.layout[m * ci->arrayLayers + l] = layout;
 }
 
+/* ---- what a submit does to contents ------------------------------------------- */
 /*
- * Called when a command buffer is submitted: its effects on image layouts
- * and on buffers the GPU writes are now real, and migration needs both.
+ * After a device is lost nothing can be read back from it, so the layer
+ * keeps track, submit by submit, of where each buffer's and image's contents
+ * came from: an upload it can retain, or the GPU itself.
+ */
+
+static uint32_t ret_index(const VkImageCreateInfo *ci, uint32_t mip, uint32_t layer, VkImageAspectFlags aspect)
+{
+    return (mip * ci->arrayLayers + layer) * 2 + (aspect == VK_IMAGE_ASPECT_STENCIL_BIT ? 1 : 0);
+}
+
+/* The GPU is about to produce this image's contents; uploads no longer describe it. */
+void zss_image_dirty(struct zss_obj *img, bool carried)
+{
+    const VkImageCreateInfo *ci = &img->u.img.ci;
+
+    if (img->kind != ZK_IMAGE)
+        return;
+    if (img->u.img.ret)
+        for (uint32_t i = 0; i < 2 * ci->mipLevels * ci->arrayLayers; i++)
+            zss_retain_release(&img->u.img.ret[i]);
+    img->u.img.unretained = false;
+    if (carried)
+        img->u.img.carried = true;
+}
+
+static void buffer_dirty(struct zss_obj *buf)
+{
+    zss_retain_release(&buf->u.buf.ret);
+    buf->u.buf.gpu_written = true;
+    buf->u.buf.filled = true;
+}
+
+/*
+ * Bytes of a buffer as the application supplied them: from the shadow of its
+ * mapped memory, or from an upload retained for it. NULL if neither exists.
+ * *tmp receives an allocation the caller frees.
+ */
+static const uint8_t *buffer_bytes(const struct zss_obj *buf, VkDeviceSize off, VkDeviceSize size, uint8_t **tmp)
+{
+    const struct zss_obj *m = buf->u.buf.mem;
+
+    *tmp = NULL;
+    if (off + size > buf->u.buf.ci.size)
+        return NULL;
+    if (m && m->u.mem.shadow && buf->u.buf.mem_off + off + size <= m->u.mem.size)
+        return m->u.mem.shadow + buf->u.buf.mem_off + off;
+    if (buf->u.buf.ret.valid && off + size <= buf->u.buf.ret.size) {
+        *tmp = malloc(buf->u.buf.ret.size);
+        if (zss_retain_get(&buf->u.buf.ret, *tmp))
+            return *tmp + off;
+    }
+    return NULL;
+}
+
+static void retain_image_upload(struct zss_obj *src, struct zss_obj *img, const VkBufferImageCopy *regions,
+                                uint32_t n)
+{
+    const VkImageCreateInfo *ci = &img->u.img.ci;
+
+    if (!img->u.img.ret)
+        return;
+    for (uint32_t i = 0; i < n; i++) {
+        const VkBufferImageCopy *r = &regions[i];
+        VkImageAspectFlags aspect = r->imageSubresource.aspectMask;
+        uint32_t mip = r->imageSubresource.mipLevel, layers = r->imageSubresource.layerCount;
+        uint32_t w = ci->extent.width >> mip, h = ci->extent.height >> mip, d = ci->extent.depth >> mip;
+        VkDeviceSize sub = zss_sub_size(ci, aspect, mip);
+        const uint8_t *bytes = NULL;
+        uint8_t *tmp = NULL;
+        /* Only whole, tightly packed subresources are kept; anything else is rare and fiddly. */
+        bool whole = sub && !r->imageOffset.x && !r->imageOffset.y && !r->imageOffset.z &&
+                     r->imageExtent.width == (w ? w : 1) && r->imageExtent.height == (h ? h : 1) &&
+                     r->imageExtent.depth == (d ? d : 1) &&
+                     (!r->bufferRowLength || r->bufferRowLength == r->imageExtent.width) &&
+                     (!r->bufferImageHeight || r->bufferImageHeight == r->imageExtent.height);
+
+        if (mip >= ci->mipLevels)
+            continue;
+        if (whole)
+            bytes = buffer_bytes(src, r->bufferOffset, sub * layers, &tmp);
+        for (uint32_t l = 0; l < layers && r->imageSubresource.baseArrayLayer + l < ci->arrayLayers; l++) {
+            struct zss_ret *ret = &img->u.img.ret[ret_index(ci, mip, r->imageSubresource.baseArrayLayer + l, aspect)];
+
+            zss_retain_release(ret);
+            if (!bytes || !zss_retain_put(bytes + l * sub, sub, ret))
+                img->u.img.unretained = true;
+        }
+        free(tmp);
+    }
+}
+
+/* A copy into a buffer the layer cannot read: keep the bytes if it replaces the whole buffer. */
+static void retain_buffer_copy(struct zss_obj *src, struct zss_obj *dst, const VkBufferCopy *regions, uint32_t n)
+{
+    const uint8_t *bytes;
+    uint8_t *tmp = NULL;
+
+    dst->u.buf.gpu_written = true;
+    if (dst->u.buf.mem && dst->u.buf.mem->u.mem.shadow)
+        return; /* its shadow is refreshed from the device after the next wait */
+    zss_retain_release(&dst->u.buf.ret);
+    dst->u.buf.filled = true;
+    if (n != 1 || regions[0].dstOffset != 0 || regions[0].size != dst->u.buf.ci.size)
+        return;
+    bytes = buffer_bytes(src, regions[0].srcOffset, regions[0].size, &tmp);
+    if (bytes && zss_retain_put(bytes, regions[0].size, &dst->u.buf.ret))
+        dst->u.buf.filled = false;
+    free(tmp);
+}
+
+/*
+ * Called once a submit has been accepted: the command buffer's effects on
+ * image layouts and on where contents come from are now real.
  */
 void zss_cmd_track_submit(struct zss_dev *dev, struct zss_obj *cb)
 {
@@ -304,22 +416,55 @@ void zss_cmd_track_submit(struct zss_dev *dev, struct zss_obj *cb)
 
             for (uint32_t i = 0; i < fb->attachmentCount && i < rp->attachmentCount; i++) {
                 struct zss_obj *view = ZOBJ(fb->pAttachments[i]);
+                const VkAttachmentDescription *att = &rp->pAttachments[i];
+                struct zss_obj *img;
 
-                if (view && view->u.view.ci.image)
-                    set_layout(ZOBJ(view->u.view.ci.image), &view->u.view.ci.subresourceRange,
-                               rp->pAttachments[i].finalLayout);
+                if (!view || !view->u.view.ci.image)
+                    continue;
+                img = ZOBJ(view->u.view.ci.image);
+                set_layout(img, &view->u.view.ci.subresourceRange, att->finalLayout);
+                /* Loading means later frames build on what is there now. */
+                zss_image_dirty(img, att->loadOp == VK_ATTACHMENT_LOAD_OP_LOAD ||
+                                         att->stencilLoadOp == VK_ATTACHMENT_LOAD_OP_LOAD);
             }
             break;
         }
+        case OP_COPY_BUFFER_TO_IMAGE:
+            if (c->h[0] && c->h[1])
+                retain_image_upload(c->h[0], c->h[1], c->a[0], c->n[0]);
+            break;
         case OP_COPY_BUFFER:
+            if (c->h[0] && c->h[1])
+                retain_buffer_copy(c->h[0], c->h[1], c->a[0], c->n[0]);
+            break;
         case OP_COPY_IMAGE_TO_BUFFER:
             if (c->h[1])
-                c->h[1]->u.buf.gpu_written = true;
+                buffer_dirty(c->h[1]);
             break;
         case OP_UPDATE_BUFFER:
+            if (c->h[0]) {
+                struct zss_obj *dst = c->h[0];
+
+                buffer_dirty(dst);
+                if (c->s[0] == 0 && c->s[1] == dst->u.buf.ci.size &&
+                    zss_retain_put(c->a[0], c->s[1], &dst->u.buf.ret))
+                    dst->u.buf.filled = false;
+            }
+            break;
         case OP_FILL_BUFFER:
             if (c->h[0])
-                c->h[0]->u.buf.gpu_written = true;
+                buffer_dirty(c->h[0]);
+            break;
+        case OP_COPY_IMAGE:
+        case OP_BLIT_IMAGE:
+        case OP_RESOLVE:
+            if (c->h[1])
+                zss_image_dirty(c->h[1], true);
+            break;
+        case OP_CLEAR_COLOR:
+        case OP_CLEAR_DS:
+            if (c->h[0])
+                zss_image_dirty(c->h[0], true);
             break;
         default:
             break;
@@ -347,7 +492,8 @@ VKAPI_ATTR VkResult VKAPI_CALL zss_BeginCommandBuffer(VkCommandBuffer cmd,
 
     zss_cmd_reset(cb);
     cb->u.cb.usage = info->flags;
-    cb->u.cb.state = ZC_RECORDING;
+    /* Not "recording" until the driver agrees: a rebuild must not begin it a second time. */
+    cb->u.cb.state = ZC_INITIAL;
     bi.pNext = NULL;
     if (cb->u.cb.level == VK_COMMAND_BUFFER_LEVEL_SECONDARY && info->pInheritanceInfo) {
         inh = *info->pInheritanceInfo;
@@ -357,7 +503,9 @@ VKAPI_ATTR VkResult VKAPI_CALL zss_BeginCommandBuffer(VkCommandBuffer cmd,
     } else {
         bi.pInheritanceInfo = NULL;
     }
-    r = dev->fn.BeginCommandBuffer(REAL_CB, &bi);
+    ZSS_RETRY(dev, r, dev->fn.BeginCommandBuffer(REAL_CB, &bi));
+    if (r == VK_SUCCESS)
+        cb->u.cb.state = ZC_RECORDING;
     zss_leave();
     return r;
 }
@@ -365,8 +513,10 @@ VKAPI_ATTR VkResult VKAPI_CALL zss_BeginCommandBuffer(VkCommandBuffer cmd,
 VKAPI_ATTR VkResult VKAPI_CALL zss_EndCommandBuffer(VkCommandBuffer cmd)
 {
     CB(cmd);
-    VkResult r = dev->fn.EndCommandBuffer(REAL_CB);
+    VkResult r;
 
+    /* After a loss the rebuild has replayed the recording; only the end is repeated. */
+    ZSS_RETRY(dev, r, dev->fn.EndCommandBuffer(REAL_CB));
     cb->u.cb.state = ZC_EXECUTABLE;
     zss_leave();
     return r;
@@ -376,8 +526,9 @@ VKAPI_ATTR VkResult VKAPI_CALL zss_ResetCommandBuffer(VkCommandBuffer cmd,
                                                       VkCommandBufferResetFlags flags)
 {
     CB(cmd);
-    VkResult r = dev->fn.ResetCommandBuffer(REAL_CB, flags);
+    VkResult r;
 
+    ZSS_RETRY(dev, r, dev->fn.ResetCommandBuffer(REAL_CB, flags));
     zss_cmd_reset(cb);
     cb->u.cb.state = ZC_INITIAL;
     zss_leave();

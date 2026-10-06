@@ -1,0 +1,13 @@
+# Re-registers the ZSS wake-on-touch patch after the NVIDIA DKMS package is
+# installed or upgraded. Runs before DKMS's own hook, which then builds the
+# driver with the patch included.
+[Trigger]
+Operation = Install
+Operation = Upgrade
+Type = Package
+Target = nvidia-*dkms
+
+[Action]
+Description = Registering the ZSS wake-on-touch patch with the NVIDIA driver...
+When = PostTransaction
+Exec = /usr/local/sbin/zss-nvidia-patch register

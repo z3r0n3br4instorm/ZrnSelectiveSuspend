@@ -1,0 +1,12 @@
+[Unit]
+Description=Check that the NVIDIA driver loads, restoring the stock modules if not
+Before=systemd-user-sessions.service display-manager.service zssd.service
+ConditionPathIsDirectory=/var/lib/zss
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/zss-nvidia-patch boot-check
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

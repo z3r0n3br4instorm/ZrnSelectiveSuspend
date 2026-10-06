@@ -25,7 +25,7 @@ BUILD = os.path.abspath(os.environ.get("ZSS_BUILD") or os.path.join(HERE, "..", 
 KERNEL_RELEASE = os.uname().release
 MODULES = ["fs/netfs/netfs", "net/9p/9pnet", "net/9p/9pnet_virtio", "fs/9p/9p", "drivers/gpu/drm/tiny/bochs"]
 GPU_ID, PORT_ID = "gpu1", "rp1"
-TIMEOUT = 420
+TIMEOUT = 540
 
 
 def build_initramfs(work):
@@ -124,6 +124,8 @@ def serve(qmp, work, log):
                 action = f.read().strip()
             result = "ok"
             if action == "unplug":
+                # Earlier removals left their events behind; only the one for this request counts.
+                qmp.events = [e for e in qmp.events if e["event"] != "DEVICE_DELETED"]
                 reply = qmp.command("device_del", id=GPU_ID)
                 if reply.get("error", {}).get("class") == "DeviceNotFound":
                     # QEMU drops the card by itself once the guest has powered the slot off.
@@ -132,13 +134,20 @@ def serve(qmp, work, log):
                     event = qmp.wait_event("DEVICE_DELETED", 30) if "return" in reply else None
                     result = "ok" if event else f"failed: {reply}"
             elif action == "plug":
-                reply = qmp.command("device_add", driver="bochs-display", id=GPU_ID, bus=PORT_ID)
+                # The guest sees the card leave the bus about a second before QEMU lets go of it.
+                for _ in range(40):
+                    reply = qmp.command("device_add", driver="bochs-display", id=GPU_ID, bus=PORT_ID)
+                    if "Duplicate device ID" not in reply.get("error", {}).get("desc", ""):
+                        break
+                    time.sleep(0.25)
                 result = "ok" if "return" in reply else f"failed: {reply}"
             else:
                 result = f"failed: unknown action {action}"
             log(f"host: {action} -> {result}")
-            with open(os.path.join(work, name.replace("req-", "ack-")), "w") as f:
+            ack = os.path.join(work, name.replace("req-", "ack-"))
+            with open(ack + ".tmp", "w") as f:
                 f.write(result + "\n")
+            os.rename(ack + ".tmp", ack)
         time.sleep(0.05)
     return False
 

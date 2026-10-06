@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: GPL-2.0
 """Shared helpers for the ZSS test harnesses."""
+import atexit
 import os
 import shutil
 import subprocess
@@ -15,6 +16,11 @@ TESTAPP = os.path.join(BUILD, "tests/zss-testapp")
 FAKE_PCI = "ffff:00:00.0"  # for software-only scenarios; no such device exists
 
 
+# Keep the retention store of test runs out of the user's real cache.
+CACHE = tempfile.mkdtemp(prefix="zss-cache-")
+atexit.register(shutil.rmtree, CACHE, True)
+
+
 class Failure(Exception):
     pass
 
@@ -27,6 +33,7 @@ def check(cond, message):
 def quiet_env(extra=None):
     env = dict(os.environ)
     env.pop("ZSS_DEBUG", None)
+    env["XDG_CACHE_HOME"] = CACHE
     if extra:
         env.update(extra)
     return env
@@ -35,14 +42,18 @@ def quiet_env(extra=None):
 class Daemon:
     """A zssd instance on a private socket."""
 
-    def __init__(self, *args, runtime_dir=None):
+    def __init__(self, *args, runtime_dir=None, daemon_env=None):
         # Unix socket paths are short; keep this one out of deep directories.
         base = runtime_dir or os.environ.get("XDG_RUNTIME_DIR") or "/tmp"
         self.dir = tempfile.mkdtemp(prefix="zss-", dir=base)
         self.socket = os.path.join(self.dir, "s")
         self.log = open(os.path.join(self.dir, "zssd.log"), "w+")
-        self.proc = subprocess.Popen([ZSSD, "--socket", self.socket, *args],
-                                     stdout=self.log, stderr=subprocess.STDOUT)
+        # The file is given explicitly so a system-wide /etc/zss/zssd.conf cannot leak into a test.
+        self.conf = os.path.join(self.dir, "zssd.conf")
+        open(self.conf, "w").close()
+        self.proc = subprocess.Popen([ZSSD, "--config", self.conf, "--socket", self.socket,
+                                      "--runtime-dir", self.dir, *args],
+                                     stdout=self.log, stderr=subprocess.STDOUT, env=daemon_env)
         deadline = time.time() + 5
         while not os.path.exists(self.socket):
             check(self.proc.poll() is None and time.time() < deadline,
@@ -114,6 +125,7 @@ class App:
             self.proc.kill()
             raise Failure("application did not finish")
         self.lines += out.split("\n")
+        self.stderr = err
         return self.proc.returncode, err
 
     def kill(self):
@@ -138,10 +150,10 @@ class App:
         return found
 
 
-def reference_frames(gpu, frames, out_dir, extra_env=None):
+def reference_frames(gpu, frames, out_dir, extra_env=None, extra_args=()):
     """Renders the reference: the same scene with no layer and no migration."""
     os.makedirs(out_dir, exist_ok=True)
-    r = subprocess.run([TESTAPP, "--gpu", gpu, "--frames", str(frames), "--out", out_dir],
+    r = subprocess.run([TESTAPP, "--gpu", gpu, "--frames", str(frames), "--out", out_dir, *map(str, extra_args)],
                        env=quiet_env(extra_env), capture_output=True, text=True, timeout=300)
     check(r.returncode == 0, f"reference run on {gpu} failed: {r.stderr[-400:]}")
 

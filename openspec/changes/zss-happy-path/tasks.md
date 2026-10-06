@@ -86,11 +86,11 @@
 
 ## 9. Track C (reference laptop, gated)
 
-- [ ] 9.1 Stop and obtain the user's explicit go-ahead before any task in this group
-- [ ] 9.2 Check that `zssd`'s first root run on the host detects the gmux and reads the dGPU's power state correctly, before anything is switched
-- [ ] 9.3 Investigate whether Xorg tolerates the NVIDIA driver being suspended under it or must release the device first, and whether NVIDIA-rendered applications can present without the X server's NVIDIA driver; record findings in `docs/`
-- [ ] 9.4 From a text console with no clients, run suspend in place: suspend the driver, power the dGPU off through `apple-gmux`, power it on, resume the driver, and confirm the GPU works; capture the kernel log and check it for errors
+- [x] 9.1 Stop and obtain the user's explicit go-ahead before any task in this group (given on 2026-10-06 for the suspend cycle; the surprise power cut was not approved)
+- [x] 9.2 Check that `zssd`'s first root run on the host detects the gmux and reads the dGPU's power state correctly, before anything is switched (classic gmux 1.9.35 detected, backend `apple-gmux` chosen, power state read correctly)
+- [x] 9.3 Investigate whether Xorg tolerates the NVIDIA driver being suspended under it or must release the device first, and whether NVIDIA-rendered applications can present without the X server's NVIDIA driver; record findings in `docs/` (X tolerates it when the session's VT is left first, as NVIDIA's sleep script does; X then keeps its NVIDIA driver, so the second question does not arise)
+- [x] 9.4 From a text console with no clients, run suspend in place: suspend the driver, power the dGPU off through `apple-gmux`, power it on, resume the driver, and confirm the GPU works; capture the kernel log and check it for errors (done with X running and switched away rather than stopped; three clean cycles, see `docs/track-c.md`)
 - [ ] 9.5 Separately, try the unbind strategy on the dGPU (remove, power-cycle, rescan) to learn whether cold probe works on this hardware; record the result without depending on it
-- [ ] 9.6 Run a full detach and attach with `zss-testapp` on the dGPU and compare frames
-- [ ] 9.7 Measure battery draw with the dGPU powered off against the baseline and record it
+- [ ] 9.6 Run a full detach and attach with `zss-testapp` on the dGPU and compare frames (done by hand: application migrated away, dGPU power-cycled, application returned, 300 frames match. Not yet through `zssd`'s own gmux path, which Xorg and `nvidia-persistenced` block by specification)
+- [x] 9.7 Measure battery draw with the dGPU powered off against the baseline and record it (one run: roughly 2 W saved at about 20 W idle; see `docs/track-c.md`)
 - [ ] 9.8 Record the outcome, limitations found and follow-up changes needed in `docs/`

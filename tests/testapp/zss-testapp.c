@@ -13,6 +13,10 @@
  *   - a depth buffer
  *   - a command buffer recorded once and reused
  *
+ * --forget-history-at N zeroes the history image before frame N. That is the
+ * picture a run is expected to produce after losing its GPU at frame N, since
+ * the history is the one thing here that only the GPU ever had.
+ *
  * Frames are written as raw RGBA8 to <out>/frame_NNNN.rgba.
  */
 #include <vulkan/vulkan.h>
@@ -276,7 +280,7 @@ static void fill_frame(struct frame_ubo *u, int f)
 int main(int argc, char **argv)
 {
     const char *gpu = getenv("ZSS_TESTAPP_GPU"), *out = ".";
-    int frames = 40, delay_ms = 0;
+    int frames = 40, delay_ms = 0, forget_at = -1;
     bool all_features = false, untracked = false, list = false;
     VkApplicationInfo app = { .sType = VK_STRUCTURE_TYPE_APPLICATION_INFO, .pApplicationName = "zss-testapp",
                               .apiVersion = VK_API_VERSION_1_0 };
@@ -292,12 +296,14 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--out") && i + 1 < argc) out = argv[++i];
         else if (!strcmp(argv[i], "--frames") && i + 1 < argc) frames = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--delay-ms") && i + 1 < argc) delay_ms = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--forget-history-at") && i + 1 < argc) forget_at = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--enable-all-features")) all_features = true;
         else if (!strcmp(argv[i], "--use-untracked")) untracked = true;
         else if (!strcmp(argv[i], "--list")) list = true;
         else {
             fputs("usage: zss-testapp [--gpu NAME] [--out DIR] [--frames N] [--delay-ms N]\n"
-                  "                   [--enable-all-features] [--use-untracked] [--list]\n", stderr);
+                  "                   [--enable-all-features] [--use-untracked] [--list]\n"
+                  "                   [--forget-history-at N]\n", stderr);
             return 2;
         }
     }
@@ -547,6 +553,16 @@ int main(int argc, char **argv)
 
             vkCmdCopyImageToBuffer(frame_cb, final, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, readback, 1, &down);
             CHECK(vkEndCommandBuffer(frame_cb));
+        }
+
+        if (f == forget_at) {
+            VkClearColorValue nothing = { .float32 = { 0, 0, 0, 0 } };
+
+            CHECK(vkBeginCommandBuffer(setup, &once));
+            layout(setup, history, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+            vkCmdClearColorImage(setup, history, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &nothing, 1, &whole);
+            layout(setup, history, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+            run_once(setup);
         }
 
         fill_frame(ubo_map, f);

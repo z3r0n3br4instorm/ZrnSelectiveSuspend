@@ -12,6 +12,8 @@ static int usage(void)
     fputs("usage: zssctl status [PCI]\n"
           "       zssctl detach PCI [--to PCI|software]\n"
           "       zssctl attach PCI\n"
+          "       zssctl off PCI [--to PCI|software] [--console]\n"
+          "       zssctl on PCI [--return]\n"
           "       zssctl resume PID\n"
           "       zssctl monitor\n",
           stderr);
@@ -24,7 +26,10 @@ static int show_result(struct zss_reader *rd)
     struct zj_msg m;
 
     while (zss_recv(rd, &m, -1) == 1) {
-        if (zj_is(&m, "blocker")) {
+        if (zj_is(&m, "progress")) {
+            printf("%s\n", zj_str(&m, "text", ""));
+            fflush(stdout);
+        } else if (zj_is(&m, "blocker")) {
             printf("%s %s (pid %lld, %s): %s\n", strstr(zj_str(&m, "class", ""), "ignored") ? "note:" : "blocked by",
                    zj_str(&m, "name", "?"), zj_int(&m, "pid", 0), zj_str(&m, "class", "?"),
                    zj_str(&m, "reason", ""));
@@ -54,10 +59,22 @@ static int show_status(struct zss_reader *rd)
 
     while (zss_recv(rd, &m, -1) == 1) {
         if (zj_is(&m, "gpu")) {
-            printf("%s  state=%s%s  backend=%s  removal=%s\n", zj_str(&m, "gpu", ""),
+            printf("%s  state=%s%s  backend=%s  removal=%s  wake=%s", zj_str(&m, "gpu", ""),
                    zj_str(&m, "state", ""), zj_bool(&m, "dry_run", false) ? " (dry run)" : "",
                    zj_str(&m, "backend", ""),
-                   zj_bool(&m, "removal_supported", false) ? "supported" : "not supported");
+                   zj_bool(&m, "removal_supported", false) ? "supported" : "not supported",
+                   zj_bool(&m, "wake_support", false) ? "yes" : "no");
+            if (zj_bool(&m, "serving", false))
+                printf("  (on for a moment for the display server)");
+            if (zj_int(&m, "served", 0))
+                printf("  served=%lld", zj_int(&m, "served", 0));
+            if (zj_int(&m, "waiting", 0))
+                printf("  waiting=%lld", zj_int(&m, "waiting", 0));
+            if (zj_int(&m, "wakes", 0))
+                printf("  woken=%lld", zj_int(&m, "wakes", 0));
+            if (zj_int(&m, "idle_wait", 0))
+                printf("  idle-off=%llds", zj_int(&m, "idle_wait", 0));
+            printf("\n");
         } else if (zj_is(&m, "client")) {
             const char *reason = zj_str(&m, "reason", "");
 
@@ -102,6 +119,28 @@ int main(int argc, char **argv)
         zj_add_str(&o, "gpu", argv[2]);
         if (argc >= 5 && !strcmp(argv[3], "--to"))
             zj_add_str(&o, "to", argv[4]);
+        zss_send(fd, &o);
+        return show_result(&rd);
+    }
+    if (!strcmp(argv[1], "off") && argc >= 3) {
+        zj_begin(&o, "off");
+        zj_add_str(&o, "gpu", argv[2]);
+        for (int i = 3; i < argc; i++) {
+            if (!strcmp(argv[i], "--to") && i + 1 < argc)
+                zj_add_str(&o, "to", argv[++i]);
+            else if (!strcmp(argv[i], "--console"))
+                zj_add_bool(&o, "console", true);
+            else
+                return usage();
+        }
+        zss_send(fd, &o);
+        return show_result(&rd);
+    }
+    if (!strcmp(argv[1], "on") && argc >= 3) {
+        zj_begin(&o, "on");
+        zj_add_str(&o, "gpu", argv[2]);
+        if (argc > 3 && !strcmp(argv[3], "--return"))
+            zj_add_bool(&o, "return", true);
         zss_send(fd, &o);
         return show_result(&rd);
     }

@@ -350,6 +350,8 @@ VkResult zss_driver_open(struct zss_driver *drv)
     return VK_SUCCESS;
 }
 
+static void x_link_close(VkIcdWsiPlatform platform, void *link);
+
 void zss_driver_close(struct zss_driver *drv)
 {
     if (!drv->inst || drv->ndevices > 0)
@@ -357,8 +359,11 @@ void zss_driver_close(struct zss_driver *drv)
     for (int i = 0; i < ZSS_MAX_SURFACES; i++)
         if (drv->surfaces[i].owned && drv->fn.DestroySurfaceKHR)
             drv->fn.DestroySurfaceKHR(drv->inst, drv->surfaces[i].real, NULL);
-    memset(drv->surfaces, 0, sizeof(drv->surfaces));
     drv->fn.DestroyInstance(drv->inst, NULL);
+    /* Only now, with the driver done, are its connections to the display server closed. */
+    for (int i = 0; i < ZSS_MAX_SURFACES; i++)
+        x_link_close(drv->surfaces[i].platform, drv->surfaces[i].link);
+    memset(drv->surfaces, 0, sizeof(drv->surfaces));
     drv->inst = VK_NULL_HANDLE;
     for (int g = 0; g < zss_ngpus; g++)
         if (zss_gpus[g]->drv == drv)
@@ -611,6 +616,64 @@ static void zss_init(void)
 
 /* ---- surfaces --------------------------------------------------------- */
 
+/*
+ * A driver is not given the application's connection to the X server but one
+ * of the layer's own, to the same server. The server keeps state for every
+ * client of a driver and tears it down, calling into that driver, when the
+ * client disconnects. With the application's connection that happens when the
+ * application exits, which may be long after its GPU was powered off, and the
+ * call then wakes the GPU. With a connection of its own the layer disconnects
+ * as it releases the driver, while the device is still there.
+ *
+ * libxcb and libX11 are looked up at run time: whichever the application uses
+ * is already loaded, and the layer must not require either.
+ */
+static void *x_link_open(VkIcdWsiPlatform platform, void *native)
+{
+    if (platform == VK_ICD_WSI_PLATFORM_XCB) {
+        void *lib = dlopen("libxcb.so.1", RTLD_NOW | RTLD_GLOBAL);
+        void *(*connect)(const char *, int *) = lib ? (void *(*)(const char *, int *))dlsym(lib, "xcb_connect") : NULL;
+        int (*has_error)(void *) = lib ? (int (*)(void *))dlsym(lib, "xcb_connection_has_error") : NULL;
+        void (*disconnect)(void *) = lib ? (void (*)(void *))dlsym(lib, "xcb_disconnect") : NULL;
+        void *c = connect && has_error && disconnect ? connect(NULL, NULL) : NULL;
+
+        if (c && has_error(c)) {
+            disconnect(c);
+            c = NULL;
+        }
+        return c;
+    }
+    if (platform == VK_ICD_WSI_PLATFORM_XLIB) {
+        void *lib = dlopen("libX11.so.6", RTLD_NOW | RTLD_GLOBAL);
+        void *(*open_display)(const char *) = lib ? (void *(*)(const char *))dlsym(lib, "XOpenDisplay") : NULL;
+        char *(*display_string)(void *) = lib ? (char *(*)(void *))dlsym(lib, "XDisplayString") : NULL;
+
+        return open_display && display_string ? open_display(display_string(native)) : NULL;
+    }
+    return NULL;
+}
+
+static void x_link_close(VkIcdWsiPlatform platform, void *link)
+{
+    void *lib;
+
+    if (!link)
+        return;
+    if (platform == VK_ICD_WSI_PLATFORM_XCB && (lib = dlopen("libxcb.so.1", RTLD_NOW | RTLD_NOLOAD))) {
+        void (*disconnect)(void *) = (void (*)(void *))dlsym(lib, "xcb_disconnect");
+
+        if (disconnect)
+            disconnect(link);
+        dlclose(lib);
+    } else if (platform == VK_ICD_WSI_PLATFORM_XLIB && (lib = dlopen("libX11.so.6", RTLD_NOW | RTLD_NOLOAD))) {
+        int (*close_display)(void *) = (int (*)(void *))dlsym(lib, "XCloseDisplay");
+
+        if (close_display)
+            close_display(link);
+        dlclose(lib);
+    }
+}
+
 VkResult zss_surface_real(struct zss_driver *drv, VkSurfaceKHR outer, VkSurfaceKHR *real)
 {
     VkIcdSurfaceBase *base = (VkIcdSurfaceBase *)(uintptr_t)outer;
@@ -647,6 +710,7 @@ VkResult zss_surface_real(struct zss_driver *drv, VkSurfaceKHR outer, VkSurfaceK
             /* The loader reused the address for a different window. */
             if (c->owned && drv->fn.DestroySurfaceKHR)
                 drv->fn.DestroySurfaceKHR(drv->inst, c->real, NULL);
+            x_link_close(c->platform, c->link);
             memset(c, 0, sizeof(*c));
         }
         if (!s && !c->outer)
@@ -665,6 +729,10 @@ VkResult zss_surface_real(struct zss_driver *drv, VkSurfaceKHR outer, VkSurfaceK
             .window = (xcb_window_t)want.native[1],
         };
 
+        want.link = x_link_open(base->platform, (void *)want.native[0]);
+        if (want.link)
+            ci.connection = want.link;
+
         r = drv->fn.CreateXcbSurfaceKHR(drv->inst, &ci, NULL, &want.real);
         want.owned = true;
     } else if (base->platform == VK_ICD_WSI_PLATFORM_XLIB && drv->fn.CreateXlibSurfaceKHR) {
@@ -673,6 +741,10 @@ VkResult zss_surface_real(struct zss_driver *drv, VkSurfaceKHR outer, VkSurfaceK
             .dpy = (void *)want.native[0],
             .window = (Window)want.native[1],
         };
+
+        want.link = x_link_open(base->platform, (void *)want.native[0]);
+        if (want.link)
+            ci.dpy = want.link;
 
         r = drv->fn.CreateXlibSurfaceKHR(drv->inst, &ci, NULL, &want.real);
         want.owned = true;
@@ -689,6 +761,8 @@ VkResult zss_surface_real(struct zss_driver *drv, VkSurfaceKHR outer, VkSurfaceK
     if (r == VK_SUCCESS) {
         *s = want;
         *real = want.real;
+    } else {
+        x_link_close(want.platform, want.link);
     }
 out:
     pthread_mutex_unlock(&zss_lock);
@@ -770,6 +844,7 @@ static VKAPI_ATTR void VKAPI_CALL zss_DestroySurfaceKHR(VkInstance instance, VkS
                 continue;
             if (c->owned && drivers[d].inst && drivers[d].fn.DestroySurfaceKHR)
                 drivers[d].fn.DestroySurfaceKHR(drivers[d].inst, c->real, NULL);
+            x_link_close(c->platform, c->link);
             memset(c, 0, sizeof(*c));
         }
     }

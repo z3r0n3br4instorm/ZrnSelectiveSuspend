@@ -18,6 +18,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 bool zss_families_fit(const struct zss_dev *dev, const struct zss_gpu *gpu);
 
@@ -134,7 +135,7 @@ static uint32_t mip_dim(uint32_t v, uint32_t mip)
     return v ? v : 1;
 }
 
-static VkDeviceSize sub_size(const VkImageCreateInfo *ci, VkImageAspectFlags aspect, uint32_t mip)
+VkDeviceSize zss_sub_size(const VkImageCreateInfo *ci, VkImageAspectFlags aspect, uint32_t mip)
 {
     struct zss_format_info fi;
     uint32_t w = mip_dim(ci->extent.width, mip), h = mip_dim(ci->extent.height, mip);
@@ -154,7 +155,7 @@ static VkDeviceSize blob_size(const struct zss_obj *o)
     for (uint32_t m = 0; m < ci->mipLevels; m++)
         for (VkImageAspectFlags bit = 1; bit <= VK_IMAGE_ASPECT_STENCIL_BIT; bit <<= 1)
             if (aspects & bit)
-                total += sub_size(ci, bit, m) * ci->arrayLayers;
+                total += zss_sub_size(ci, bit, m) * ci->arrayLayers;
     return total;
 }
 
@@ -212,7 +213,7 @@ static void copy_subresources(struct zss_dev *dev, struct zss_obj *o, VkBuffer s
 
                 if (!(aspects & bit))
                     continue;
-                off += sub_size(ci, bit, m);
+                off += zss_sub_size(ci, bit, m);
                 if (!live)
                     continue;
                 if (to_image)
@@ -521,6 +522,158 @@ bool zss_compatible(struct zss_dev *dev, struct zss_gpu *target, char *reason, s
     return true;
 }
 
+/* ---- contents after a loss ------------------------------------------------------- */
+
+/*
+ * With the device gone, nothing can be read back. Fills each object's saved
+ * contents from what is held outside the device instead: the shadow of
+ * mapped memory, then retained uploads. Contents that only the GPU had are
+ * replaced by zeros and counted. Afterwards the normal build restores from
+ * the saved contents as it does after a capture.
+ */
+static int prepare_from_memory(struct zss_dev *dev)
+{
+    int lost = 0;
+
+    for (struct zss_obj *o = dev->head; o; o = o->next) {
+        if (o->dead)
+            continue;
+        if (o->kind == ZK_BUFFER && o->r.backing) {
+            const struct zss_obj *m = o->u.buf.mem;
+            VkDeviceSize size = o->u.buf.ci.size;
+
+            free(o->u.buf.saved);
+            o->u.buf.saved = NULL;
+            if (m && m->u.mem.shadow && o->u.buf.mem_off + size <= m->u.mem.size) {
+                o->u.buf.saved = malloc(size ? size : 1);
+                memcpy(o->u.buf.saved, m->u.mem.shadow + o->u.buf.mem_off, size);
+            } else if (o->u.buf.ret.valid && o->u.buf.ret.size == size) {
+                o->u.buf.saved = calloc(1, size ? size : 1);
+                if (!zss_retain_get(&o->u.buf.ret, o->u.buf.saved))
+                    lost++;
+            } else if (o->u.buf.filled) {
+                o->u.buf.saved = calloc(1, size ? size : 1);
+                lost++;
+            }
+        } else if (o->kind == ZK_FENCE) {
+            /* Whatever it was waiting for will never finish; do not let the application wait for it. */
+            o->u.fence.signaled = o->u.fence.signaled || o->u.fence.pending;
+            o->u.fence.pending = false;
+        } else if (o->kind == ZK_IMAGE && o->r.backing && !o->u.img.swapchain) {
+            const VkImageCreateInfo *ci = &o->u.img.ci;
+            VkImageAspectFlags aspects = zss_format_aspects(ci->format);
+            VkDeviceSize size = blob_size(o), off = 0;
+            bool missing = false;
+
+            free(o->u.img.saved);
+            o->u.img.saved = NULL;
+            if (!size || !has_contents(o) || ci->samples != VK_SAMPLE_COUNT_1_BIT)
+                continue;
+            o->u.img.saved = calloc(1, size);
+            o->u.img.saved_size = size;
+            /* Same walk as copy_subresources, so offsets agree. */
+            for (uint32_t m = 0; m < ci->mipLevels; m++) {
+                for (uint32_t l = 0; l < ci->arrayLayers; l++) {
+                    for (VkImageAspectFlags bit = 1; bit <= VK_IMAGE_ASPECT_STENCIL_BIT; bit <<= 1) {
+                        struct zss_ret *ret;
+                        VkDeviceSize sub;
+
+                        if (!(aspects & bit))
+                            continue;
+                        sub = zss_sub_size(ci, bit, m);
+                        ret = &o->u.img.ret[(m * ci->arrayLayers + l) * 2 + (bit == VK_IMAGE_ASPECT_STENCIL_BIT)];
+                        if (ret->valid && ret->size == sub && !zss_retain_get(ret, o->u.img.saved + off))
+                            missing = true;
+                        off += sub;
+                    }
+                }
+            }
+            /* An image that is cleared and redrawn every frame has nothing worth counting. */
+            if (missing || o->u.img.carried || o->u.img.unretained)
+                lost++;
+        }
+    }
+    return lost;
+}
+
+/* ---- waiting for a recovery ------------------------------------------------------ */
+
+static pthread_mutex_t rec_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t rec_cv = PTHREAD_COND_INITIALIZER;
+
+/* The device has a new real device behind it: wake everyone waiting on the old one. */
+static void rebuilt(struct zss_dev *dev)
+{
+    pthread_mutex_lock(&rec_lock);
+    dev->generation++;
+    zss_epoch++;
+    dev->lost = false;
+    pthread_cond_broadcast(&rec_cv);
+    pthread_mutex_unlock(&rec_lock);
+}
+
+void zss_dev_unrecoverable(struct zss_dev *dev)
+{
+    pthread_mutex_lock(&rec_lock);
+    dev->dead = true;
+    pthread_cond_broadcast(&rec_cv);
+    pthread_mutex_unlock(&rec_lock);
+}
+
+#define ZSS_EVACUATE_WAIT_S 5
+
+bool zss_lost(struct zss_dev *dev, VkResult r)
+{
+    struct timespec until;
+    bool first, asked_locally = false;
+    uint32_t gen;
+
+    if (r != VK_ERROR_DEVICE_LOST || dev->dead || !dev->migratable)
+        return false;
+    /*
+     * A thread that was left behind in the dead driver and has only now come
+     * back: the recovery it needs has already happened. Rejoin and repeat.
+     */
+    if (zss_stale()) {
+        zss_leave();
+        zss_enter();
+        return true;
+    }
+
+    pthread_mutex_lock(&rec_lock);
+    gen = dev->generation;
+    first = !dev->lost;
+    dev->lost = true;
+    pthread_mutex_unlock(&rec_lock);
+
+    /* Out of the gate, so the recovery can close it. */
+    zss_leave();
+    if (first) {
+        zss_log("the device on %s was lost; waiting to be rebuilt", dev->gpu ? dev->gpu->props.deviceName : "?");
+        zss_control_report_lost(dev);
+    }
+
+    /* Give the daemon a moment to say where to go; without one, decide at once. */
+    clock_gettime(CLOCK_REALTIME, &until);
+    until.tv_sec += zss_control_connected() ? ZSS_EVACUATE_WAIT_S : 0;
+    pthread_mutex_lock(&rec_lock);
+    while (dev->generation == gen && !dev->dead) {
+        if (asked_locally) {
+            pthread_cond_wait(&rec_cv, &rec_lock);
+        } else if (pthread_cond_timedwait(&rec_cv, &rec_lock, &until) != 0) {
+            /* No daemon, or it did not answer: decide here. A parked result keeps us waiting. */
+            asked_locally = true;
+            pthread_mutex_unlock(&rec_lock);
+            zss_control_recover_local(dev);
+            pthread_mutex_lock(&rec_lock);
+        }
+    }
+    pthread_mutex_unlock(&rec_lock);
+
+    zss_enter();
+    return !dev->dead;
+}
+
 /* ---- entry points ------------------------------------------------------------- */
 
 enum zss_outcome zss_resume(struct zss_dev *dev, struct zss_gpu *target, char *reason, size_t rlen)
@@ -540,51 +693,68 @@ enum zss_outcome zss_resume(struct zss_dev *dev, struct zss_gpu *target, char *r
         return ZO_FAILED;
     }
     free_saved(dev);
+    rebuilt(dev);
     return ZO_MIGRATED;
 }
 
-enum zss_outcome zss_migrate(struct zss_dev *dev, struct zss_gpu *target, char *reason, size_t rlen)
+/*
+ * Moves a device to `target`, or parks it when target is NULL or unsuitable.
+ * `lost` means the source cannot be read or trusted: contents come from
+ * memory, a failed build cannot fall back to the source, and its teardown
+ * is best effort. `abandon` skips that teardown altogether.
+ */
+static enum zss_outcome relocate(struct zss_dev *dev, struct zss_gpu *target, bool lost, bool abandon,
+                                 char *reason, size_t rlen)
 {
     struct zss_real *snap;
     struct ctx old, new;
+    bool have_new = false;
     uint32_t n = 0, i;
     VkResult r;
 
     if (!dev->gpu)
         return target ? zss_resume(dev, target, reason, rlen) : ZO_PARKED;
-    if (target == dev->gpu)
+    if (target == dev->gpu && !lost)
         return ZO_MIGRATED;
     if (!dev->migratable) {
         snprintf(reason, rlen, "%s", dev->reason);
+        if (lost)
+            zss_dev_unrecoverable(dev);
         return ZO_FAILED;
     }
 
-    /*
-     * A linear image the application fills through a mapping is laid out by
-     * one driver; its bytes mean nothing to another. Once uploaded it moves
-     * like any image, but not while the upload is still in progress.
-     */
-    for (struct zss_obj *o = dev->head; o; o = o->next) {
-        if (o->kind != ZK_IMAGE || o->dead || !o->r.map || !o->u.img.mem)
-            continue;
-        if (o->u.img.mem->u.mem.mapped || o->u.img.layout[0] == VK_IMAGE_LAYOUT_PREINITIALIZED) {
-            snprintf(reason, rlen, "an image is being filled through mapped memory; retry in a moment");
-            return ZO_FAILED;
+    if (!lost) {
+        /*
+         * A linear image the application fills through a mapping is laid out by
+         * one driver; its bytes mean nothing to another. Once uploaded it moves
+         * like any image, but not while the upload is still in progress.
+         */
+        for (struct zss_obj *o = dev->head; o; o = o->next) {
+            if (o->kind != ZK_IMAGE || o->dead || !o->r.map || !o->u.img.mem)
+                continue;
+            if (o->u.img.mem->u.mem.mapped || o->u.img.layout[0] == VK_IMAGE_LAYOUT_PREINITIALIZED) {
+                snprintf(reason, rlen, "an image is being filled through mapped memory; retry in a moment");
+                return ZO_FAILED;
+            }
         }
+        dev->fn.DeviceWaitIdle(dev->real);
+        zss_sync_from_device(dev, NULL);
     }
-
-    dev->fn.DeviceWaitIdle(dev->real);
-    zss_sync_from_device(dev, NULL);
     /* An unsuitable target is not an error: the application waits for a better one. */
     if (target && !zss_compatible(dev, target, reason, rlen))
         target = NULL;
 
-    r = capture(dev);
-    if (r != VK_SUCCESS) {
-        free_saved(dev);
-        snprintf(reason, rlen, "could not read state back from %s (VkResult %d)",
-                 dev->gpu->props.deviceName, r);
-        return ZO_FAILED;
+    dev->lost_contents = 0;
+    if (lost) {
+        dev->lost_contents = prepare_from_memory(dev);
+    } else {
+        r = capture(dev);
+        if (r != VK_SUCCESS) {
+            free_saved(dev);
+            snprintf(reason, rlen, "could not read state back from %s (VkResult %d)",
+                     dev->gpu->props.deviceName, r);
+            return ZO_FAILED;
+        }
     }
 
     for (struct zss_obj *o = dev->head; o; o = o->next)
@@ -600,35 +770,53 @@ enum zss_outcome zss_migrate(struct zss_dev *dev, struct zss_gpu *target, char *
     if (target) {
         ctx_clear(dev);
         r = build(dev, target);
-        if (r != VK_SUCCESS) {
+        if (r == VK_SUCCESS) {
+            ctx_save(dev, &new);
+            have_new = true;
+        } else {
             teardown(dev);
-            ctx_load(dev, &old);
-            i = 0;
-            for (struct zss_obj *o = dev->head; o; o = o->next) {
-                o->r = snap[i++];
-                if (o->kind == ZK_SWAPCHAIN)
-                    o->u.sc.retired = o->r.h == 0;
-            }
-            free(snap);
-            free_saved(dev);
             snprintf(reason, rlen, "%s rejected a resource the application needs (VkResult %d)",
                      target->props.deviceName, r);
-            return ZO_FAILED;
+            if (!lost) {
+                /* The source is intact: put everything back as it was. */
+                ctx_load(dev, &old);
+                i = 0;
+                for (struct zss_obj *o = dev->head; o; o = o->next) {
+                    o->r = snap[i++];
+                    if (o->kind == ZK_SWAPCHAIN)
+                        o->u.sc.retired = o->r.h == 0;
+                }
+                free(snap);
+                free_saved(dev);
+                return ZO_FAILED;
+            }
+            /* There is no source to go back to. Park, and try again when a GPU turns up. */
+            for (struct zss_obj *o = dev->head; o; o = o->next)
+                o->r = (struct zss_real){ 0 };
+            target = NULL;
         }
-        ctx_save(dev, &new);
     }
 
     /* Commit: the source's objects go in reverse creation order, then its device. */
     ctx_load(dev, &old);
-    i = n;
-    for (struct zss_obj *o = dev->tail; o; o = o->prev) {
-        i--;
-        zss_real_destroy(dev, o->kind, &snap[i]);
+    if (abandon) {
+        /*
+         * A thread is still inside the old driver. Destroying the device
+         * under it would be worse than leaking it. Its driver stays loaded.
+         */
+        zss_log("abandoning the lost device on %s: a thread is still inside its driver",
+                dev->gpu->props.deviceName);
+    } else {
+        i = n;
+        for (struct zss_obj *o = dev->tail; o; o = o->prev) {
+            i--;
+            zss_real_destroy(dev, o->kind, &snap[i]);
+        }
+        zss_dev_destroy_real(dev);
     }
-    zss_dev_destroy_real(dev);
     free(snap);
 
-    if (!target) {
+    if (!have_new) {
         for (struct zss_obj *o = dev->head; o; o = o->next)
             if (o->kind == ZK_SWAPCHAIN)
                 o->u.sc.retired = true;
@@ -637,5 +825,32 @@ enum zss_outcome zss_migrate(struct zss_dev *dev, struct zss_gpu *target, char *
     }
     ctx_load(dev, &new);
     free_saved(dev);
+    rebuilt(dev);
     return ZO_MIGRATED;
+}
+
+enum zss_outcome zss_migrate(struct zss_dev *dev, struct zss_gpu *target, char *reason, size_t rlen)
+{
+    return relocate(dev, target, false, false, reason, rlen);
+}
+
+enum zss_outcome zss_recover(struct zss_dev *dev, struct zss_gpu *target, bool abandon, char *reason,
+                             size_t rlen)
+{
+    struct timespec t0, t1;
+    enum zss_outcome out;
+    long ms;
+
+    clock_gettime(CLOCK_MONOTONIC, &t0);
+    out = relocate(dev, target, true, abandon, reason, rlen);
+    clock_gettime(CLOCK_MONOTONIC, &t1);
+    ms = (t1.tv_sec - t0.tv_sec) * 1000 + (t1.tv_nsec - t0.tv_nsec) / 1000000;
+
+    if (out == ZO_MIGRATED)
+        zss_log("recovered after submit %u onto %s; %d object(s) lost their contents; rebuild took %ld ms",
+                zss_submits, dev->gpu->props.deviceName, dev->lost_contents, ms);
+    else if (out == ZO_PARKED)
+        zss_log("parked after submit %u with nowhere to recover to; %d object(s) lost their contents",
+                zss_submits, dev->lost_contents);
+    return out;
 }

@@ -132,7 +132,24 @@ int pci_rescan(void)
 }
 
 /* Collects the device numbers of every node user space opens to reach the GPU. */
-static int gpu_nodes(const char *pci, dev_t *nodes, int max)
+/* Whether the function answers on the bus: one without power reads as all ones. */
+static bool pci_answers(const char *func)
+{
+    unsigned char id[2] = { 0xff, 0xff };
+    char path[400];
+    int fd;
+
+    snprintf(path, sizeof(path), "/sys/bus/pci/devices/%s/config", func);
+    fd = open(path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0)
+        return false;
+    if (pread(fd, id, 2, 0) != 2)
+        id[0] = id[1] = 0xff;
+    close(fd);
+    return !(id[0] == 0xff && id[1] == 0xff);
+}
+
+int gpu_nodes(const char *pci, dev_t *nodes, int max)
 {
     char funcs[ZSSD_MAX_FUNCS][16], path[400], text[64], drv[64];
     int nf = pci_functions(pci, funcs, ZSSD_MAX_FUNCS), n = 0;
@@ -155,9 +172,13 @@ static int gpu_nodes(const char *pci, dev_t *nodes, int max)
         if (d)
             closedir(d);
 
-        /* The proprietary NVIDIA driver has its own character devices. */
+        /*
+         * The proprietary NVIDIA driver has its own character devices. Asking it
+         * while the device has no power would put the caller to sleep in the
+         * driver, waiting for a resume that only the daemon itself can issue.
+         */
         pci_driver(funcs[i], drv, sizeof(drv));
-        if (!strcmp(drv, "nvidia") && n < max) {
+        if (!strcmp(drv, "nvidia") && n < max && pci_answers(funcs[i])) {
             char line[256];
             FILE *f;
 
@@ -176,10 +197,10 @@ static int gpu_nodes(const char *pci, dev_t *nodes, int max)
     return n;
 }
 
-int gpu_holders(const char *pci, pid_t *pids, int max)
+/* A node that has been deleted still reports its device number through an open handle. */
+int node_holders(const dev_t *nodes, int nn, pid_t *pids, int max)
 {
-    dev_t nodes[32];
-    int nn = gpu_nodes(pci, nodes, 32), n = 0;
+    int n = 0;
     DIR *proc = opendir("/proc");
     struct dirent *pe;
 

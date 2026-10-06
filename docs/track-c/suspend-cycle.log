@@ -1,0 +1,111 @@
+[  0.00] === suspend-in-place cycle, off for 5 s ===
+[  0.01] kernel 7.2.2-arch1-1; gmux power port 0x03; vendor 0x10de; drivers nvidia / snd_hda_intel
+[  0.03] active VT: 2
+[  0.14] stop nvidia-persistenced: rc=0 
+[  0.42] chvt 63: rc=0 
+[  1.51] unbind audio from snd_hda_intel: ok
+[  1.53] saved 256 bytes of configuration space; command=0x0407
+[  1.60] nvidia suspend: ok (0.04 s)
+[  1.74] gmux power off: port 0x00, vendor now 0xffff after 0.1 s
+[  6.77] still off after 5 s: vendor 0xffff; root port link: LnkSta:	Speed 2.5GT/s, Width x8
+[  6.89] gmux power on: port 0x03, vendor 0x10de after 0.1 s
+[  7.22] cold card: command=0x0000 bar0=0x00000000
+[  7.23] configuration restored; bytes still differing: ['0x86', '0xaa']
+[  7.38] nvidia resume: ok (0.14 s)
+[  7.42] rebind audio: ok
+[  7.44] chvt 2: rc=0 
+[  7.52] start nvidia-persistenced: rc=0 
+[  8.53] after: gmux 0x03 vendor 0x10de drivers nvidia / snd_hda_intel
+[  8.56] --- kernel log during the cycle ---
+[50474.835095] snd_hda_intel 0000:01:00.1: GPU sound probed, but not operational: please add a quirk to driver_denylist
+[50480.749346] snd_hda_intel 0000:01:00.1: Disabling MSI
+[50480.749361] snd_hda_intel 0000:01:00.1: Handle vga_switcheroo audio client
+[50480.773893] input: HDA NVidia HDMI/DP,pcm=3 as /devices/pci0000:00/0000:00:01.0/0000:01:00.1/sound/card1/input30
+[50480.773970] input: HDA NVidia HDMI/DP,pcm=7 as /devices/pci0000:00/0000:00:01.0/0000:01:00.1/sound/card1/input31
+[50480.774036] input: HDA NVidia HDMI/DP,pcm=8 as /devices/pci0000:00/0000:00:01.0/0000:01:00.1/sound/card1/input32
+[50480.774093] input: HDA NVidia HDMI/DP,pcm=9 as /devices/pci0000:00/0000:00:01.0/0000:01:00.1/sound/card1/input33
+[  8.57] === done ===
+=== combined run ===
+[  0.00] === suspend-in-place cycle, off for 5 s ===
+[  0.01] kernel 7.2.2-arch1-1; gmux power port 0x03; vendor 0x10de; drivers nvidia / snd_hda_intel
+[  0.03] active VT: 2
+[  0.09] stop nvidia-persistenced: rc=0 
+[  0.21] chvt 63: rc=0 
+[  1.26] unbind audio from snd_hda_intel: ok
+[  1.27] saved 256 bytes of configuration space; command=0x0407
+[  1.33] nvidia suspend: ok (0.05 s)
+[  1.47] gmux power off: port 0x00, vendor now 0xffff after 0.1 s
+[  6.50] still off after 5 s: vendor 0xffff; root port link: LnkSta:	Speed 5GT/s, Width x8
+[  6.61] gmux power on: port 0x03, vendor 0x10de after 0.1 s
+[  6.94] cold card: command=0x0000 bar0=0x00000000
+[  6.96] configuration restored; bytes still differing: ['0x8a', '0xaa']
+[  7.11] nvidia resume: ok (0.14 s)
+[  7.12] rebind audio: ok
+[  7.14] chvt 2: rc=0 
+[  7.21] start nvidia-persistenced: rc=0 
+[  8.22] after: gmux 0x03 vendor 0x10de drivers nvidia / snd_hda_intel
+[  8.25] --- kernel log during the cycle ---
+[50609.251702] snd_hda_intel 0000:01:00.1: GPU sound probed, but not operational: please add a quirk to driver_denylist
+[50615.111267] snd_hda_intel 0000:01:00.1: Disabling MSI
+[50615.111278] snd_hda_intel 0000:01:00.1: Handle vga_switcheroo audio client
+[50615.135661] input: HDA NVidia HDMI/DP,pcm=3 as /devices/pci0000:00/0000:00:01.0/0000:01:00.1/sound/card1/input34
+[50615.135780] input: HDA NVidia HDMI/DP,pcm=7 as /devices/pci0000:00/0000:00:01.0/0000:01:00.1/sound/card1/input35
+[50615.135905] input: HDA NVidia HDMI/DP,pcm=8 as /devices/pci0000:00/0000:00:01.0/0000:01:00.1/sound/card1/input36
+[50615.136011] input: HDA NVidia HDMI/DP,pcm=9 as /devices/pci0000:00/0000:00:01.0/0000:01:00.1/sound/card1/input37
+[  8.26] === done ===
+=== combined run: app migrated away, dGPU cycled, app returned ===
+[  0.00] === suspend-in-place cycle, off for 5 s ===
+[  0.02] kernel 7.2.2-arch1-1; gmux power port 0x03; vendor 0x10de; drivers nvidia / snd_hda_intel
+[  0.03] active VT: 2
+[  0.10] stop nvidia-persistenced: rc=0 
+[  0.23] chvt 63: rc=0 
+[  1.28] unbind audio from snd_hda_intel: ok
+[  1.31] saved 256 bytes of configuration space; command=0x0407
+[  1.38] nvidia suspend: ok (0.05 s)
+[  1.87] gmux power off: port 0x00, vendor now 0xffff after 0.1 s
+[  6.92] still off after 5 s: vendor 0xffff; root port link: LnkSta:	Speed 5GT/s, Width x8
+[  7.79] gmux power on: port 0x03, vendor 0x10de after 0.1 s
+[  8.10] cold card: command=0x0000 bar0=0x00000000
+[  8.11] configuration restored; bytes still differing: ['0x8a', '0xaa']
+[  8.26] nvidia resume: ok (0.14 s)
+[  8.28] rebind audio: ok
+[  8.30] chvt 2: rc=0 
+[  8.41] start nvidia-persistenced: rc=0 
+[  9.43] after: gmux 0x03 vendor 0x10de drivers nvidia / snd_hda_intel
+[  9.48] --- kernel log during the cycle ---
+[56115.695518] snd_hda_intel 0000:01:00.1: GPU sound probed, but not operational: please add a quirk to driver_denylist
+[56122.692551] snd_hda_intel 0000:01:00.1: Disabling MSI
+[56122.692566] snd_hda_intel 0000:01:00.1: Handle vga_switcheroo audio client
+[56122.717348] input: HDA NVidia HDMI/DP,pcm=3 as /devices/pci0000:00/0000:00:01.0/0000:01:00.1/sound/card1/input38
+[56122.717412] input: HDA NVidia HDMI/DP,pcm=7 as /devices/pci0000:00/0000:00:01.0/0000:01:00.1/sound/card1/input39
+[56122.717480] input: HDA NVidia HDMI/DP,pcm=8 as /devices/pci0000:00/0000:00:01.0/0000:01:00.1/sound/card1/input40
+[56122.717561] input: HDA NVidia HDMI/DP,pcm=9 as /devices/pci0000:00/0000:00:01.0/0000:01:00.1/sound/card1/input41
+[  9.49] === done ===
+=== power measurement: 45 s on, 90 s off, 45 s on, all on the text console ===
+[  0.00] === suspend-in-place cycle, off for 90 s ===
+[  0.01] kernel 7.2.2-arch1-1; gmux power port 0x03; vendor 0x10de; drivers nvidia / snd_hda_intel
+[  0.03] active VT: 2
+[  0.13] stop nvidia-persistenced: rc=0 
+[  0.35] chvt 63: rc=0 
+[  1.39] unbind audio from snd_hda_intel: ok
+[  1.41] saved 256 bytes of configuration space; command=0x0407
+[ 46.54] nvidia suspend: ok (0.08 s)
+[ 46.68] gmux power off: port 0x00, vendor now 0xffff after 0.1 s
+[136.75] still off after 90 s: vendor 0xffff; root port link: LnkSta:	Speed 8GT/s, Width x8
+[136.87] gmux power on: port 0x03, vendor 0x10de after 0.1 s
+[137.20] cold card: command=0x0000 bar0=0x00000000
+[137.21] configuration restored; bytes still differing: ['0x86', '0xaa']
+[137.42] nvidia resume: ok (0.20 s)
+[184.05] rebind audio: ok
+[184.16] chvt 2: rc=0 
+[184.23] start nvidia-persistenced: rc=0 
+[185.38] after: gmux 0x03 vendor 0x10de drivers nvidia / snd_hda_intel
+[185.46] --- kernel log during the cycle ---
+[57204.299195] snd_hda_intel 0000:01:00.1: GPU sound probed, but not operational: please add a quirk to driver_denylist
+[57386.962333] snd_hda_intel 0000:01:00.1: Disabling MSI
+[57386.962350] snd_hda_intel 0000:01:00.1: Handle vga_switcheroo audio client
+[57386.996557] input: HDA NVidia HDMI/DP,pcm=3 as /devices/pci0000:00/0000:00:01.0/0000:01:00.1/sound/card1/input42
+[57386.996677] input: HDA NVidia HDMI/DP,pcm=7 as /devices/pci0000:00/0000:00:01.0/0000:01:00.1/sound/card1/input43
+[57386.996779] input: HDA NVidia HDMI/DP,pcm=8 as /devices/pci0000:00/0000:00:01.0/0000:01:00.1/sound/card1/input44
+[57386.996881] input: HDA NVidia HDMI/DP,pcm=9 as /devices/pci0000:00/0000:00:01.0/0000:01:00.1/sound/card1/input45
+[185.48] === done ===
