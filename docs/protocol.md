@@ -186,6 +186,12 @@ cannot be frozen, or if the request came from it or one of its children and
 | `gpu` | string | GPU to power on |
 | `return` | bool | also move back the applications that started on it |
 
+Also accepted for a device in state `lost` that the kernel module manages: the
+module tries to restore power, then its configuration, then resumes a driver
+it had frozen. It is refused, naming them, while programs other than the
+display server and the listed services still hold a device whose driver is
+frozen.
+
 ### `progress`
 One step of an `off` or `on`, as a line of text prefixed `[ZrnSelectiveSuspend]`.
 

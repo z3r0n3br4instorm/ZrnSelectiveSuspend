@@ -5,7 +5,7 @@
 **Reference Hardware Platform (Tier 1 Target):** Apple MacBookPro9,1 (Mid-2012 15-inch Unibody, Ivy Bridge + Kepler GT 650M + Lightridge)  
 **Supported GPU Stacks:** NVIDIA Proprietary (`nvidia`), Open-Source DRM (`nouveau`, `amdgpu`, `xe`, `i915`)  
 **Kernel Target:** Linux 6.x / 7.x (Current Reference: `7.2.2-arch1-1 x86_64`)  
-**Document Version:** 1.2.0  
+**Document Version:** 1.3.0  
 **Author:** zerone  
 
 > **Status (October 2026).** This document is the original design. Part of it
@@ -27,6 +27,7 @@ and it works on the reference laptop today.
 | 5.2 MMIO shadowing | **Dropped.** See below. | - |
 | 5.3 DMA isolator | **Dropped as a subsystem.** Confinement is the IOMMU's job and the kernel already does it when one is enabled. The module switches bus mastering off before a power cut and reports whether an IOMMU is in force. | `kmod/zss.c` |
 | 5.4 Power adapters | **Built.** `gmux` (verified on the laptop), `acpi` (written, never run), a hot-plug slot backend in user space (QEMU). | `kmod/zss.c`, `src/daemon/backend.c` |
+| Surprise removal as a whole | **Partly working.** On the reference laptop a card that loses power while idle comes back, driver included, without a reboot. A card lost while a program renders on it does not: the desktop survives, the program is stuck, and the card needs a reboot. | `kmod/zss.c`, `patches/`, `src/layer/` |
 | 5.5 Resurrection engine | **Built differently.** Power, a bounded wait for the card to answer, and the PCI core's state restore are in the module. The card's video BIOS is not executed by ZSS: every real GPU driver re-initialises its card on resume, and the module calls that. A card with no driver is therefore refused. | `kmod/zss.c` |
 | Not in the original design | **Built.** Moving applications between GPUs and rebuilding them after a loss (the Vulkan layer), the daemon and its rules, freezing what cannot be moved, hiding a switched-off card, and the wake-on-touch patch to NVIDIA's driver. | `src/`, `patches/` |
 
@@ -53,6 +54,32 @@ and a virtual card does not die the way hardware does.
 
 If this is taken up again it needs hardware that can really lose a card (an
 eGPU), an open driver to try it on first, and its own design document.
+
+### What four real power cuts showed (October 2026)
+
+The first version of this document assumed the hard part of surprise removal
+was keeping the kernel alive, and proposed to do it by shadowing the card's
+registers. On the reference laptop, with the proprietary NVIDIA 470 driver,
+that turned out not to be where the difficulty lies:
+
+- **The machine survives a dead card without any shadowing.** The driver reads
+  all-ones, logs that the GPU has fallen off the bus, and stops.
+- **The difficulty is the driver's state afterwards.** Having declared the GPU
+  lost it will not look at it again, and its own suspend path hangs in that
+  state. The answer that works is to *freeze* it first: shut every caller out
+  without asking the card anything, and run its ordinary resume when the card
+  is back. On an idle card that brings card and driver back with no reboot.
+- **A program rendering on the card defeats it.** It calls into the driver
+  before the loss can be noticed, and what it had on the card cannot be put
+  back by a resume that follows no suspend. Resuming the driver under it hung
+  the machine.
+- **One reset came from below the kernel**, with no panic message, as the
+  original design feared. It followed a rescan of the whole PCI bus during a
+  return, which has been removed; whether that was the cause is not proven.
+
+Register shadowing would not have changed any of these outcomes. What would
+help the busy case is a driver that can be detached and attached again while
+the desktop runs, which the open drivers offer and this one does not.
 
 ### What "universal" means today
 
@@ -332,17 +359,19 @@ When re-energizing a GPU from a 0W cold state or reconnecting an eGPU:
 * **Device loss**: applications rebuilt from memory on another GPU, or parked (`zss-device-loss`).
 * **System integration**: service, installer, the NVIDIA wake-on-touch patch through DKMS, power-off under a running X session, freezing, hiding, serving the display server (`zss-system-integration`).
 * **Kernel module**: the power sequence, state save and restore, loss guard, `gmux` backend verified on the reference laptop (`zss-kernel-shim`).
+* **Unannounced loss of an idle card**: noticed in about 50 ms, the NVIDIA driver frozen before it finds out, card and driver brought back by `zssctl on` without a reboot (driver patch revision 4).
 
 ### Next, in the order they unblock real users
 
-1. **Try the module on an open driver on real hardware** (`amdgpu`, `i915`/`xe` or `nouveau`), and settle how the display server is handled there.
-2. **Try the `acpi` backend** on a hybrid laptop that has firmware power resources.
-3. **A wider Vulkan surface in the layer** (beyond 1.0), and an OpenGL path, so that more applications can be moved rather than frozen.
-4. **Notice a monitor plugged in while the card is off** (the gmux hot-plug interrupt on the reference laptop).
+1. **Unannounced loss of a card in use.** Decide what a frozen driver does with callers other than the display server (sleeping keeps an application from being moved), then try closing the stuck programs before the driver is resumed.
+2. **Try the module on an open driver on real hardware** (`amdgpu`, `i915`/`xe` or `nouveau`), and settle how the display server is handled there.
+3. **Try the `acpi` backend** on a hybrid laptop that has firmware power resources.
+4. **A wider Vulkan surface in the layer** (beyond 1.0), and an OpenGL path, so that more applications can be moved rather than frozen.
+5. **Notice a monitor plugged in while the card is off** (the gmux hot-plug interrupt on the reference laptop).
 
 ### Open, with no test bed yet
 
-* AER and machine-check handling for a card that is physically pulled (5.1).
+* AER and machine-check handling for a card that is physically pulled (5.1). One reset below the kernel has now been seen on the reference laptop.
 * Anything for a driver that ignores the disconnected mark.
 
 ### Dropped

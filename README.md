@@ -12,9 +12,13 @@ The table below says which.
 > **Status (October 2026).** Working on real hardware: a MacBookPro9,1 powers
 > its NVIDIA GT 650M off and on under a running X session in about 0.3 s, with
 > applications moved to the Intel GPU and back, through the `zss` kernel module
-> or without it. Working in a virtual machine only: powering off a GPU with an
-> open-source driver, hot-removal of a PCIe card, and recovery when a card
-> disappears without warning. See "What is universal and what is not".
+> or without it. On the same laptop, a card that loses power **without
+> warning while idle** is now brought back, driver included, with no reboot.
+> A card lost **while a program is rendering on it** is not: the desktop
+> survives, the program does not move, and the card needs a reboot. Working in
+> a virtual machine only: powering off a GPU with an open-source driver, and
+> hot-removal of a PCIe card. See "What is universal and what is not" and
+> "When a card is lost without warning".
 
 ---
 
@@ -31,6 +35,8 @@ The table below says which.
 | Cutting power: firmware power resources (`acpi` backend) | Most hybrid laptops since about 2015 | **Nowhere yet: written, never run** |
 | Cutting power: PCIe hot-plug slot (`pciehp-slot`, user space) | Any driver, on a hot-plug slot | QEMU only |
 | Power-off under a running display server | **NVIDIA 470.256.02 only**: needs the wake-on-touch driver patch | MacBookPro9,1 |
+| Recovering card and driver after an unannounced power loss, card idle | **NVIDIA 470.256.02 with the patch** (freeze and thaw); drivers with PCI error handlers in principle | MacBookPro9,1 |
+| The same, with a program rendering on the card | **Nothing yet** | Failed on MacBookPro9,1 |
 | Hiding a switched-off GPU from new programs | Device nodes: any driver. Loader files and `/proc` files: **NVIDIA only** | MacBookPro9,1 |
 
 What it would take to cover more hardware:
@@ -62,9 +68,11 @@ What it would take to cover more hardware:
   daemon hands it a device. Without it the daemon does a narrower version of
   the same from user space (NVIDIA and gmux only). See
   [`docs/kernel-module.md`](docs/kernel-module.md).
-- **The NVIDIA driver patch** is separate and still needed for NVIDIA: with it,
-  a caller arriving while the driver is suspended asks for a wake and sleeps
-  instead of spinning for ever.
+- **The NVIDIA driver patch** is separate and still needed for NVIDIA. It does
+  two things. A caller arriving while the driver is suspended asks for a wake
+  and sleeps instead of spinning for ever. And the driver can be *frozen*: shut
+  to every caller without anything being asked of the card, for the moment a
+  card vanishes, and resumed when the card is back.
 
 Consequences worth knowing:
 
@@ -72,11 +80,13 @@ Consequences worth knowing:
   holds the GPU is frozen while it is off, or blocks a detach.
 - The layer offers Vulkan 1.0 with swapchains. Programs that need a newer
   Vulkan, and OpenGL programs, are not covered by it.
-- A card that vanishes without warning is noticed by the kernel module, marked
-  disconnected, and its driver told through the kernel's PCI error-recovery
-  handlers if it has them. That is as far as protection goes: a driver that
-  ignores the mark can still misbehave, and none of it has been tried with a
-  card physically pulled from real hardware.
+- A card that vanishes without warning is noticed by the kernel module within
+  about a tenth of a second, marked disconnected, and its driver told through
+  the kernel's PCI error-recovery handlers if it has them, or frozen if it is
+  the patched NVIDIA driver. What follows depends on whether the card was in
+  use: see "When a card is lost without warning". None of it has been tried
+  with a card physically pulled from real hardware; the losses so far were
+  made by cutting the card's power rail.
 - The module reports whether an IOMMU confines the GPU's memory access
   (`iommu=` in `zssctl status`). It does not add confinement of its own.
 
@@ -115,7 +125,7 @@ The installer puts `zssd`, `zssctl` and `zss-run` under `/usr/local`, creates a
 To power a GPU off under a running desktop, the NVIDIA driver needs the
 wake-on-touch patch in [`patches/`](patches/). The installer offers to apply it
 through DKMS when the driver version is one the patch has been validated
-against (470.256.02 so far); it then survives kernel updates, and a hook
+against (470.256.02 so far, patch revision 4); it then survives kernel updates, and a hook
 re-applies it after a driver update. The stock modules are kept and restored at
 boot if the patched driver does not load. `zss-nvidia-patch status` shows where
 things stand, and `zss-nvidia-patch remove` puts the stock driver back.
@@ -198,6 +208,33 @@ and the timer never freezes anything: a program outside the layer keeps the GPU 
 
 A monitor plugged in while the GPU is off is not noticed until something asks
 about displays or you run `zssctl on`.
+
+## When a card is lost without warning
+
+This is the case ZSS exists for and the one that is least finished. What
+happens today on the reference laptop (NVIDIA 470 with the patch, X running,
+kernel module loaded), from four real power cuts:
+
+| The card was | The desktop | Programs on the card | Getting the card back |
+| :--- | :--- | :--- | :--- |
+| idle | carries on | none | `zssctl on`: power, PCI state and driver restored, no reboot |
+| being rendered on | carries on | stuck: frozen out of the driver, not moved to the other GPU | **a reboot.** `zssctl on` refuses while the stuck programs hold the card |
+
+```sh
+zssctl status                 # state=lost, driver=frozen
+zssctl on 0000:01:00.0        # tries to restore power, then resumes the driver
+```
+
+Why the busy case fails: a program that is rendering calls into the driver
+many times in the tenth of a second it takes to notice the loss, so the driver
+finds out first; once the driver is frozen the program's calls sleep, so the
+layer cannot move it; and a driver resumed under a program whose state on the
+card is gone hung the machine in testing, which is why the daemon now refuses
+to do it. Closing the stuck programs and then running `zssctl on` is the
+obvious next thing and has not been tried.
+
+Three of the tests that produced this table ended with the laptop reset or
+hung. Details, timings and logs: [`docs/track-c.md`](docs/track-c.md).
 
 ## Building and trying it
 

@@ -76,6 +76,31 @@ This came out of the first real power cut on the reference laptop
 (`docs/track-c.md`). It has been tested in QEMU, where no X server is
 involved, and not yet against that failure itself.
 
+## On real hardware
+
+Everything above describes what the layer does, and all of it holds where the
+loss is injected or announced. Four real power cuts on the reference laptop
+(`docs/track-c.md`) added what injection could not show:
+
+- **The driver's answer to a loss is not always "device lost".** The NVIDIA
+  driver answered a present with an error of its own, and the application
+  acting on it crashed. The layer now checks any failure against the bus
+  before passing it on: if the device no longer answers, it is a loss.
+- **A thread can be stuck in the dead driver for good**, waiting on the
+  display server. That is the section above, and its fix.
+- **Freezing the driver and evacuating the application work against each
+  other.** With the patched NVIDIA driver frozen, an application's calls into
+  it sleep instead of failing, so its thread never comes back to be moved.
+  In the last run the application neither crashed nor moved. What a frozen
+  driver should do with callers that are not the display server is the open
+  design question.
+- **An application that dies of the loss must not be waited for.** The daemon
+  once held everything for two minutes for one that was dumping core.
+
+So on that laptop today an application under the layer does **not** survive a
+real unannounced loss of the card it is rendering on. It does survive an
+orderly detach, and the injected and virtual losses of the test suites.
+
 ## Cost of retention
 
 `build/tests/bench_retain`, 4 MB blobs, default settings:
@@ -131,31 +156,28 @@ GPU at frame N must match a run that zeroes its own history before frame N
 
 ## What is not tested
 
-**A link that dies under a bound real driver.** Every loss so far is either
-injected (the real device is healthy and is torn down normally) or, in QEMU,
-a removal the guest kernel was warned about five seconds ahead. QEMU ignores
-an attempt to drop the link from inside the guest, so it cannot produce the
-real thing. What a real dead driver may do that injection does not show:
+**A card physically pulled from under a bound real driver.** The losses in the
+test suites are injected (the real device is healthy and is torn down
+normally) or, in QEMU, removals the guest kernel was warned about five seconds
+ahead. The real ones so far were made on the reference laptop by cutting the
+card's power rail with the NVIDIA driver active (see "On real hardware"
+above); nobody has pulled an eGPU. Of the things a dead driver was expected to
+do that injection does not show, the power cuts confirmed two and left two
+open:
 
-- block in a call instead of returning an error (the stuck-thread path
-  covers one thread; several, or the thread doing the teardown, are untested);
-- crash or hang when its objects are destroyed or its library is unloaded;
-- return errors other than `VK_ERROR_DEVICE_LOST`;
-- fault on access to memory it had mapped. The layer stops touching a
-  device's mappings once it knows the device is lost, but a write made just
+- block in a call instead of returning an error: **seen**, and worse than
+  expected (the thread never returned until its connection was cut);
+- return errors other than `VK_ERROR_DEVICE_LOST`: **seen**;
+- crash or hang when its objects are destroyed or its library is unloaded:
+  not exercised, since the dead driver has been abandoned each time;
+- fault on access to memory it had mapped: not seen. The layer stops touching
+  a device's mappings once it knows the device is lost, but a write made just
   before that is not protected.
 
-**What a hardware test needs.** One of:
-
-- an eGPU on Thunderbolt or OCuLink, pulled while an application under the
-  layer renders on it; or
-- on the reference laptop, cutting gmux power with the NVIDIA driver active.
-  This needs root and can hang the machine, and belongs with the gated stage
-  of `zss-happy-path`.
-
-In both cases the things to record are the kernel log, whether the
-application's calls return or block, and whether tearing down the old driver
-succeeds.
+**Still needed:** an eGPU on Thunderbolt or OCuLink, pulled while an
+application under the layer renders on it, with an open driver and with the
+NVIDIA one; and, on the reference laptop, an application that actually keeps
+running through a loss.
 
 **Also untested:** a daemon that is connected but never answers a loss report
 (the five-second fallback); two applications reporting the same loss at the

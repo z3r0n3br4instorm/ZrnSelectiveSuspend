@@ -31,8 +31,13 @@ event.
 
 A driver that has no way of being told (the proprietary NVIDIA one) is frozen
 instead, if it offers the hooks the ZSS driver patch adds: every caller is shut
-out before any of them can find the device missing, and the driver is resumed,
-as after a sleep, when the device is back. `driver_frozen` shows it.
+out, and the driver is resumed, as after a sleep, when the device is back.
+`driver_frozen` shows it. The freeze helps only if it lands before anything
+calls into the driver: about 50 ms on an idle card, which is soon enough, and
+never soon enough under a program that is rendering.
+
+After a device comes back, silence is not taken for a new loss for five
+seconds: a driver re-initialising its card may reset it.
 
 ## What it does not do
 
@@ -104,9 +109,12 @@ the device and refuses if none does.
 
 | Where | What |
 | :--- | :--- |
-| QEMU (`tests/track_k.py`, 12 scenarios, clean kernel log) | load and unload; `pm`, `none` and `external`; ten cycles with identical PCI configuration; every failure path; silence noticed in under 350 ms; a card pulled through a hot-plug port and its replacement; the daemon on top of the module |
-| MacBookPro9,1 | `gmux` backend with `quiesce=external` under a running X session, driven by the daemon: two off/on cycles, power cut in 0.03 s, NVIDIA driver and HDMI audio working afterwards |
+| QEMU (`tests/track_k.py`, 13 scenarios, clean kernel log) | load and unload; `pm`, `none` and `external`; ten cycles with identical PCI configuration; every failure path; silence noticed in under 350 ms; a card pulled through a hot-plug port and its replacement; freeze on loss and thaw on return against a stand-in for the driver's hooks; the daemon on top of the module |
+| MacBookPro9,1, orderly | `gmux` backend with `quiesce=external` under a running X session, driven by the daemon: off/on cycles, power cut in 0.03 s, NVIDIA driver and HDMI audio working afterwards |
+| MacBookPro9,1, power rail cut with the card idle | loss reported after 50 ms; NVIDIA driver frozen before it noticed; `zssctl on` restored power, PCI state and driver; the card rendered afterwards. No reboot |
+| MacBookPro9,1, power rail cut under a rendering program | loss reported after about 100 ms, **after** the driver had found out; the driver was frozen all the same; resuming it later with the program still attached hung the machine |
 
 Not tested: any driver other than `bochs` with `quiesce=pm`; the `acpi`
 backend; a card physically pulled from real hardware; unloading the module
-with a device off on real hardware.
+with a device off on real hardware; a driver's PCI error handlers being called
+for real (`bochs` has none).
