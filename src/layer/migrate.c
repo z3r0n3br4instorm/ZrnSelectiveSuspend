@@ -15,10 +15,13 @@
  */
 #include "zss_layer.h"
 
+#include <errno.h>
+#include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <unistd.h>
 
 bool zss_families_fit(const struct zss_dev *dev, const struct zss_gpu *gpu);
 
@@ -602,6 +605,15 @@ static pthread_mutex_t rec_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t rec_cv = PTHREAD_COND_INITIALIZER;
 
 /* The device has a new real device behind it: wake everyone waiting on the old one. */
+/* Before anyone is let back in: what the lost device never finished is issued again. */
+static void reissue(struct zss_dev *dev)
+{
+    uint32_t n = zss_inflight_reissue(dev);
+
+    if (n)
+        zss_log("%u submission(s) in flight were issued again", n);
+}
+
 static void rebuilt(struct zss_dev *dev)
 {
     pthread_mutex_lock(&rec_lock);
@@ -609,6 +621,13 @@ static void rebuilt(struct zss_dev *dev)
     zss_epoch++;
     dev->lost = false;
     pthread_cond_broadcast(&rec_cv);
+    pthread_mutex_unlock(&rec_lock);
+}
+
+void zss_dev_mark_lost(struct zss_dev *dev)
+{
+    pthread_mutex_lock(&rec_lock);
+    dev->lost = true;
     pthread_mutex_unlock(&rec_lock);
 }
 
@@ -622,23 +641,53 @@ void zss_dev_unrecoverable(struct zss_dev *dev)
 
 #define ZSS_EVACUATE_WAIT_S 5
 
+/* Whether the GPU has stopped answering on the bus: a device without power reads as all ones. */
+static bool gpu_gone(const struct zss_gpu *gpu)
+{
+    unsigned char id[2] = { 0, 0 };
+    char path[96];
+    int fd;
+
+    if (!gpu || !gpu->pci[0] || gpu->software || gpu->test_bound)
+        return false;
+    snprintf(path, sizeof(path), "/sys/bus/pci/devices/%s/config", gpu->pci);
+    fd = open(path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0)
+        return errno == ENOENT;
+    if (pread(fd, id, 2, 0) != 2)
+        id[0] = id[1] = 0;
+    close(fd);
+    return id[0] == 0xff && id[1] == 0xff;
+}
+
 bool zss_lost(struct zss_dev *dev, VkResult r)
 {
     struct timespec until;
     bool first, asked_locally = false;
     uint32_t gen;
 
-    if (r != VK_ERROR_DEVICE_LOST || dev->dead || !dev->migratable)
+    if (dev->dead || !dev->migratable)
         return false;
     /*
      * A thread that was left behind in the dead driver and has only now come
-     * back: the recovery it needs has already happened. Rejoin and repeat.
+     * back: the recovery it needs has already happened. Whatever the dead
+     * driver answered, even success, was about a device that no longer
+     * exists. Rejoin and repeat.
      */
     if (zss_stale()) {
         zss_leave();
         zss_enter();
         return true;
     }
+    /*
+     * A device already known to be lost fails in whatever way its driver
+     * happens to. So does one that has only just gone, before anyone has said
+     * so: the proprietary NVIDIA driver answers a present with an error of its
+     * own, and an application acting on that error does itself in. Any failure
+     * is therefore checked against the bus before it is passed on.
+     */
+    if (r != VK_ERROR_DEVICE_LOST && !(r < 0 && (dev->lost || gpu_gone(dev->gpu))))
+        return false;
 
     pthread_mutex_lock(&rec_lock);
     gen = dev->generation;
@@ -693,6 +742,7 @@ enum zss_outcome zss_resume(struct zss_dev *dev, struct zss_gpu *target, char *r
         return ZO_FAILED;
     }
     free_saved(dev);
+    reissue(dev);
     rebuilt(dev);
     return ZO_MIGRATED;
 }
@@ -738,6 +788,7 @@ static enum zss_outcome relocate(struct zss_dev *dev, struct zss_gpu *target, bo
             }
         }
         dev->fn.DeviceWaitIdle(dev->real);
+        zss_inflight_done(dev, NULL);
         zss_sync_from_device(dev, NULL);
     }
     /* An unsuitable target is not an error: the application waits for a better one. */
@@ -806,6 +857,7 @@ static enum zss_outcome relocate(struct zss_dev *dev, struct zss_gpu *target, bo
          */
         zss_log("abandoning the lost device on %s: a thread is still inside its driver",
                 dev->gpu->props.deviceName);
+        zss_driver_break_links(dev->gpu->drv);
     } else {
         i = n;
         for (struct zss_obj *o = dev->tail; o; o = o->prev) {
@@ -825,6 +877,7 @@ static enum zss_outcome relocate(struct zss_dev *dev, struct zss_gpu *target, bo
     }
     ctx_load(dev, &new);
     free_saved(dev);
+    reissue(dev);
     rebuilt(dev);
     return ZO_MIGRATED;
 }
@@ -848,9 +901,9 @@ enum zss_outcome zss_recover(struct zss_dev *dev, struct zss_gpu *target, bool a
 
     if (out == ZO_MIGRATED)
         zss_log("recovered after submit %u onto %s; %d object(s) lost their contents; rebuild took %ld ms",
-                zss_submits, dev->gpu->props.deviceName, dev->lost_contents, ms);
+                zss_submits - dev->ninflight, dev->gpu->props.deviceName, dev->lost_contents, ms);
     else if (out == ZO_PARKED)
         zss_log("parked after submit %u with nowhere to recover to; %d object(s) lost their contents",
-                zss_submits, dev->lost_contents);
+                zss_submits - dev->ninflight, dev->lost_contents);
     return out;
 }

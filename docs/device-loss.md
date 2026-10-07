@@ -14,11 +14,12 @@ layer is rebuilt from what the layer holds:
 | Objects, pipelines, descriptor sets, command buffers | Rebuilt from their stored creation parameters and recordings |
 | Buffers written through mapped memory | Restored from the layer's shadow of that memory |
 | Images and device-local buffers filled by a copy from such a buffer | Restored from the retention store |
-| The submit that was in flight | Issued again on the new device |
-| Fences the application was waiting on for lost work | Signalled |
+| The submit during which the loss was reported | Issued again on the new device |
+| Submits accepted earlier and not yet seen to finish | Issued again on the new device, in order (see "Work that was in flight") |
+| Fences the application was waiting on for that work | Pending again, and signalled when the re-issued work finishes |
+| Fences for lost work that cannot be repeated | Signalled, so that nobody waits for ever |
 | Images the GPU rendered and later frames build on | **Zero-filled, counted and reported** |
 | Images cleared and redrawn every frame | Zero-filled, not counted: the next frame replaces them |
-| Results the GPU would have written during the lost submit | Stale for that one submit |
 
 An application marked non-migratable is not recovered; it receives
 `VK_ERROR_DEVICE_LOST` as it would without the layer.
@@ -26,6 +27,54 @@ An application marked non-migratable is not recovered; it receives
 What is retained is deliberately narrow: an upload is kept only when it
 replaces a whole image subresource (or a whole buffer) from tightly packed
 data. Partial updates are not retained, and their destinations count as lost.
+
+## Work that was in flight
+
+A submission the device had accepted, and that the application had not yet
+seen finish, dies with the device. The layer keeps a short list of such
+submissions (dropped as soon as a fence, or a wait for the queue or device to
+go idle, shows them done) and issues them again, in order, on the device the
+application is rebuilt on. The application then waits for its fence as if
+nothing had happened, and reads back what the frame should have produced.
+
+They run against the rebuilt state, so anything only the lost device held is
+blank for them as for everything after: losing the device with a frame in
+flight gives the same result as losing it just before that frame. The layer's
+log line says so: "recovered after submit N" names the last submission whose
+results survived, and "N submission(s) in flight were issued again" follows
+when there were any.
+
+Limits: semaphores are not replayed (the re-issued work is ordered by the
+queue alone), at most sixteen submissions are remembered, and one whose
+command buffer has been reset or freed since cannot be repeated and is
+dropped.
+
+Before this was done the frame in flight was skipped and the application read
+back the previous frame's image for it. It showed as a rare one-frame mismatch
+in the pulled-card tests, when the card happened to leave in the few
+microseconds between a submit and the wait for it.
+
+## A thread stuck in the dead driver
+
+A driver can be waiting on something outside itself when its device dies. The
+proprietary NVIDIA driver waits, with no timeout, for the X server to
+acknowledge a present; when the card has lost power that acknowledgement never
+comes, and the thread never leaves the driver. Rebuilding the application on
+another GPU is then no use to it.
+
+So the layer never gives a driver the application's own connection to the X
+server. Each driver gets one the layer opened, and when the daemon reports the
+driver's device gone the layer shuts those connections first. The wait fails,
+the driver returns an error, and the layer treats any error from a device it
+knows to be lost as that loss: the thread joins the recovery and repeats its
+call on the new device. A thread that still does not come out within the
+grace period (three seconds, `ZSS_LOSS_GRACE_MS`) is left behind as before,
+and whatever it brings back later, even success, is discarded and the call
+repeated.
+
+This came out of the first real power cut on the reference laptop
+(`docs/track-c.md`). It has been tested in QEMU, where no X server is
+involved, and not yet against that failure itself.
 
 ## Cost of retention
 

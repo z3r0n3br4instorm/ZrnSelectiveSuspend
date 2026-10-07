@@ -85,6 +85,7 @@ void zss_cmd_reset(struct zss_obj *cb)
         free(c);
     }
     cb->u.cb.head = cb->u.cb.tail = NULL;
+    cb->u.cb.version++;
     for (uint32_t i = 0; i < cb->u.cb.nrefs; i++)
         zss_obj_unref(cb->u.cb.refs[i]);
     cb->u.cb.nrefs = 0;

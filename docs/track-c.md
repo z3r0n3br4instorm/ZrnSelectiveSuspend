@@ -191,11 +191,247 @@ suspend-in-place path needs to do those two things itself and stop treating
 idle holders as blockers. That is a change to the specification and has not
 been made.
 
+## The kernel module on the laptop (7 October 2026)
+
+`zss.ko` 0.1.0 was installed through the installer (DKMS) and loaded by the
+service. The daemon picked the `zss-kmod` backend by itself; the module chose
+`gmux` and `quiesce=external`, and took both functions of the slot (the GPU on
+`nvidia`, the HDMI audio on `snd_hda_intel`). Loading changed nothing: state
+`on`, both functions `online`, `answers` 1.
+
+Two off/on cycles through `zssctl`, under the running X session:
+
+| Step | Result |
+| :--- | :--- |
+| Driver suspended (user space, as before) | 0.13 s |
+| Power cut by the module | 0.03 s; bus reads `ffff`; both functions `offline` |
+| Whole `zssctl off` | 0.29 s |
+| Ten seconds off | still off |
+| Power restored by the module | 0.06 s |
+| Driver resumed | 0.11 s; `nvidia-smi` answers, audio function bound again |
+| Kernel log | the module's four lines; no warning from it |
+
+The 256 bytes of configuration space of each function were compared before
+and after the second cycle. The standard header is identical. Three bytes in
+the PCI Express capability differ (0x85, 0x86 and 0x8a on the GPU; 0x85 and
+0x8a on the audio function). They sit in the link capability and link status
+registers, which the hardware reports after training the link and software
+does not write; that reading has not been checked against the register
+definitions bit by bit.
+
+This laptop has no IOMMU enabled (`iommu=no`), so nothing confines the GPU's
+memory access there, with or without ZSS.
+
+Not run on the laptop: unloading the module while the GPU is off, and the
+loss guard firing for real.
+
+## Power cut under the running driver (7 October 2026, 11:53)
+
+The test that had never been run. `zss-run vkcube` was rendering on the NVIDIA
+card under the X session; `tests/hw_surprise_cut.py cut` then switched the
+gmux power rail off directly. Nothing was suspended and nothing was told. Full
+log: `docs/track-c/surprise-cut.log`.
+
+| After the cut | What happened |
+| :--- | :--- |
+| 151 ms | The kernel module reported the device lost and marked both functions offline |
+| under 0.9 s | The daemon's state was `lost`; X was listed as holding a stale handle |
+| 3.5 s | `vkcube`'s state had been rebuilt on the Intel GPU. **Its window was frozen all the same** (see below) |
+| about 5 to 9 s | One X query went unanswered for more than 2 s; every later one was answered |
+| same time | The NVIDIA driver logged `Xid 79 ... GPU has fallen off the bus` against the X server |
+| 27 s | Machine up, X answering, `vkcube` process alive, no kernel warning beyond NVIDIA's own lines |
+
+The layer's own account: `abandoning the lost device on NVIDIA GeForce GT
+650M: a thread is still inside its driver`, `2 submission(s) in flight were
+issued again`, `recovered after submit 1266 onto Intel(R) HD Graphics 4000;
+0 object(s) lost their contents; rebuild took 150 ms`. Most of the 3.5 s is
+the three-second grace the layer gives a thread stuck in the dead driver
+before it abandons that driver and carries on.
+
+What this shows: on this laptop, with this driver, the machine and the display
+server survive a card that loses power without warning, with nothing standing
+between the driver and its registers. The loss was noticed, the device marked
+and the application's state rebuilt elsewhere.
+
+**The application did not survive in any useful sense.** The first write-up of
+this test said `vkcube` was running on Intel. It was not: the user saw a
+frozen window, and the process used no CPU. A backtrace showed its only
+rendering thread still inside NVIDIA's library, in `vkQueuePresentKHR`,
+waiting in `xcb_wait_for_special_event` with no timeout for the X server to
+acknowledge a present. X's NVIDIA side had died with the card, so that event
+would never come. The layer had waited three seconds, abandoned the dead
+driver and rebuilt everything on Intel, for a thread that never returned to
+use it.
+
+Shutting that X connection from a debugger did bring the thread out of the
+wait at once. The process then exited; why was not established (the dead
+driver's answer to the present reached the application unfiltered, which is
+one possible cause).
+
+The fix that followed, in the layer:
+
+- Each driver already had a connection to the X server of the layer's own.
+  When a device is reported gone, the layer now shuts the connections of that
+  device's driver before waiting for threads to leave it, so a thread waiting
+  there fails instead of waiting for ever. Xlib surfaces are handed to the
+  driver as xcb ones for the same reason.
+- Anything a driver answers about a device already known lost, and anything
+  at all from a thread that was left behind in an abandoned driver, is treated
+  as the loss it is: the call is repeated on the rebuilt device.
+
+That fix has passed the QEMU suites only. It has **not** been run against the
+failure it is for: that needs a reboot (the NVIDIA driver is dead until then)
+and another power cut.
+
+What it does not show:
+
+- **The card coming back.** The rail was left off. The NVIDIA driver has
+  declared the GPU lost, and it cannot be rebound while X holds it, so the
+  expected way back is a reboot. Powering the rail on again was not tried.
+- **A card under heavier use**, more than one application, or a display
+  driven from the card at the moment of the cut.
+- **`vkcube` still holds its old `/dev/nvidia*` handles**: the abandoned
+  driver stays loaded in the process, as designed for this case.
+- Whether the picture on screen kept moving was not checked by the script.
+
+## Trying to bring the card back without a reboot (7 October 2026, 12:05)
+
+Log: `docs/track-c/revive.log`. The daemon was stopped first so that it would
+not act on the card's return.
+
+| Step | Result |
+| :--- | :--- |
+| Power rail switched on through the gmux | The card answered at once (`de10`), with a blank configuration |
+| Kernel module asked to take the device back | Accepted: PCI configuration restored (command register and base addresses as before), both functions online, `needs_rebind` set |
+| `nvidia-smi`, nothing else changed | `Unable to determine the device handle ... Unknown Error`: the driver still treats the GPU as lost |
+| `suspend` written to `/proc/driver/nvidia/suspend`, hoping its resume would re-initialise the card | **Never returned.** The writer spins in the kernel at full CPU; `resume` waits behind it. `nvidia-modeset` logged `Failed to query display engine channel state` |
+
+So the card can be revived and the NVIDIA 470 driver cannot, in place. Once it
+has logged "GPU has fallen off the bus" it does not look at the device again,
+and its sleep path does not cope with that state. The attempt left the machine
+worse off than before it: one CPU core busy in the kernel, and the driver
+locked in a suspend that will not finish, so the X server will stop the moment
+it next calls into the driver. Only a reboot clears that.
+
+What remains to try, on a fresh boot: after a loss, leave the driver alone
+until nothing holds the device, then unbind it and bind it again. For the
+NVIDIA driver under X that means the X server has to be restarted (a log-out),
+which is still less than a reboot. Open drivers can be rebound with the
+display server running.
+
+## Second power cut, with the freeze (7 October 2026, 13:55)
+
+Fresh boot, driver patch revision 4, kernel module with the freeze hook. A dry
+run first, with the card powered: `freeze` then `thaw` through
+`/proc/driver/nvidia/zss_hold` both returned at once and `nvidia-smi` worked
+afterwards (`docs/track-c/freeze-dry-run.log`). Then the cut, as before, under
+`zss-run vkcube` (`docs/track-c/surprise-cut-2.log`).
+
+| After the cut | What happened |
+| :--- | :--- |
+| within 125 ms | The NVIDIA driver logged `Xid 79 ... GPU has fallen off the bus`, **against `vkcube` itself** |
+| 125 ms | The kernel module reported the loss and froze the driver |
+| under 0.9 s | `vkcube` was dead: `SIGABRT` |
+| 20 s | Machine up, X answering, driver `frozen`, daemon `lost` |
+| 120 s | The daemon gave up waiting for the dead `vkcube` to answer its evacuation request |
+| about 150 s | The device was taken back: power on, PCI state restored, **`NVRM: ZSS: thaw done (0x0)`**, module state `on` |
+| a second later | The module reported the device silent again and froze the driver a second time |
+| same second | The log stops. **The machine reset itself**, with nobody touching it |
+
+What it shows:
+
+- **The freeze lost the race.** An application rendering flat out calls into
+  the driver many times in 125 ms, and one of those calls found the device
+  missing before the guard did. Polling cannot be made fast enough to win
+  that; the freeze can only protect a card that is not being hammered.
+- **`vkcube` did not hang this time, it crashed.** The dead driver answered a
+  call with an error that the layer passed on; `vkcube` reacted by creating a
+  device again, that failed, and the Vulkan loader aborted on the invalid
+  handle (`vkGetDeviceQueue: Invalid device`). The layer logged nothing: it
+  never saw a result it recognised as a loss.
+- **The thaw reported success even though the driver had already logged
+  Xid 79.** That is the first sign that this driver can be brought back in
+  place. It is one line in a log, not a working GPU: nothing was run on the
+  card afterwards.
+- **Something then made the device go silent again and the machine reset
+  itself.** The user did not reboot it. The next boot began 66 seconds after
+  the last log line, which is about what the firmware, the 15-second boot menu
+  and the kernel take, so the reset was immediate. There is no panic message,
+  no saved crash record, and `kernel.panic` is 0 (a kernel panic would have
+  halted, not rebooted); the file system replayed its log on the way up. That
+  is a reset below the kernel: a fatal bus error or a triple fault, the kind
+  of failure the original design's root-port shield was meant to prevent. The
+  cause is not established. Two suspects: the daemon rescanned the
+  whole PCI bus as part of taking a lost device back (the last kernel line is
+  a bridge being resized by that rescan), and the guard may have mistaken a
+  reset the driver gives the card while re-initialising it for a second loss.
+
+Changes made after it, none yet tried on the hardware:
+
+- Layer: any error from a driver is checked against the bus before it is
+  passed to the application; if the device no longer answers, it is a loss.
+- Daemon: an application that has died or is dumping core is not waited for;
+  a device the kernel module took back is not followed by a bus rescan.
+- Module: for five seconds after a device comes back, silence is not taken
+  for a loss.
+
+## Third power cut: GPU idle, and brought back without a reboot (7 October 2026, 15:34)
+
+With the changes listed above installed, and nothing rendering on the card
+(`docs/track-c/surprise-cut-3.log`).
+
+| Step | Result |
+| :--- | :--- |
+| Rail cut unannounced | Kernel module reported the loss after 50 ms |
+| Driver | Frozen at once. **No `Xid 79`**: the driver never found out |
+| 25 s with the card gone | Machine and X fine; daemon `lost`, `driver=frozen` |
+| `zssctl on` | Power restored, PCI state restored, `NVRM: ZSS: thaw done (0x0)`, daemon `attached` |
+| Twelve seconds after | Card answering throughout, no second loss, no reset |
+| `nvidia-smi` | `NVIDIA GeForce GT 650M, 46, 5 MiB` |
+| `zss-run vkcube` started afterwards | Selected the NVIDIA card and rendered on it |
+
+This is the first time the card and its driver came back from an unannounced
+power cut without a reboot. It rests on the freeze landing before anything
+called into the driver, which an idle card allows and a busy one, so far, does
+not. The reset seen in the second run did not recur; the bus rescan it was
+blamed on had been removed, which fits that blame without proving it.
+
+## Fourth power cut: `vkcube` rendering again (7 October 2026, 15:36)
+
+Same as the second run, with the changes made after it
+(`docs/track-c/surprise-cut-4.log`).
+
+| Step | Result |
+| :--- | :--- |
+| Rail cut | Module reported the loss after 99 ms |
+| Driver | `Xid 79 ... GPU has fallen off the bus` against `vkcube`, then frozen: the race was lost again |
+| `vkcube` | **Did not crash this time**, and did not move either: alive, asleep, still holding the NVIDIA nodes 25 s later |
+| Machine and X | Fine for the 30 s of observation |
+| `zssctl on` | **The machine hung.** The user rebooted it by hand |
+
+Reading of it, not all of it proven:
+
+- The layer change held: the dead driver's error no longer reached `vkcube`.
+- `vkcube` was never rebuilt on Intel because, with the driver frozen, every
+  call into it sleeps until the thaw. The thread that would have come out
+  with an error after the first cut now does not come out at all. The freeze
+  and the evacuation work against each other.
+- The hang at `zssctl on` is the thaw resuming the driver under a client whose
+  state on the card no longer exists. A real suspend saves that state and
+  restores it; a freeze cannot. In the third run only the X server and
+  `nvidia-persistenced` held the card, both idle, and the thaw was clean.
+
+So, on this driver: a card lost while idle comes back without a reboot; a card
+lost while a program is rendering on it does not, and trying takes the machine
+down. After this run the daemon refuses to bring a lost device with a frozen
+driver back while anything but the display server and the listed services
+still holds it, and names what has to be closed first. Whether closing those
+programs and then thawing works has not been tried.
+
 ## Not done
 
 - **Power saving is measured once only.** Repeating it several times, and with the dGPU busy beforehand, would tighten the figure.
 - **The unbind strategy** (PCI remove, power cycle, rescan) was not tried.
-- **A power cut under the active driver** (the real device-loss case) was not
-  approved and not run.
+- **Bringing the card back after an unannounced power cut**, short of a reboot.
 - **Longer off periods**, and a cycle while an application is using the dGPU
   outside the layer.

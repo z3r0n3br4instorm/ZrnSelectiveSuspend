@@ -116,7 +116,7 @@ def patch_refuses_what_it_does_not_know():
 def installer_check_changes_nothing():
     rc, out = run(os.path.join(PKG, "install.sh"), "--check")
     check(rc == 0 and "what this machine supports" in out and "Application migration" in out, out)
-    for line in ("Power-off", "Wake on demand", "Driver in initial ramdisk"):
+    for line in ("Power-off", "Wake on demand", "Driver in initial ramdisk", "ZSS kernel module", "IOMMU"):
         check(line in out, f"the report has no '{line}' line:\n{out}")
 
 
@@ -140,6 +140,10 @@ def install_into_a_staging_root_and_remove():
           "the installer wrote bootloader files")
     unit = open(os.path.join(root, "etc/systemd/system/zssd.service")).read()
     check("ExecStopPost=/usr/local/sbin/zssd --recover" in unit, "the service has no recovery step")
+    check("modprobe -q zss" in unit and "ExecStartPre=-" in unit, "the service does not load the module, or fails without it")
+    check(not os.path.exists(os.path.join(root, "usr/src")), "the kernel module was installed without being asked for")
+    check(not os.path.exists(os.path.join(root, "etc/modules-load.d")) and not os.path.exists(os.path.join(root, "etc/mkinitcpio.conf.d")),
+          "the installer arranged for the module to load at early boot")
 
     # The installed daemon reads the installed configuration format.
     conf = os.path.join(root, "etc/zss/zssd.conf")
@@ -151,6 +155,12 @@ def install_into_a_staging_root_and_remove():
     open(conf, "a").write("idle_timeout = 123\n")
     rc, out = run(os.path.join(PKG, "install.sh"), "--build", BUILD, "--destdir", root)
     check(rc == 0 and "idle_timeout = 123" in open(conf).read(), "reinstalling overwrote the configuration")
+
+    # Asked for, the module's source lands where DKMS expects it, complete.
+    rc, out = run(os.path.join(PKG, "install.sh"), "--build", BUILD, "--destdir", root, "--kernel-module")
+    src = os.path.join(root, "usr/src/zss-0.1.0")
+    check(rc == 0 and sorted(os.listdir(src)) == ["Kbuild", "Makefile", "dkms.conf", "zss.c"], "module source not staged: " + out)
+    check('PACKAGE_VERSION="0.1.0"' in open(os.path.join(src, "dkms.conf")).read(), "dkms.conf and the directory disagree")
 
     rc, out = run(os.path.join(PKG, "uninstall.sh"), "--destdir", root)
     check(rc == 0 and tree(root) == ["etc/zss/zssd.conf"], f"uninstall left more than the configuration: {tree(root)}")

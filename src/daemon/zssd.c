@@ -422,6 +422,34 @@ static bool pump(int timeout_ms)
 }
 
 /* Waits until no client has an outcome pending. Clients that vanish count as failed. */
+/* Whether the process can still answer: gone, a zombie, or being dumped after a crash, it cannot. */
+static bool process_can_answer(pid_t pid)
+{
+    char path[64], line[512], *p;
+    FILE *f;
+    bool ok = false;
+
+    snprintf(path, sizeof(path), "/proc/%d/stat", pid);
+    f = fopen(path, "r");
+    if (!f)
+        return false;
+    p = fgets(line, sizeof(line), f) ? strrchr(line, ')') : NULL;
+    fclose(f);
+    if (p && p[1] == ' ' && p[2] != 'Z' && p[2] != 'X')
+        ok = true;
+    if (ok) {
+        /* A crashed process keeps its sockets open for as long as its core is being written. */
+        snprintf(path, sizeof(path), "/proc/%d/status", pid);
+        f = fopen(path, "r");
+        while (f && fgets(line, sizeof(line), f))
+            if (!strncmp(line, "CoreDumping:", 12) && atoi(line + 12) == 1)
+                ok = false;
+        if (f)
+            fclose(f);
+    }
+    return ok;
+}
+
 static void wait_outcomes(void)
 {
     long long deadline = now_ms() + OUTCOME_TIMEOUT_MS;
@@ -429,9 +457,17 @@ static void wait_outcomes(void)
     for (;;) {
         bool pending = false;
 
-        for (int i = 0; i < MAX_CLIENTS; i++)
-            if (clients[i].fd >= 0 && clients[i].outcome == OC_PENDING)
-                pending = true;
+        for (int i = 0; i < MAX_CLIENTS; i++) {
+            if (clients[i].fd < 0 || clients[i].outcome != OC_PENDING)
+                continue;
+            /* No point holding everything up for an application that died of the loss. */
+            if (!process_can_answer(clients[i].pid)) {
+                clients[i].outcome = OC_FAILED;
+                snprintf(clients[i].outcome_reason, sizeof(clients[i].outcome_reason), "the application has died");
+                continue;
+            }
+            pending = true;
+        }
         if (!pending)
             return;
         if (now_ms() > deadline || !pump(200))
@@ -860,7 +896,10 @@ static bool do_release(struct client *req, struct gpu *g, const char *to, bool o
         return false;
     }
     if (off) {
-        progress(req, "  [4/%d] PCI configuration saved: %zu bytes", steps, g->config_len);
+        if (g->kmod)
+            progress(req, "  [4/%d] PCI state: saved and restored in the kernel (zss module)", steps);
+        else
+            progress(req, "  [4/%d] PCI configuration saved: %zu bytes", steps, g->config_len);
         progress(req, "  [5/%d] Driver %s suspended (%.2f s)", steps, g->driver[0] ? g->driver : "(none)",
                  (double)(now_ms() - t) / 1000.0);
     }
@@ -875,11 +914,12 @@ static bool do_release(struct client *req, struct gpu *g, const char *to, bool o
     if (pstate != 0) {
         if (pstate != -2)
             snprintf(err, sizeof(err), "the power backend did not confirm power-off");
-        if (off) {
+        if (off || g->backend->strategy == RS_SUSPEND) {
             /* Put the driver back rather than leave it suspended on a powered device. */
             char err2[ZSSD_ERR] = "";
 
-            progress(req, "  FAILED: %s; resuming the driver", err);
+            if (off)
+                progress(req, "  FAILED: %s; resuming the driver", err);
             g->backend->power_on(g, err2);
             driver_resume(g, err2);
             gpu_unhide(g);
@@ -980,7 +1020,44 @@ static void do_attach(struct client *req, struct gpu *g, bool restore, const cha
         return;
     }
     /* A device that left by itself has to come back by itself. */
-    if (lost && g->seen && !pci_present(g->pci)) {
+    /*
+     * A driver frozen at the moment of a loss is brought back by its resume,
+     * with nothing having been saved. The display server and the listed
+     * services, idle on the device, come through that. A program that was
+     * rendering on it does not: its state on the device is gone while the
+     * driver believes it is there, and resuming the driver under it hung the
+     * reference laptop. Such programs have to be gone first.
+     */
+    if (lost && gpu_driver_frozen(g)) {
+        char who[300] = "";
+        pid_t holders[128];
+        int nh = find_holders(g, holders, 128);
+
+        for (int i = 0; i < nh; i++) {
+            char comm[64];
+
+            pid_comm(holders[i], comm, sizeof(comm));
+            if (is_display_server(holders[i], comm) || service_listed(comm))
+                continue;
+            snprintf(who + strlen(who), sizeof(who) - strlen(who), "%s%s (pid %d)", who[0] ? ", " : "", comm, holders[i]);
+        }
+        if (who[0]) {
+            char msg[640];
+
+            snprintf(msg, sizeof(msg),
+                     "the device was lost while these were using it, and its driver cannot be resumed under them: %.300s. "
+                     "Close them first (kill -9 if they do not respond), then try again", who);
+            if (req) {
+                send_result(req, false, "", msg, g);
+            } else if (strncmp(g->last_refusal, who, sizeof(g->last_refusal) - 1)) {
+                /* Asked every second while the device answers; said once per set of programs. */
+                logmsg("%s: %s", g->pci, msg);
+                snprintf(g->last_refusal, sizeof(g->last_refusal), "%s", who);
+            }
+            return;
+        }
+    }
+    if (lost && g->seen && !g->kmod && !gpu_returned(g)) {
         send_result(req, false, "", "the device is still absent", g);
         return;
     }
@@ -1006,7 +1083,12 @@ static void do_attach(struct client *req, struct gpu *g, bool restore, const cha
         progress(req, "  [1/4] Power restored through %s (%.2f s)", g->backend->name, (double)(now_ms() - t) / 1000.0);
     t = now_ms();
     /* An address that never existed on the bus is a test device: nothing to wait for. */
-    wait_bus = lost ? g->seen : g->backend->strategy == RS_UNBIND;
+    /*
+     * A device the kernel module took back never left the kernel's list, so
+     * there is nothing to rescan for; and a rescan walks every bus in the
+     * machine at a moment when one device on it has only just been revived.
+     */
+    wait_bus = g->kmod ? false : lost ? g->seen : g->backend->strategy == RS_UNBIND;
     if (wait_bus) {
         long long deadline = now_ms() + DRIVER_TIMEOUT_MS;
         char drv[64] = "";
@@ -1014,7 +1096,7 @@ static void do_attach(struct client *req, struct gpu *g, bool restore, const cha
         pci_rescan();
         /* Ready means present, and bound again if a driver was bound before. */
         for (;;) {
-            if (pci_present(g->pci)) {
+            if (gpu_on_bus(g)) {
                 pci_driver(g->pci, drv, sizeof(drv));
                 if (drv[0] || !g->driver[0])
                     break;
@@ -1022,7 +1104,7 @@ static void do_attach(struct client *req, struct gpu *g, bool restore, const cha
             if (now_ms() > deadline) {
                 set_state(g, before);
                 send_result(req, false, "",
-                            pci_present(g->pci) ? "no kernel driver bound to the device in time"
+                            gpu_on_bus(g) ? "no kernel driver bound to the device in time"
                                                 : "the device did not appear on the bus", g);
                 return;
             }
@@ -1090,7 +1172,7 @@ static void check_reappeared(void)
                    (g->state != GS_POWERED_OFF && g->state != GS_SAFE_TO_REMOVE)) {
             continue;
         }
-        if (!pci_present(g->pci))
+        if (!gpu_returned(g))
             continue;
         logmsg("%s reappeared; attaching", g->pci);
         busy = true;
@@ -1323,7 +1405,7 @@ static void check_idle(void)
 static void do_evacuate(struct gpu *g)
 {
     int gi = (int)(g - gpus), nh;
-    bool gone = !pci_present(g->pci);
+    bool gone = !gpu_on_bus(g);
     pid_t holders[128];
     char target[64];
 
@@ -1376,7 +1458,7 @@ static void check_bus(void)
     bus_changed = false;
     for (int i = 0; i < ngpus; i++) {
         struct gpu *g = &gpus[i];
-        bool present = pci_present(g->pci);
+        bool present = gpu_on_bus(g);
 
         if (present)
             g->seen = true;
@@ -1444,9 +1526,17 @@ static void do_status(struct client *req, const char *only)
         zj_add_bool(&o, "dry_run", g->dry_detached);
         zj_add_str(&o, "backend", g->backend ? g->backend->name : "none");
         zj_add_bool(&o, "removal_supported", g->backend && g->backend->removal_safe);
-        if (pci_present(g->pci) && g->state == GS_ATTACHED)
+        if (gpu_on_bus(g) && g->state == GS_ATTACHED)
             pci_driver(g->pci, g->driver, sizeof(g->driver));
         zj_add_bool(&o, "wake_support", gpu_wake_supported(g));
+        zj_add_bool(&o, "driver_frozen", gpu_driver_frozen(g));
+        {
+            /* Whether the kernel confines the device's memory access; only known while it is on the bus. */
+            char group[300];
+
+            snprintf(group, sizeof(group), "/sys/bus/pci/devices/%.15s/iommu_group", g->pci);
+            zj_add_bool(&o, "iommu", path_exists(group));
+        }
         zj_add_int(&o, "wakes", g->wakes);
         zj_add_int(&o, "waiting", g->off ? g->nwaiting : 0);
         zj_add_int(&o, "served", g->off ? g->served : 0);
@@ -1465,7 +1555,7 @@ static void do_status(struct client *req, const char *only)
             zj_add_str(&o, "gpu", g->pci);
             zj_add_int(&o, "pid", holders[i]);
             zj_add_str(&o, "name", comm);
-            if (!pci_present(g->pci) && g->seen) {
+            if (!gpu_on_bus(g) && g->seen) {
                 zj_add_str(&o, "class", "stale");
                 zj_add_str(&o, "reason", "holds a handle to a device that is gone");
             } else {
@@ -1583,7 +1673,8 @@ static void handle(struct client *c, struct zj_msg *m)
             } else if (zj_is(m, "off")) {
                 do_release(c, g, zj_str(m, "to", ""), true, zj_bool(m, "console", false), false);
             } else if (zj_is(m, "on")) {
-                if (g->state != GS_POWERED_OFF)
+                /* A lost device may simply have lost its power; the kernel module can try to give it back. */
+                if (g->state != GS_POWERED_OFF && !(g->state == GS_LOST && g->kmod))
                     send_result(c, false, "", "the device is not powered off", g);
                 else
                     do_attach(c, g, zj_bool(m, "return", false), "requested");
@@ -1655,6 +1746,7 @@ static void usage(void)
           "  --group NAME          group allowed to switch devices (default zss)\n"
           "  --idle-timeout SEC    power a device off after this long unused (default: never)\n"
           "  --stop-services LIST  units stopped around a power-off (default nvidia-persistenced)\n"
+          "  --kmod-backend NAME   power backend the kernel module is told to use (default: it chooses)\n"
           "  --hide-while-off WHAT auto (default), no, or extra paths hidden while a device is off on request\n"
           "  --default-target T    where applications are sent when a request names no target\n"
           "  --allow-software      let applications fall back to a software renderer\n"
@@ -1687,6 +1779,8 @@ static int set_option(const char *key, const char *value)
         default_target = v;
     else if (!strcmp(key, "stop_services"))
         zssd_cfg.stop_services = v;
+    else if (!strcmp(key, "kmod_backend"))
+        zssd_cfg.kmod_backend = v;
     else if (!strcmp(key, "hide_while_off"))
         zssd_cfg.hide_while_off = v;
     else if (!strcmp(key, "runtime_dir"))

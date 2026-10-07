@@ -1,0 +1,5 @@
+# SPDX-License-Identifier: GPL-2.0-only
+obj-m := zss.o
+# The test stand-in is built only when asked for (tests/track_k.py).
+obj-$(ZSS_TEST_HOOKS) += zss_test_hooks.o
+ccflags-y := -Wall -Werror

@@ -5,15 +5,61 @@
 **Reference Hardware Platform (Tier 1 Target):** Apple MacBookPro9,1 (Mid-2012 15-inch Unibody, Ivy Bridge + Kepler GT 650M + Lightridge)  
 **Supported GPU Stacks:** NVIDIA Proprietary (`nvidia`), Open-Source DRM (`nouveau`, `amdgpu`, `xe`, `i915`)  
 **Kernel Target:** Linux 6.x / 7.x (Current Reference: `7.2.2-arch1-1 x86_64`)  
-**Document Version:** 1.1.0-UNIVERSAL  
+**Document Version:** 1.2.0  
 **Author:** zerone  
 
-> **Status (October 2026).** The first milestone is the orderly path: the user
-> asks for a GPU to be detached, its applications move to another GPU, and the
-> device is released and powered off. It is implemented in userspace (`src/`)
-> and specified in `openspec/changes/zss-happy-path/`. The surprise-removal
-> subsystems described below (PCIe shield, MMIO shadow, DMA isolator,
-> resurrection engine) are **deferred** and not part of that milestone.
+> **Status (October 2026).** This document is the original design. Part of it
+> has been built, part was built differently, and part has been dropped. The
+> section "Scope" below says which, and each subsystem in section 5 carries a
+> status line. For what exists and how to use it, read `README.md`.
+
+## Scope: what was built, what changed, what was dropped
+
+The original design put everything in the kernel and protected a running
+driver from a vanishing card by standing between the driver and its hardware.
+What was built instead moves applications off the card first, then powers it
+off with the driver's own cooperation. That needs far less from the kernel,
+and it works on the reference laptop today.
+
+| Original subsystem | Outcome | Where it lives now |
+| :--- | :--- | :--- |
+| 5.1 Root-port shield | **Not built.** The kernel's own hot-plug handling covers ports that report removal. For the rest, the `zss` module's loss guard notices a silent card within 0.3 s, marks it disconnected and tells its driver. Masking AER and machine checks is not done and has no test bed. | `kmod/zss.c` (guard) |
+| 5.2 MMIO shadowing | **Dropped.** See below. | - |
+| 5.3 DMA isolator | **Dropped as a subsystem.** Confinement is the IOMMU's job and the kernel already does it when one is enabled. The module switches bus mastering off before a power cut and reports whether an IOMMU is in force. | `kmod/zss.c` |
+| 5.4 Power adapters | **Built.** `gmux` (verified on the laptop), `acpi` (written, never run), a hot-plug slot backend in user space (QEMU). | `kmod/zss.c`, `src/daemon/backend.c` |
+| 5.5 Resurrection engine | **Built differently.** Power, a bounded wait for the card to answer, and the PCI core's state restore are in the module. The card's video BIOS is not executed by ZSS: every real GPU driver re-initialises its card on resume, and the module calls that. A card with no driver is therefore refused. | `kmod/zss.c` |
+| Not in the original design | **Built.** Moving applications between GPUs and rebuilding them after a loss (the Vulkan layer), the daemon and its rules, freezing what cannot be moved, hiding a switched-off card, and the wake-on-touch patch to NVIDIA's driver. | `src/`, `patches/` |
+
+### Why MMIO shadowing was dropped
+
+A driver reaches its card with ordinary memory instructions, so there is
+nothing to hook. Getting in between means one of:
+
+- **Trapping every access by page fault**, as the kernel's `mmiotrace` does.
+  Each register access becomes a fault and a single-step, and that mechanism
+  restricts the machine to one CPU while active. Unusable for a working GPU.
+- **Re-pointing the driver's page tables at RAM** (the design in 5.2). The
+  kernel exports no way to find another driver's mappings; it would mean
+  walking private structures that change between kernel versions.
+- **Running the driver in a virtual machine.** A different project.
+
+Beyond the mechanism, a shadow has to answer reads on the dead card's behalf.
+For a closed driver nobody outside the vendor knows what thousands of
+registers should say, and plausible wrong answers can be worse than the
+all-ones a missing device returns by itself.
+
+And none of it can be tested here: the reference laptop's card is soldered,
+and a virtual card does not die the way hardware does.
+
+If this is taken up again it needs hardware that can really lose a card (an
+eGPU), an open driver to try it on first, and its own design document.
+
+### What "universal" means today
+
+Vendor-neutral by construction, proven on one machine: see the table in
+`README.md`. The pieces written for any GPU are the layer, the daemon, and
+the module's sequence and guard. The pieces tied to hardware are the power
+backends and the NVIDIA patch.
 
 ---
 
@@ -178,7 +224,11 @@ In `/etc/X11/xorg.conf.d/10-prime-intel-primary.conf`, marking the dGPU as `Inac
 
 ## 5. The Core Subsystems
 
+> These are the subsystems as originally designed. The **Status** line under
+> each says what became of it; the "Scope" section at the top has the reasons.
+
 ### 5.1. Subsystem 1: Root Port AER & Link Shield (`zrn_pcie_shield`)
+* **Status:** not built. Loss detection and the disconnected mark are in the `zss` module; AER and machine-check masking are open.
 * **Target:** Upstream PCIe Root Port hosting the GPU (e.g. `0000:00:01.0` on Intel Ivy Bridge, or generic root bridges on AMD/Intel PCs).
 * **Operation:**
   1. Accesses the Root Port's PCI Express Extended Capabilities (AER - Advanced Error Reporting).
@@ -187,6 +237,7 @@ In `/etc/X11/xorg.conf.d/10-prime-intel-primary.conf`, marking the dGPU as `Inac
   4. Masks Machine Check Exceptions (MCE) on the host CPU. When power drops or the cable is unplugged, the CPU treats the link loss as an authorized silent event.
 
 ### 5.2. Subsystem 2: MMIO Shadowing Engine (`zrn_mmio_shadow`)
+* **Status:** dropped. Not planned.
 * **Target:** Target GPU MMIO BARs (e.g. BAR0 and BAR1).
 * **Operation:**
   1. Allocates a contiguous shadow scratchpad buffer in kernel RAM matching the primary BAR size.
@@ -199,6 +250,7 @@ In `/etc/X11/xorg.conf.d/10-prime-intel-primary.conf`, marking the dGPU as `Inac
      * Re-points PTEs to the physical PCIe BAR aperture on the bus.
 
 ### 5.3. Subsystem 3: DMA & Interrupt Quencher (`zrn_dma_isolator`)
+* **Status:** dropped as a subsystem. The module disables bus mastering before a power cut and reports the IOMMU state.
 * **Target:** Host Memory and Device Ring Buffers.
 * **Operation:**
   1. Commands the Linux IOMMU (Intel VT-d / AMD-Vi) to revoke DMA write permissions for the GPU's BDF (Bus/Device/Function).
@@ -206,12 +258,16 @@ In `/etc/X11/xorg.conf.d/10-prime-intel-primary.conf`, marking the dGPU as `Inac
   3. Mask and quiesce device MSI-X / MSI interrupt vectors.
 
 ### 5.4. Subsystem 4: Platform Power Adapters (`zrn_power_backend`)
+**Status:** built. `gmux` runs on the reference laptop; `acpi` is written and has never run; the hot-plug adapter exists in user space and is tested in QEMU. The gmux adapter drives the power port only, not the display or DDC ports.
+
 Modular power backends allow the same core to trigger power gating across different physical platforms:
 * **Apple Classic gmux Adapter:** Controls LPC I/O ports `0x750` (power), `0x710` (display), and `0x740` (DDC).
 * **Standard PC / ACPI Adapter:** Invokes ACPI `_PR3` / `_PS4` power resource methods on modern laptops.
 * **eGPU / Hot-Plug Adapter:** Passive mode; detects physical insertion/removal without local power FET control.
 
 ### 5.5. Subsystem 5: Cold-Resurrection Engine (`zrn_resurrect`)
+**Status:** built differently. Steps 1 and 3 are in the `zss` module. Step 2 is left to the hardware and checked by waiting for the card to answer. Step 4 is the driver's own resume code, not ZSS's. Step 5 does not exist, since there is no shadow.
+
 When re-energizing a GPU from a 0W cold state or reconnecting an eGPU:
 1. **Power Stabilization:** Assert power rails; enforce platform-specific stabilization delays (50ms on Apple gmux).
 2. **Link Retraining:** Force physical link retraining via `PCI_EXP_LNKCTL_RETRAIN`. Poll `PCI_EXP_LNKSTA_TRAIN` until hardware link synchronization is achieved.
@@ -268,24 +324,29 @@ When re-energizing a GPU from a 0W cold state or reconnecting an eGPU:
 
 ---
 
-## 7. Implementation Roadmap & Phases
+## 7. Roadmap
 
-### Phase 1: Reference Platform Diagnostic Bridge (Completed)
-* Author formal specification and hardware topology mapping.
-* Define Apple gmux classic registers and PCIe capability offsets in [`include/zrn_selective_suspend.h`](file:///home/zerone/Documents/Projects/ZrnSelectiveSuspend/include/zrn_selective_suspend.h).
+### Done
 
-### Phase 2: PCIe Root Port Shield (`zrn_pcie_shield.ko`)
-* Implement universal AER Surprise Down masking on PCIe root ports.
-* Test that cutting power via gmux (`outb 0x750 0`) does not panic the Linux host CPU when the card is unmanaged.
+* **Orderly detach and attach** in user space: applications moved between GPUs, driver released, power cut (`zss-happy-path`).
+* **Device loss**: applications rebuilt from memory on another GPU, or parked (`zss-device-loss`).
+* **System integration**: service, installer, the NVIDIA wake-on-touch patch through DKMS, power-off under a running X session, freezing, hiding, serving the display server (`zss-system-integration`).
+* **Kernel module**: the power sequence, state save and restore, loss guard, `gmux` backend verified on the reference laptop (`zss-kernel-shim`).
 
-### Phase 3: MMIO Page Table Swapper (`zrn_mmio_shadow.ko`)
-* Implement dynamic kernel page-table walking and shadow buffer allocation for target BAR0 addresses.
-* Verify that read/write accesses to shadowed space are absorbed without generating bus errors.
+### Next, in the order they unblock real users
 
-### Phase 4: Cold-Resurrection Engine (`zrn_resurrect.ko`)
-* Implement PCI link retraining and configuration space replay.
-* Implement Kepler GK107M / generic GPU microcode initialization sequence on bare metal.
+1. **Try the module on an open driver on real hardware** (`amdgpu`, `i915`/`xe` or `nouveau`), and settle how the display server is handled there.
+2. **Try the `acpi` backend** on a hybrid laptop that has firmware power resources.
+3. **A wider Vulkan surface in the layer** (beyond 1.0), and an OpenGL path, so that more applications can be moved rather than frozen.
+4. **Notice a monitor plugged in while the card is off** (the gmux hot-plug interrupt on the reference laptop).
 
-### Phase 5: Display Server & Hotplug Daemon (`zrn-dockd`)
-* Build userspace daemon to listen to SMC/Lightridge hotplug events and automate `xrandr` / Wayland multi-output binding.
-* Generalize platform adapters for modern PC laptops and eGPUs.
+### Open, with no test bed yet
+
+* AER and machine-check handling for a card that is physically pulled (5.1).
+* Anything for a driver that ignores the disconnected mark.
+
+### Dropped
+
+* MMIO shadowing (5.2) and a DMA isolator of our own (5.3). See "Scope".
+* Executing a card's video BIOS from ZSS (part of 5.5): drivers do it.
+* The display-switching daemon `zrn-dockd` (old phase 5): outside what ZSS is for.

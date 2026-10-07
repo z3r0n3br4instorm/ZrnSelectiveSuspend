@@ -1,0 +1,57 @@
+[  0.001] ==== cut at 2026-10-07 15:34:03, application pid 0, gmux base 0x700
+[  0.609] before: bus=de10 module=on driver_frozen=0 nvidia=running [0000:01:00.0 nvidia online; 0000:01:00.1 snd_hda_intel online]
+[  0.714] before: daemon: 0000:01:00.0  state=attached  backend=zss-kmod  removal=not supported  wake=yes  iommu=no | pid 1063    Xorg             display-server | pid 122047  nvidia-persiste  non-migratable: not started under the ZSS layer
+[  0.752] before: application: GONE
+[  0.807] before: X server: answers
+[  0.855] CUTTING the discrete GPU's power rail now, with its driver running and nothing warned
+[  0.941] the kernel module reported the loss 50 ms after the cut
+[  1.727] + 0.80s: bus=ffff module=lost driver_frozen=1 nvidia=frozen [0000:01:00.0 nvidia offline; 0000:01:00.1 snd_hda_intel offline]
+[  2.096] + 0.80s: daemon: 0000:01:00.0  state=lost  backend=zss-kmod  removal=not supported  wake=yes  driver=frozen  iommu=no | pid 1063    Xorg             stale: holds a handle to a device that is gone
+[  2.150] + 0.80s: application: GONE
+[  2.227] + 0.80s: X server: answers
+[  2.765] + 0.80s: kernel: NVRM: ZSS: frozen; nothing was asked of the device
+[  2.800] + 0.80s: kernel: zss: 0000:01:00.0: lost (stopped answering, driver frozen)
+[  3.173] + 2.28s: bus=ffff module=lost driver_frozen=1 nvidia=frozen [0000:01:00.0 nvidia offline; 0000:01:00.1 snd_hda_intel offline]
+[  3.545] + 2.28s: daemon: 0000:01:00.0  state=lost  backend=zss-kmod  removal=not supported  wake=yes  driver=frozen  iommu=no | pid 1063    Xorg             stale: holds a handle to a device that is gone
+[  3.761] + 2.28s: application: GONE
+[  3.838] + 2.28s: X server: answers
+[  4.661] + 3.73s: bus=ffff module=lost driver_frozen=1 nvidia=frozen [0000:01:00.0 nvidia offline; 0000:01:00.1 snd_hda_intel offline]
+[  5.213] + 3.73s: daemon: 0000:01:00.0  state=lost  backend=zss-kmod  removal=not supported  wake=yes  driver=frozen  iommu=no | pid 1063    Xorg             stale: holds a handle to a device that is gone
+[  5.256] + 3.73s: application: GONE
+[  5.332] + 3.73s: X server: answers
+[  7.928] + 6.99s: bus=ffff module=lost driver_frozen=1 nvidia=frozen [0000:01:00.0 nvidia offline; 0000:01:00.1 snd_hda_intel offline]
+[  8.451] + 6.99s: daemon: 0000:01:00.0  state=lost  backend=zss-kmod  removal=not supported  wake=yes  driver=frozen  iommu=no | pid 1063    Xorg             stale: holds a handle to a device that is gone
+[  9.051] + 6.99s: application: GONE
+[  9.094] + 6.99s: X server: answers
+[ 12.851] +11.93s: bus=ffff module=lost driver_frozen=1 nvidia=frozen [0000:01:00.0 nvidia offline; 0000:01:00.1 snd_hda_intel offline]
+[ 13.127] +11.93s: daemon: 0000:01:00.0  state=lost  backend=zss-kmod  removal=not supported  wake=yes  driver=frozen  iommu=no | pid 1063    Xorg             stale: holds a handle to a device that is gone
+[ 13.699] +11.93s: application: GONE
+[ 13.743] +11.93s: X server: answers
+[ 19.481] +18.55s: bus=ffff module=lost driver_frozen=1 nvidia=frozen [0000:01:00.0 nvidia offline; 0000:01:00.1 snd_hda_intel offline]
+[ 19.613] +18.55s: daemon: 0000:01:00.0  state=lost  backend=zss-kmod  removal=not supported  wake=yes  driver=frozen  iommu=no | pid 1063    Xorg             stale: holds a handle to a device that is gone
+[ 20.164] +18.55s: application: GONE
+[ 20.205] +18.55s: X server: answers
+[ 25.974] +25.04s: bus=ffff module=lost driver_frozen=1 nvidia=frozen [0000:01:00.0 nvidia offline; 0000:01:00.1 snd_hda_intel offline]
+[ 26.067] +25.04s: daemon: 0000:01:00.0  state=lost  backend=zss-kmod  removal=not supported  wake=yes  driver=frozen  iommu=no | pid 1063    Xorg             stale: holds a handle to a device that is gone
+[ 26.559] +25.04s: application: GONE
+[ 26.602] +25.04s: X server: answers
+[ 27.127] observation over; the rail is still OFF and nothing was restored
+[ 27.168] summary: loss seen by the module after 0.05025219917297363, application moved after None, application GONE, X answers
+[15:34:31.233] ==== return: zssctl on
+[15:34:32.742] before-on: bus=ffff module=lost frozen=1 hold=frozen daemon=state=lost
+[15:34:36.911] zssctl on exit 0: 0000:01:00.0: attached|attached|
+[15:34:37.284] +1s: bus=de10 module=on frozen=0 hold=running daemon=state=attached
+[15:34:38.417] +2s: bus=de10 module=on frozen=0 hold=running daemon=state=attached
+[15:34:40.518] +3s: bus=de10 module=on frozen=0 hold=running daemon=state=attached
+[15:34:43.411] +4s: bus=de10 module=on frozen=0 hold=running daemon=state=attached
+[15:34:45.306] +5s: bus=de10 module=on frozen=0 hold=running daemon=state=attached
+[15:34:47.349] +6s: bus=de10 module=on frozen=0 hold=running daemon=state=attached
+[15:34:48.670] +7s: bus=de10 module=on frozen=0 hold=running daemon=state=attached
+[15:34:49.854] +8s: bus=de10 module=on frozen=0 hold=running daemon=state=attached
+[15:34:50.973] +9s: bus=de10 module=on frozen=0 hold=running daemon=state=attached
+[15:34:52.112] +10s: bus=de10 module=on frozen=0 hold=running daemon=state=attached
+[15:34:53.235] +11s: bus=de10 module=on frozen=0 hold=running daemon=state=attached
+[15:34:54.344] +12s: bus=de10 module=on frozen=0 hold=running daemon=state=attached
+[15:34:55.615] kernel: [ 4862.315668] zss: 0000:01:00.0: off (requested)|[ 4887.781056] zss: 0000:01:00.0: on (requested)|[ 5025.913019] zss: 0000:01:00.0: off (requested)|[ 5042.622253] zss: 0000:01:00.0: on (requested)|[ 5683.224073] NVRM: ZSS: frozen; nothing was asked of the device|[ 5683.224175] zss: 0000:01:00.0: lost (stopped answering, driver frozen)|[ 5715.713742] NVRM: ZSS: thaw done (0x0)|[ 5715.713863] zss: 0000:01:00.0: on (returned)|
+[15:34:55.851] nvidia-smi: NVIDIA GeForce GT 650M, 46, 5 MiB
+[15:34:55.927] final: bus=de10 module=on frozen=0 hold=running daemon=state=attached

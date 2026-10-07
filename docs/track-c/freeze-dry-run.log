@@ -1,0 +1,6 @@
+[13:54:29.720] ==== freeze dry run, card powered; hold=running nvidia-smi: NVIDIA GeForce GT 650M, 46
+[13:54:29.863] freeze: returned 0 after 1 x 0.1 s; state now: frozen
+[13:54:30.495] thaw: returned 0 after 1 x 0.1 s; state now: running
+[13:54:30.556] thaw worked
+[13:54:30.630] kernel: [   11.546810] NVRM: loading NVIDIA UNIX x86_64 Kernel Module  470.256.02  Thu May  2 14:37:44 UTC 2024|[ 1656.237372] NVRM: ZSS: frozen; nothing was asked of the device|[ 1656.871732] NVRM: ZSS: thaw done (0x0)|
+[13:54:30.701] after: hold=running nvidia-smi: NVIDIA GeForce GT 650M, 46, 5 MiB

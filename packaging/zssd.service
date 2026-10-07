@@ -5,6 +5,8 @@ After=zss-nvidia-check.service
 
 [Service]
 Type=simple
+# The kernel module is optional: without it the daemon uses its own power backends.
+ExecStartPre=-/bin/sh -c 'modprobe -q zss'
 ExecStart=/usr/local/sbin/zssd
 # A device must never stay off without a daemon to wake it: callers would sleep for ever.
 ExecStopPost=/usr/local/sbin/zssd --recover

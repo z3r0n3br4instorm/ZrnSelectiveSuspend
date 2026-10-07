@@ -55,6 +55,7 @@ struct gpu {
     char driver[64];   /* kernel driver bound when detach began */
     char audio_driver[64];
     bool nvidia_suspended, rpm_suspended;
+    bool kmod; /* the kernel module does state and power for this device */
     unsigned char config[256];
     size_t config_len;
 
@@ -88,6 +89,7 @@ const char *state_name(enum gpu_state s);
 struct zssd_config {
     const char *runtime_dir;   /* markers and saved PCI configuration */
     const char *stop_services; /* comma-separated units stopped around a power-off */
+    const char *kmod_backend;  /* power backend the kernel module is told to use; "" lets it choose */
     const char *hide_while_off; /* "auto", "no", or extra paths hidden with the device */
     const char *service_cmd;   /* systemctl, or a stand-in for tests */
     const char *wake_file;     /* override for where wake requests are read */
@@ -112,6 +114,9 @@ enum holder_verdict holder_verdict(const struct holder_facts *f, const char **wh
 /* power.c */
 const char *gpu_wake_path(struct gpu *g);
 bool gpu_wake_supported(struct gpu *g);
+bool gpu_on_bus(struct gpu *g);
+bool gpu_returned(struct gpu *g);
+bool gpu_driver_frozen(struct gpu *g);
 int gpu_hide(struct gpu *g, char *what, size_t n);
 int gpu_unhide(struct gpu *g);
 long gpu_wake_count(struct gpu *g);

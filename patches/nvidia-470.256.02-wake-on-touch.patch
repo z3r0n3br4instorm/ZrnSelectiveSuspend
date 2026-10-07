@@ -1,4 +1,4 @@
-ZSS wake-on-touch for the NVIDIA 470.256.02 kernel modules (revision 3)
+ZSS wake-on-touch for the NVIDIA 470.256.02 kernel modules (revision 4)
 
 While the driver is suspended through /proc/driver/nvidia/suspend, every
 caller waits on a lock until the driver is resumed, in a loop with no timeout.
@@ -19,6 +19,23 @@ The list of waiters lets the daemon keep a GPU off that was switched off on
 request, and power it on only for a caller that cannot be left waiting (the
 display server).
 
+Revision 4 adds a freeze for a device that vanishes without warning:
+
+  /proc/driver/nvidia/zss_hold    write "freeze": close the gate, stop the
+                                  periodic check, mark the devices suspended,
+                                  and ask nothing of the hardware
+                                  write "thaw": run the ordinary resume, which
+                                  initialises a device from nothing, and open
+                                  the gate; on failure the driver stays frozen
+                                  write "release": open the gate with no resume
+                                  reads "frozen" or "running"
+
+  nv_zss_freeze(), nv_zss_thaw(), nv_zss_release() are exported, so that a
+  kernel module watching the device can freeze the driver the moment the
+  device stops answering, before the driver finds out for itself and gives the
+  device up for good. Whether the driver's resume copes without a suspend
+  before it is decided inside NVIDIA's closed code.
+
 Nothing changes while the driver is running: the fast path is the same single
 trylock as before. Only the open kernel-interface layer is touched.
 
@@ -31,7 +48,7 @@ packaging/zss-nvidia-patch).
 diff -u a/common/inc/nv-linux.h b/common/inc/nv-linux.h
 --- a/common/inc/nv-linux.h
 +++ b/common/inc/nv-linux.h
-@@ -1628,18 +1628,39 @@
+@@ -1628,18 +1628,44 @@
   * the fake signals sent from the freezer in the kernel's system
   * suspend/hibernate paths.
   */
@@ -39,6 +56,11 @@ diff -u a/common/inc/nv-linux.h b/common/inc/nv-linux.h
 +void nv_zss_wait_done(void);
 +unsigned int nv_zss_wake_count(void);
 +int nv_zss_wake_text(char *text, int size);
++int nv_zss_freeze(void);
++int nv_zss_thaw(void);
++int nv_zss_release(void);
++int nv_zss_frozen(void);
++extern void (*nv_zss_modeset_gate)(int closed);
 +extern wait_queue_head_t nv_zss_wake_wq;
 +
 +/*
@@ -186,6 +208,156 @@ diff -u a/nvidia/nv.c b/nvidia/nv.c
  #if defined(CONFIG_PM)
  static nv_power_state_t nv_system_power_state;
  static nv_pm_action_depth_t nv_system_pm_action_depth;
+@@ -4297,6 +4394,135 @@
+     return status;
+ }
+ 
++/*
++ * ZSS freeze: the device has vanished without warning.
++ *
++ * A suspend closes the gate that every caller passes through and then saves
++ * the device's state. With the device gone there is nothing to save, and
++ * asking it is what makes the driver give up on it for good. Freezing does
++ * the first half only: the gate is closed, the periodic check and the bottom
++ * half are stopped, and each device is marked suspended, without one access
++ * to the hardware. When the device is back, powered and with its PCI state
++ * restored, nv_zss_thaw() runs the ordinary resume, which initialises a
++ * device from nothing, and opens the gate.
++ *
++ * nvidia-uvm is not told, as its suspend would talk to the device.
++ */
++static int zss_frozen;
++void (*nv_zss_modeset_gate)(int closed);
++EXPORT_SYMBOL(nv_zss_modeset_gate);
++
++int nv_zss_frozen(void)
++{
++    return READ_ONCE(zss_frozen);
++}
++
++/*
++ * These three are exported GPL-only on purpose: the kernel lets a module look
++ * a symbol up at run time (symbol_get) only if it is, and that is how the zss
++ * module reaches them without depending on this driver being loaded.
++ */
++int nv_zss_freeze(void)
++{
++    nv_linux_state_t *nvl;
++
++    down(&nv_system_power_state_lock);
++    if (zss_frozen || nv_system_power_state != NV_POWER_STATE_RUNNING)
++    {
++        up(&nv_system_power_state_lock);
++        return -EBUSY;
++    }
++
++    NV_WRITE_LOCK_SYSTEM_PM_LOCK();
++    if (nv_zss_modeset_gate != NULL)
++        nv_zss_modeset_gate(1);
++
++    LOCK_NV_LINUX_DEVICES();
++    for (nvl = nv_linux_devices; nvl != NULL; nvl = nvl->next)
++    {
++        nv_state_t *nv = NV_STATE_PTR(nvl);
++
++        down(&nvl->ldata_lock);
++        if ((((nv->flags & NV_FLAG_OPEN) != 0) ||
++             ((nv->flags & NV_FLAG_PERSISTENT_SW_STATE) != 0)) &&
++            ((nv->flags & NV_FLAG_SUSPENDED) == 0))
++        {
++            nv_stop_rc_timer(nv);
++            nv_kthread_q_stop(&nvl->bottom_half_q);
++            nv_disable_pat_support();
++            nv->flags |= NV_FLAG_SUSPENDED;
++        }
++        up(&nvl->ldata_lock);
++    }
++    UNLOCK_NV_LINUX_DEVICES();
++
++    nv_system_power_state = NV_POWER_STATE_IN_STANDBY;
++    WRITE_ONCE(zss_frozen, 1);
++    up(&nv_system_power_state_lock);
++
++    nv_printf(NV_DBG_ERRORS, "NVRM: ZSS: frozen; nothing was asked of the device\n");
++    return 0;
++}
++EXPORT_SYMBOL_GPL(nv_zss_freeze);
++
++static void zss_open_gate(void)
++{
++    if (nv_zss_modeset_gate != NULL)
++        nv_zss_modeset_gate(0);
++    NV_WRITE_UNLOCK_SYSTEM_PM_LOCK();
++    nv_system_power_state = NV_POWER_STATE_RUNNING;
++    WRITE_ONCE(zss_frozen, 0);
++}
++
++/* Resumes every frozen device and opens the gate. On failure the driver stays frozen. */
++int nv_zss_thaw(void)
++{
++    nv_linux_state_t *nvl;
++    NV_STATUS status = NV_OK;
++
++    down(&nv_system_power_state_lock);
++    if (!zss_frozen)
++    {
++        up(&nv_system_power_state_lock);
++        return -EINVAL;
++    }
++
++    LOCK_NV_LINUX_DEVICES();
++    for (nvl = nv_linux_devices; nvl != NULL && status == NV_OK; nvl = nvl->next)
++    {
++        status = nvidia_resume(nvl->dev, NV_PM_ACTION_RESUME);
++    }
++    UNLOCK_NV_LINUX_DEVICES();
++
++    if (status == NV_OK)
++        zss_open_gate();
++    up(&nv_system_power_state_lock);
++
++    nv_printf(NV_DBG_ERRORS, "NVRM: ZSS: thaw %s (0x%x)\n",
++              (status == NV_OK) ? "done" : "FAILED, still frozen", status);
++    return (status == NV_OK) ? 0 : -EIO;
++}
++EXPORT_SYMBOL_GPL(nv_zss_thaw);
++
++/*
++ * Opens the gate without resuming anything: the way out when a thaw cannot
++ * succeed. Callers then meet a device the driver has not initialised.
++ */
++int nv_zss_release(void)
++{
++    down(&nv_system_power_state_lock);
++    if (!zss_frozen)
++    {
++        up(&nv_system_power_state_lock);
++        return -EINVAL;
++    }
++    zss_open_gate();
++    up(&nv_system_power_state_lock);
++    nv_printf(NV_DBG_ERRORS, "NVRM: ZSS: gate opened without a resume\n");
++    return 0;
++}
++EXPORT_SYMBOL_GPL(nv_zss_release);
++
+ NV_STATUS
+ nv_set_system_power_state(
+     nv_power_state_t power_state,
+@@ -4323,6 +4549,13 @@
+ 
+     down(&nv_system_power_state_lock);
+ 
++    /* ZSS: a frozen driver is brought back by nv_zss_thaw(), which knows nothing was saved. */
++    if (zss_frozen)
++    {
++        status = NV_ERR_INVALID_STATE;
++        goto done;
++    }
++
+     if (nv_system_power_state == power_state)
+     {
+         status = NV_OK;
 diff -u a/nvidia/nv-mmap.c b/nvidia/nv-mmap.c
 --- a/nvidia/nv-mmap.c
 +++ b/nvidia/nv-mmap.c
@@ -206,7 +378,7 @@ diff -u a/nvidia/nv-mmap.c b/nvidia/nv-mmap.c
 diff -u a/nvidia/nv-procfs.c b/nvidia/nv-procfs.c
 --- a/nvidia/nv-procfs.c
 +++ b/nvidia/nv-procfs.c
-@@ -671,6 +671,58 @@
+@@ -671,6 +671,141 @@
      return single_open(file, nv_procfs_show_suspend, NULL);
  }
  
@@ -254,6 +426,89 @@ diff -u a/nvidia/nv-procfs.c b/nvidia/nv-procfs.c
 +    return 0;
 +}
 +
++/*
++ * ZSS: /proc/driver/nvidia/zss_hold. Write "freeze", "thaw" or "release"
++ * (see nv_zss_freeze() in nv.c); reads as "frozen" or "running".
++ */
++static int
++nv_procfs_show_zss_hold(
++    struct seq_file *m,
++    void *v
++)
++{
++    seq_printf(m, "%s\n", nv_zss_frozen() ? "frozen" : "running");
++    return 0;
++}
++
++static int
++nv_procfs_open_zss_hold(
++    struct inode *inode,
++    struct file *file
++)
++{
++    return single_open(file, nv_procfs_show_zss_hold, NULL);
++}
++
++static ssize_t
++nv_procfs_write_zss_hold(
++    struct file *file,
++    const char __user *buf,
++    size_t count,
++    loff_t *pos
++)
++{
++    char kbuf[sizeof("release\n")];
++    unsigned i;
++    int ret;
++
++    if (!NV_IS_SUSER())
++    {
++        return -EPERM;
++    }
++
++    if (count < strlen("thaw") || count > sizeof(kbuf))
++    {
++        return -EINVAL;
++    }
++
++    if (copy_from_user(kbuf, buf, count))
++    {
++        return -EFAULT;
++    }
++
++    count = min(count, sizeof(kbuf) - 1);
++    for (i = 0; i < count && isalpha(kbuf[i]); i++);
++    kbuf[i] = '\0';
++
++    if (strcasecmp(kbuf, "freeze") == 0)
++    {
++        ret = nv_zss_freeze();
++    }
++    else if (strcasecmp(kbuf, "thaw") == 0)
++    {
++        ret = nv_zss_thaw();
++    }
++    else if (strcasecmp(kbuf, "release") == 0)
++    {
++        ret = nv_zss_release();
++    }
++    else
++    {
++        return -EINVAL;
++    }
++
++    return (ret != 0) ? ret : count;
++}
++
++static nv_proc_ops_t nv_procfs_zss_hold_fops = {
++     NV_PROC_OPS_SET_OWNER()
++    .NV_PROC_OPS_OPEN    = nv_procfs_open_zss_hold,
++    .NV_PROC_OPS_READ    = seq_read,
++    .NV_PROC_OPS_WRITE   = nv_procfs_write_zss_hold,
++    .NV_PROC_OPS_LSEEK   = seq_lseek,
++    .NV_PROC_OPS_RELEASE = single_release
++};
++
 +static const nv_proc_ops_t nv_procfs_zss_wake_fops = {
 +    NV_PROC_OPS_SET_OWNER()
 +    .NV_PROC_OPS_OPEN    = nv_procfs_open_zss_wake,
@@ -265,11 +520,15 @@ diff -u a/nvidia/nv-procfs.c b/nvidia/nv-procfs.c
  static nv_proc_ops_t nv_procfs_suspend_fops = {
       NV_PROC_OPS_SET_OWNER()
      .NV_PROC_OPS_OPEN    = nv_procfs_open_suspend,
-@@ -1328,6 +1380,10 @@
+@@ -1328,6 +1463,14 @@
      if (!entry)
          goto failed;
  
 +    entry = NV_CREATE_PROC_FILE("zss_wake", proc_nvidia, zss_wake, NULL);
++    if (!entry)
++        goto failed;
++
++    entry = NV_CREATE_PROC_FILE("zss_hold", proc_nvidia, zss_hold, NULL);
 +    if (!entry)
 +        goto failed;
 +
@@ -279,13 +538,14 @@ diff -u a/nvidia/nv-procfs.c b/nvidia/nv-procfs.c
 diff -u a/nvidia-modeset/nvidia-modeset-linux.c b/nvidia-modeset/nvidia-modeset-linux.c
 --- a/nvidia-modeset/nvidia-modeset-linux.c
 +++ b/nvidia-modeset/nvidia-modeset-linux.c
-@@ -281,21 +281,31 @@
+@@ -281,21 +281,32 @@
      return !down_read_trylock(&nvkms_pm_lock);
  }
  
 +/* ZSS wake-on-touch: see nv_zss_request_wake() in nvidia/nv.c. */
 +extern void nv_zss_request_wake(void);
 +extern void nv_zss_wait_done(void);
++extern void (*nv_zss_modeset_gate)(int closed);
 +
  static inline int nvkms_read_lock_pm_lock_interruptible(void)
  {
@@ -318,3 +578,37 @@ diff -u a/nvidia-modeset/nvidia-modeset-linux.c b/nvidia-modeset/nvidia-modeset-
  }
  
  static inline void nvkms_read_unlock_pm_lock(void)
+@@ -550,6 +561,16 @@
+     }
+ }
+ 
++/* ZSS freeze: the gate alone, with nothing asked of the display hardware. */
++static void nvkms_zss_gate(int closed)
++{
++    if (closed) {
++        down_write(&nvkms_pm_lock);
++    } else {
++        up_write(&nvkms_pm_lock);
++    }
++}
++
+ static void nvkms_suspend(NvU32 gpuId)
+ {
+     if (gpuId == 0) {
+@@ -1676,6 +1697,7 @@
+ 
+     sema_init(&nvkms_lock, 1);
+     init_rwsem(&nvkms_pm_lock);
++    nv_zss_modeset_gate = nvkms_zss_gate;
+ 
+     ret = nv_kthread_q_init(&nvkms_kthread_q,
+                             "nvidia-modeset/kthread_q");
+@@ -1728,6 +1750,8 @@
+     struct nvkms_timer_t *timer, *tmp_timer;
+     unsigned long flags = 0;
+ 
++    nv_zss_modeset_gate = NULL;
++
+     nvkms_proc_exit();
+ 
+     down(&nvkms_lock);

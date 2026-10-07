@@ -406,7 +406,162 @@ static const struct backend fake = {
     .extra_holders = fake_holders,
 };
 
-static const struct backend *const backends[] = { &dry_run, &pciehp_slot, &apple_gmux, &fake };
+/* ---- zss-kmod: the kernel module does the sequence ---------------------------------- */
+/*
+ * With zss.ko loaded, saving and restoring the device's state, cutting and
+ * restoring power, and noticing a device that has gone silent all happen in
+ * the kernel (see kmod/zss.c). The module quiesces the driver through the
+ * driver's own sleep callbacks, except for the proprietary NVIDIA driver,
+ * which is suspended from here as before and only handed over for the rest.
+ */
+#define KMOD_ROOT "/sys/kernel/zss"
+
+static int kmod_read(const struct gpu *g, const char *name, char *out, size_t n)
+{
+    char path[300];
+
+    snprintf(path, sizeof(path), KMOD_ROOT "/%s/%s", g->pci, name);
+    return read_text(path, out, n);
+}
+
+static int kmod_manage(struct gpu *g, char *err)
+{
+    char spec[160], driver[64] = "";
+    const char *kb = zssd_cfg.kmod_backend ? zssd_cfg.kmod_backend : "";
+
+    pci_driver(g->pci, driver, sizeof(driver));
+    snprintf(spec, sizeof(spec), "%s quiesce=%s%s%s", g->pci, !strcmp(driver, "nvidia") ? "external" : "pm",
+             kb[0] ? " backend=" : "", kb);
+    if (write_text(KMOD_ROOT "/manage", spec) < 0 && errno != EEXIST) {
+        snprintf(err, ZSSD_ERR, errno == EOPNOTSUPP ? "the kernel module has no power backend for %s"
+                                                     : "the kernel module will not manage %s: %s",
+                 g->pci, strerror(errno));
+        return -1;
+    }
+    g->kmod = true;
+    return 0;
+}
+
+static int kmod_probe(struct gpu *g, char *err)
+{
+    if (!path_exists(KMOD_ROOT "/manage")) {
+        snprintf(err, ZSSD_ERR, "the zss kernel module is not loaded");
+        return -1;
+    }
+    if (!pci_present(g->pci)) {
+        snprintf(err, ZSSD_ERR, "%s is not on the bus", g->pci);
+        return -1;
+    }
+    return kmod_manage(g, err);
+}
+
+static int kmod_power(struct gpu *g, const char *what, char *err)
+{
+    char path[300], why[160] = "";
+    int saved;
+
+    snprintf(path, sizeof(path), KMOD_ROOT "/%s/power", g->pci);
+    if (write_text(path, what) == 0)
+        return 0;
+    saved = errno;
+    kmod_read(g, "last_error", why, sizeof(why));
+    snprintf(err, ZSSD_ERR, "kernel module: %s", why[0] ? why : strerror(saved));
+    errno = saved;
+    return -1;
+}
+
+static int kmod_off(struct gpu *g, char *err)
+{
+    return kmod_power(g, "off", err);
+}
+
+static int kmod_on(struct gpu *g, char *err)
+{
+    char path[160];
+
+    if (kmod_power(g, "on", err) == 0) {
+        char text[8] = "", driver[64] = "";
+
+        /* Back from a loss with a driver that has no way of being told: bind it afresh. */
+        /*
+         * The proprietary NVIDIA driver is left out: it does not let go of a
+         * device a display server has open, and waits in the kernel instead,
+         * which would take the daemon with it.
+         */
+        pci_driver(g->pci, driver, sizeof(driver));
+        if (kmod_read(g, "needs_rebind", text, sizeof(text)) == 0 && text[0] == '1' && driver[0] &&
+            strcmp(driver, "nvidia")) {
+            snprintf(path, sizeof(path), "/sys/bus/pci/drivers/%s/unbind", driver);
+            write_text(path, g->pci);
+            snprintf(path, sizeof(path), "/sys/bus/pci/drivers/%s/bind", driver);
+            write_text(path, g->pci);
+        }
+        return 0;
+    }
+    if (errno != ENODEV && errno != ENOENT)
+        return -1;
+    /* The card was pulled and this is a new one at the same address: start over with it. */
+    snprintf(path, sizeof(path), "%s", g->pci);
+    write_text(KMOD_ROOT "/unmanage", path);
+    if (!pci_present(g->pci)) {
+        snprintf(err, ZSSD_ERR, "%s has left the bus", g->pci);
+        return -1;
+    }
+    return kmod_manage(g, err);
+}
+
+static int kmod_powered(struct gpu *g)
+{
+    char state[16] = "";
+
+    if (kmod_read(g, "state", state, sizeof(state)) < 0)
+        return -1;
+    return !strcmp(state, "on") ? 1 : !strcmp(state, "off") ? 0 : -1;
+}
+
+static const struct backend zss_kmod = {
+    .name = "zss-kmod",
+    .strategy = RS_SUSPEND,
+    .probe = kmod_probe,
+    .power_off = kmod_off,
+    .power_on = kmod_on,
+    .is_powered = kmod_powered,
+};
+
+/* Whether a device that was lost is there again. */
+bool gpu_returned(struct gpu *g)
+{
+    char text[16] = "";
+
+    if (!pci_present(g->pci))
+        return false;
+    if (!g->kmod || kmod_read(g, "state", text, sizeof(text)) < 0 || strcmp(text, "lost"))
+        return true;
+    /* Pulled and replaced, the module still holds the old device, which will never answer. */
+    if (kmod_read(g, "functions", text, sizeof(text)) < 0)
+        return true;
+    return kmod_read(g, "answers", text, sizeof(text)) == 0 && text[0] == '1';
+}
+
+/* Whether the kernel module froze the device's driver when the device went silent. */
+bool gpu_driver_frozen(struct gpu *g)
+{
+    char text[8] = "";
+
+    return g->kmod && kmod_read(g, "driver_frozen", text, sizeof(text)) == 0 && text[0] == '1';
+}
+
+/* On the bus and answering: a device the kernel module reports lost counts as gone. */
+bool gpu_on_bus(struct gpu *g)
+{
+    char state[16] = "";
+
+    if (!pci_present(g->pci))
+        return false;
+    return !(g->kmod && kmod_read(g, "state", state, sizeof(state)) == 0 && !strcmp(state, "lost"));
+}
+
+static const struct backend *const backends[] = { &dry_run, &pciehp_slot, &apple_gmux, &fake, &zss_kmod };
 
 const struct backend *backend_by_name(const char *name)
 {
@@ -421,6 +576,9 @@ const struct backend *backend_detect(struct gpu *g)
 {
     char err[ZSSD_ERR];
 
+    /* The kernel module, when it is loaded and has a power backend for this device. */
+    if (kmod_probe(g, err) == 0)
+        return &zss_kmod;
     if (slot_probe(g, err) == 0)
         return &pciehp_slot;
     if (gmux_probe(g, err) == 0)
@@ -505,7 +663,7 @@ static int nvidia_suspend(struct gpu *g, char *err)
         }
     }
     snprintf(path, sizeof(path), "/sys/bus/pci/devices/%s/config", g->pci);
-    fd = open(path, O_RDONLY | O_CLOEXEC);
+    fd = g->kmod ? -1 : open(path, O_RDONLY | O_CLOEXEC);
     g->config_len = 0;
     if (fd >= 0) {
         ssize_t r = pread(fd, g->config, sizeof(g->config), 0);
@@ -513,7 +671,8 @@ static int nvidia_suspend(struct gpu *g, char *err)
         g->config_len = r > 0 ? (size_t)r : 0;
         close(fd);
     }
-    if (g->config_len < 64) {
+    /* With the kernel module the PCI core saves and restores the configuration. */
+    if (!g->kmod && g->config_len < 64) {
         snprintf(err, ZSSD_ERR, "cannot save PCI configuration of %s", g->pci);
         return -1;
     }
@@ -531,13 +690,15 @@ static int nvidia_resume(struct gpu *g, char *err)
     int fd, rc = 0;
 
     snprintf(path, sizeof(path), "/sys/bus/pci/devices/%s/config", g->pci);
-    fd = open(path, O_WRONLY | O_CLOEXEC);
+    fd = g->kmod ? -1 : open(path, O_WRONLY | O_CLOEXEC);
     /*
      * The card comes back blank. Base addresses and capabilities go in first
      * and the command register last, so decoding is never enabled on unset
      * addresses. This is the order run on the reference laptop.
      */
-    if (fd < 0 || g->config_len < 64 ||
+    if (g->kmod) {
+        /* already restored in the kernel */
+    } else if (fd < 0 || g->config_len < 64 ||
         pwrite(fd, g->config + 0x10, g->config_len - 0x10, 0x10) != (ssize_t)(g->config_len - 0x10) ||
         pwrite(fd, g->config + 0x0c, 4, 0x0c) != 4 || pwrite(fd, g->config + 0x04, 2, 0x04) != 2) {
         snprintf(err, ZSSD_ERR, "cannot restore PCI configuration of %s: %s", g->pci, strerror(errno));
@@ -567,6 +728,9 @@ int driver_suspend(struct gpu *g, char *err)
         return 0; /* nothing bound, nothing to quiesce */
     if (!strcmp(g->driver, "nvidia") && path_exists(NVIDIA_SUSPEND))
         return nvidia_suspend(g, err);
+    /* The kernel module runs the driver's sleep callbacks as part of cutting power. */
+    if (g->kmod)
+        return 0;
     return rpm_suspend(g, err);
 }
 

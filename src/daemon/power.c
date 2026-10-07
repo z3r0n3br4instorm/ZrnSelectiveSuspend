@@ -202,7 +202,7 @@ static int hide_driver_proc(const char *source, const char *dirpath, int depth)
         char path[600];
         struct stat st;
 
-        if (de->d_name[0] == '.' || !strncmp(de->d_name, "suspend", 7) || !strcmp(de->d_name, "zss_wake"))
+        if (de->d_name[0] == '.' || !strncmp(de->d_name, "suspend", 7) || !strncmp(de->d_name, "zss_", 4))
             continue;
         snprintf(path, sizeof(path), "%s/%s", dirpath, de->d_name);
         if (lstat(path, &st) < 0)

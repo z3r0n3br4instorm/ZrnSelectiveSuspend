@@ -395,6 +395,7 @@ VKAPI_ATTR void VKAPI_CALL zss_DestroyDevice(VkDevice device, const VkAllocation
     ENTER(device);
     if (dev->real)
         dev->fn.DeviceWaitIdle(dev->real);
+    zss_inflight_done(dev, NULL);
     zss_dev_destroy_real(dev);
     pthread_mutex_lock(&zss_lock);
     for (pp = &zss_devices; *pp; pp = &(*pp)->next_dev) {
@@ -1923,6 +1924,7 @@ VKAPI_ATTR VkResult VKAPI_CALL zss_GetFenceStatus(VkDevice device, VkFence fence
     if (r == VK_SUCCESS) {
         ZOBJ(fence)->u.fence.signaled = true;
         ZOBJ(fence)->u.fence.pending = false;
+        zss_inflight_done(dev, ZOBJ(fence));
         zss_sync_from_device(dev, NULL);
     }
     zss_leave();
@@ -1970,6 +1972,7 @@ VKAPI_ATTR VkResult VKAPI_CALL zss_WaitForFences(VkDevice device, uint32_t n, co
                 for (uint32_t i = 0; i < n; i++) {
                     ZOBJ(fences[i])->u.fence.signaled = true;
                     ZOBJ(fences[i])->u.fence.pending = false;
+                    zss_inflight_done(dev, ZOBJ(fences[i]));
                 }
             zss_sync_from_device(dev, NULL);
         }
@@ -2038,6 +2041,144 @@ static bool inject_loss(void)
     return true;
 }
 
+/* ---- submissions in flight ------------------------------------------------------- */
+
+static void inflight_drop(struct zss_dev *dev, uint32_t i)
+{
+    struct zss_inflight *e = &dev->inflight[i];
+
+    for (uint32_t j = 0; j < e->ncbs; j++)
+        zss_obj_unref(e->cbs[j]);
+    if (e->fence)
+        zss_obj_unref(e->fence);
+    free(e->cbs);
+    free(e->versions);
+    memmove(e, e + 1, (dev->ninflight - i - 1) * sizeof(*e));
+    dev->ninflight--;
+}
+
+static void inflight_add(struct zss_dev *dev, struct zss_queue *q, uint32_t n, const VkSubmitInfo *submits,
+                         VkFence fence)
+{
+    struct zss_inflight *e;
+    uint32_t total = 0, k = 0;
+
+    for (uint32_t i = 0; i < n; i++)
+        total += submits[i].commandBufferCount;
+    if (!total)
+        return;
+    /*
+     * An application that never waits on its submissions leaves nothing to
+     * clear the list by. The oldest entry is then long finished.
+     */
+    if (dev->ninflight == ZSS_MAX_INFLIGHT)
+        inflight_drop(dev, 0);
+    e = &dev->inflight[dev->ninflight++];
+    e->q = q;
+    e->fence = fence ? ZOBJ(fence) : NULL;
+    e->ncbs = total;
+    e->cbs = malloc(total * sizeof(*e->cbs));
+    e->versions = malloc(total * sizeof(*e->versions));
+    if (e->fence)
+        zss_obj_ref(e->fence);
+    for (uint32_t i = 0; i < n; i++) {
+        for (uint32_t j = 0; j < submits[i].commandBufferCount; j++, k++) {
+            e->cbs[k] = (struct zss_obj *)submits[i].pCommandBuffers[j];
+            e->versions[k] = e->cbs[k]->u.cb.version;
+            zss_obj_ref(e->cbs[k]);
+        }
+    }
+}
+
+/*
+ * The work behind `fence` is known to have finished, and with it everything
+ * submitted to the same queue before it; with no fence, everything has.
+ */
+void zss_inflight_done(struct zss_dev *dev, const struct zss_obj *fence)
+{
+    uint32_t upto = dev->ninflight;
+    const struct zss_queue *q = NULL;
+
+    if (fence) {
+        for (upto = 0; upto < dev->ninflight && dev->inflight[upto].fence != fence; upto++)
+            ;
+        if (upto == dev->ninflight)
+            return;
+        q = dev->inflight[upto].q;
+        upto++;
+    }
+    for (uint32_t i = upto; i-- > 0;)
+        if (!q || dev->inflight[i].q == q)
+            inflight_drop(dev, i);
+}
+
+/*
+ * After a loss, on the rebuilt device: issues again, in order, what the lost
+ * device had accepted and not been seen to finish. The state it runs against
+ * is the state it was submitted against, less whatever only the lost device
+ * held. Semaphores are left out: those it signalled are signalled by the
+ * rebuild, and those it waited on had already been consumed.
+ *
+ * Returns how many were issued. They stay listed, as pending as before.
+ */
+uint32_t zss_inflight_reissue(struct zss_dev *dev)
+{
+    uint32_t issued = 0;
+
+    for (uint32_t i = 0; i < dev->ninflight;) {
+        struct zss_inflight *e = &dev->inflight[i];
+        VkCommandBuffer *real = malloc(e->ncbs * sizeof(*real));
+        VkSubmitInfo si = { .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO, .commandBufferCount = e->ncbs, .pCommandBuffers = real };
+        VkFence fence = e->fence && !e->fence->dead ? (VkFence)e->fence->r.h : VK_NULL_HANDLE;
+        bool usable = true;
+
+        /* Freed or recorded afresh since: what was submitted no longer exists to repeat. */
+        for (uint32_t j = 0; j < e->ncbs; j++) {
+            const struct zss_obj *cb = e->cbs[j];
+
+            usable = usable && !cb->dead && cb->r.h && cb->u.cb.version == e->versions[j] &&
+                     cb->u.cb.state == ZC_EXECUTABLE;
+            real[j] = (VkCommandBuffer)(uintptr_t)cb->r.h;
+        }
+        /* The rebuild created the fence signalled, so that nobody would wait for lost work. */
+        if (usable && fence)
+            usable = dev->fn.ResetFences(dev->real, 1, &fence) == VK_SUCCESS;
+        if (usable && dev->fn.QueueSubmit(e->q->real, 1, &si, fence) == VK_SUCCESS) {
+            if (e->fence) {
+                e->fence->u.fence.signaled = false;
+                e->fence->u.fence.pending = true;
+            }
+            issued++;
+            i++;
+        } else {
+            inflight_drop(dev, i);
+        }
+        free(real);
+    }
+    return issued;
+}
+
+/*
+ * Test aid. ZSS_TEST_LOSE_AFTER_SUBMIT=N loses the device as soon as the Nth
+ * submit has been accepted, before the application can wait for it: the case
+ * of work in flight when a card dies.
+ */
+static bool inject_loss_after(void)
+{
+    static int at = -2;
+    static bool done;
+
+    if (at == -2) {
+        const char *e = getenv("ZSS_TEST_LOSE_AFTER_SUBMIT");
+
+        at = e ? atoi(e) : -1;
+    }
+    if (done || at < 0 || (int)zss_submits != at)
+        return false;
+    done = true;
+    return true;
+}
+
 VKAPI_ATTR VkResult VKAPI_CALL zss_QueueSubmit(VkQueue queue, uint32_t n, const VkSubmitInfo *submits,
                                                VkFence fence)
 {
@@ -2096,6 +2237,9 @@ VKAPI_ATTR VkResult VKAPI_CALL zss_QueueSubmit(VkQueue queue, uint32_t n, const 
         }
         if (fence)
             ZOBJ(fence)->u.fence.pending = true;
+        inflight_add(dev, q, n, submits, fence);
+        if (inject_loss_after())
+            zss_lost(dev, VK_ERROR_DEVICE_LOST);
     }
     zss_leave();
     return r;
@@ -2108,6 +2252,8 @@ VKAPI_ATTR VkResult VKAPI_CALL zss_QueueWaitIdle(VkQueue queue)
 
     zss_enter();
     ZSS_RETRY(q->dev, r, q->dev->fn.QueueWaitIdle(q->real));
+    if (r == VK_SUCCESS)
+        zss_inflight_done(q->dev, NULL);
     zss_sync_from_device(q->dev, NULL);
     zss_leave();
     return r;
@@ -2119,6 +2265,8 @@ VKAPI_ATTR VkResult VKAPI_CALL zss_DeviceWaitIdle(VkDevice device)
     VkResult r;
 
     ZSS_RETRY(dev, r, dev->fn.DeviceWaitIdle(dev->real));
+    if (r == VK_SUCCESS)
+        zss_inflight_done(dev, NULL);
     zss_sync_from_device(dev, NULL);
     zss_leave();
     return r;

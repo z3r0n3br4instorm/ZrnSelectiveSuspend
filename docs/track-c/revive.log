@@ -1,0 +1,21 @@
+[12:05:21.361] ==== revive stage 1
+[12:05:22.963] stopping zssd so that it does not act on the card's return
+[12:05:23.737] zssd: inactive
+[12:05:24.482] before: bus=ffffffff module=lost answers=0
+[12:05:25.155] rail switched on
+[12:05:25.819] after 0 x 0.1 s: bus=de10d50f answers=1
+[12:05:26.987] config before restore:  de 10 d5 0f 00 00 10 00 a1 00 00 03 00 00 80 00
+ 00 00 00 00 0c 00 00 00
+[12:05:27.156] module took the device back: state=on needs_rebind=1
+[12:05:27.826] config after restore:   de 10 d5 0f 07 04 10 00 a1 00 00 03 00 00 80 00
+ 00 00 00 c0 0c 00 00 90
+[12:05:28.566] functions: 0000:01:00.0 nvidia online;0000:01:00.1 snd_hda_intel online;
+[12:05:29.865] kernel:                NVRM: nvidia-bug-report.sh as root to collect this data before|               NVRM: the NVIDIA kernel module is unloaded.|[24194.225000] zss: 0000:01:00.0: lost (answers again)|[24196.019752] zss: 0000:01:00.0: on (returned, driver needs rebinding)|
+[12:05:50.726] ==== revive stage 2: suspend then resume through the driver
+[12:05:51.368] driver not told yet: nvidia-smi says: Unable to determine the device handle for GPU 0000:01:00.0: Unknown Error
+[12:06:01.664] the suspend write is STILL RUNNING after 10 s; writing resume anyway
+[12:06:02.295] kernel: [24220.363368] nvidia-modeset: ERROR: GPU:0: Failed to query display engine channel state: 0x0000917c:3:0:0x0000000f|[24220.363418] nvidia-modeset: ERROR: GPU:0: Failed to query display engine channel state: 0x0000917d:0:0:0x0000000f|
+[12:06:13.110] the resume write is STILL RUNNING after 10 s
+[12:06:13.775] kernel: [24220.363346] nvidia-modeset: ERROR: GPU:0: Failed to query display engine channel state: 0x0000917c:2:0:0x0000000f|[24220.363368] nvidia-modeset: ERROR: GPU:0: Failed to query display engine channel state: 0x0000917c:3:0:0x0000000f|[24220.363418] nvidia-modeset: ERROR: GPU:0: Failed to query display engine channel state: 0x0000917d:0:0:0x0000000f|
+[12:06:24.452] nvidia-smi: 
+[12:06:30.187] proc info: 

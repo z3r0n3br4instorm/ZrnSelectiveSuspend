@@ -37,3 +37,5 @@ test('track-off', python, args: [files('track_off.py')], env: env, timeout: 300,
 test('track-loss', python, args: [files('track_loss.py')], env: env, timeout: 600, is_parallel: false)
 # Boots a QEMU guest; skipped (exit 77) where QEMU or KVM is unavailable.
 test('track-b', python, args: [files('track_b.py')], env: env, timeout: 600, is_parallel: false)
+# The kernel module, built for the running kernel and loaded only inside the guest.
+test('track-k', python, args: [files('track_k.py')], env: env, timeout: 600, is_parallel: false)

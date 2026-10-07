@@ -12,6 +12,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/socket.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -630,48 +631,73 @@ static void zss_init(void)
  */
 static void *x_link_open(VkIcdWsiPlatform platform, void *native)
 {
-    if (platform == VK_ICD_WSI_PLATFORM_XCB) {
-        void *lib = dlopen("libxcb.so.1", RTLD_NOW | RTLD_GLOBAL);
-        void *(*connect)(const char *, int *) = lib ? (void *(*)(const char *, int *))dlsym(lib, "xcb_connect") : NULL;
-        int (*has_error)(void *) = lib ? (int (*)(void *))dlsym(lib, "xcb_connection_has_error") : NULL;
-        void (*disconnect)(void *) = lib ? (void (*)(void *))dlsym(lib, "xcb_disconnect") : NULL;
-        void *c = connect && has_error && disconnect ? connect(NULL, NULL) : NULL;
+    void *lib = dlopen("libxcb.so.1", RTLD_NOW | RTLD_GLOBAL);
+    void *(*connect)(const char *, int *) = lib ? (void *(*)(const char *, int *))dlsym(lib, "xcb_connect") : NULL;
+    int (*has_error)(void *) = lib ? (int (*)(void *))dlsym(lib, "xcb_connection_has_error") : NULL;
+    void (*disconnect)(void *) = lib ? (void (*)(void *))dlsym(lib, "xcb_disconnect") : NULL;
+    const char *name = NULL;
+    void *c;
 
-        if (c && has_error(c)) {
-            disconnect(c);
-            c = NULL;
-        }
-        return c;
-    }
+    /* An Xlib application may be on a display other than $DISPLAY. */
     if (platform == VK_ICD_WSI_PLATFORM_XLIB) {
-        void *lib = dlopen("libX11.so.6", RTLD_NOW | RTLD_GLOBAL);
-        void *(*open_display)(const char *) = lib ? (void *(*)(const char *))dlsym(lib, "XOpenDisplay") : NULL;
-        char *(*display_string)(void *) = lib ? (char *(*)(void *))dlsym(lib, "XDisplayString") : NULL;
+        void *x11 = dlopen("libX11.so.6", RTLD_NOW | RTLD_NOLOAD);
+        char *(*display_string)(void *) = x11 ? (char *(*)(void *))dlsym(x11, "XDisplayString") : NULL;
 
-        return open_display && display_string ? open_display(display_string(native)) : NULL;
+        name = display_string ? display_string(native) : NULL;
+    } else if (platform != VK_ICD_WSI_PLATFORM_XCB) {
+        return NULL;
     }
-    return NULL;
+    c = connect && has_error && disconnect ? connect(name, NULL) : NULL;
+    if (c && has_error(c)) {
+        disconnect(c);
+        c = NULL;
+    }
+    return c;
 }
 
 static void x_link_close(VkIcdWsiPlatform platform, void *link)
 {
     void *lib;
 
-    if (!link)
-        return;
-    if (platform == VK_ICD_WSI_PLATFORM_XCB && (lib = dlopen("libxcb.so.1", RTLD_NOW | RTLD_NOLOAD))) {
+    (void)platform;
+    if (link && (lib = dlopen("libxcb.so.1", RTLD_NOW | RTLD_NOLOAD))) {
         void (*disconnect)(void *) = (void (*)(void *))dlsym(lib, "xcb_disconnect");
 
         if (disconnect)
             disconnect(link);
         dlclose(lib);
-    } else if (platform == VK_ICD_WSI_PLATFORM_XLIB && (lib = dlopen("libX11.so.6", RTLD_NOW | RTLD_NOLOAD))) {
-        int (*close_display)(void *) = (int (*)(void *))dlsym(lib, "XCloseDisplay");
-
-        if (close_display)
-            close_display(link);
-        dlclose(lib);
     }
+}
+
+/*
+ * The device behind this driver is gone. A thread inside the driver may be
+ * waiting on the display server for something that will now never come (the
+ * NVIDIA driver waits without a timeout for a present to be acknowledged).
+ * Shutting the driver's connection makes that wait fail, the driver return,
+ * and the thread find out that it is to carry on elsewhere. The surfaces are
+ * forgotten rather than destroyed: nothing more is asked of a dead driver.
+ */
+void zss_driver_break_links(struct zss_driver *drv)
+{
+    void *lib = dlopen("libxcb.so.1", RTLD_NOW | RTLD_NOLOAD);
+    int (*get_fd)(void *) = lib ? (int (*)(void *))dlsym(lib, "xcb_get_file_descriptor") : NULL;
+    int broken = 0;
+
+    pthread_mutex_lock(&zss_lock);
+    for (int i = 0; i < ZSS_MAX_SURFACES; i++) {
+        struct zss_surface *c = &drv->surfaces[i];
+
+        if (!c->link || !get_fd)
+            continue;
+        shutdown(get_fd(c->link), SHUT_RDWR);
+        memset(c, 0, sizeof(*c));
+        broken++;
+    }
+    pthread_mutex_unlock(&zss_lock);
+    if (lib)
+        dlclose(lib);
+    if (broken)
+        zss_log("cut %d connection(s) of the lost device's driver to the display server", broken);
 }
 
 VkResult zss_surface_real(struct zss_driver *drv, VkSurfaceKHR outer, VkSurfaceKHR *real)
@@ -735,16 +761,23 @@ VkResult zss_surface_real(struct zss_driver *drv, VkSurfaceKHR outer, VkSurfaceK
 
         r = drv->fn.CreateXcbSurfaceKHR(drv->inst, &ci, NULL, &want.real);
         want.owned = true;
+    } else if (base->platform == VK_ICD_WSI_PLATFORM_XLIB && drv->fn.CreateXcbSurfaceKHR &&
+               (want.link = x_link_open(base->platform, (void *)want.native[0])) != NULL) {
+        /* The same window through a connection of the layer's own, which only xcb allows. */
+        VkXcbSurfaceCreateInfoKHR ci = {
+            .sType = VK_STRUCTURE_TYPE_XCB_SURFACE_CREATE_INFO_KHR,
+            .connection = want.link,
+            .window = (xcb_window_t)want.native[1],
+        };
+
+        r = drv->fn.CreateXcbSurfaceKHR(drv->inst, &ci, NULL, &want.real);
+        want.owned = true;
     } else if (base->platform == VK_ICD_WSI_PLATFORM_XLIB && drv->fn.CreateXlibSurfaceKHR) {
         VkXlibSurfaceCreateInfoKHR ci = {
             .sType = VK_STRUCTURE_TYPE_XLIB_SURFACE_CREATE_INFO_KHR,
             .dpy = (void *)want.native[0],
             .window = (Window)want.native[1],
         };
-
-        want.link = x_link_open(base->platform, (void *)want.native[0]);
-        if (want.link)
-            ci.dpy = want.link;
 
         r = drv->fn.CreateXlibSurfaceKHR(drv->inst, &ci, NULL, &want.real);
         want.owned = true;

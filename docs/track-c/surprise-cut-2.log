@@ -1,0 +1,62 @@
+[  0.000] ==== check at 2026-10-07 13:55:31, application pid 61295, gmux base 0x700
+[  0.032] check: bus=de10 module=on driver_frozen=0 nvidia=running [0000:01:00.0 nvidia online; 0000:01:00.1 snd_hda_intel online]
+[  0.075] check: daemon: 0000:01:00.0  state=attached  backend=zss-kmod  removal=not supported  wake=yes  iommu=no | pid 27967   Xorg             display-server | pid 54348   nvidia-persiste  non-migratable: not started under the ZSS layer | pid 61295   vkcube           migratable
+[  0.104] check: application: alive, state R, holds ['/dev/dri/renderD128', '/dev/dri/renderD129', '/dev/nvidia-modeset', '/dev/nvidia0', '/dev/nvidiactl']
+[  0.118] check: X server: answers
+[  0.150] READY: everything is in place
+[  0.000] ==== cut at 2026-10-07 13:55:41, application pid 61295, gmux base 0x700
+[  0.041] before: bus=de10 module=on driver_frozen=0 nvidia=running [0000:01:00.0 nvidia online; 0000:01:00.1 snd_hda_intel online]
+[  0.483] before: daemon: 0000:01:00.0  state=attached  backend=zss-kmod  removal=not supported  wake=yes  iommu=no | pid 27967   Xorg             display-server | pid 54348   nvidia-persiste  non-migratable: not started under the ZSS layer | pid 61295   vkcube           migratable
+[  0.511] before: application: alive, state R, holds ['/dev/dri/renderD128', '/dev/dri/renderD129', '/dev/nvidia-modeset', '/dev/nvidia0', '/dev/nvidiactl']
+[  0.525] before: X server: answers
+[  0.536] CUTTING the discrete GPU's power rail now, with its driver running and nothing warned
+[  0.673] the kernel module reported the loss 125 ms after the cut
+[  0.875] + 0.29s: bus=ffff module=lost driver_frozen=1 nvidia=frozen [0000:01:00.0 nvidia offline; 0000:01:00.1 snd_hda_intel offline]
+[  0.944] + 0.29s: daemon: 0000:01:00.0  state=lost  backend=zss-kmod  removal=not supported  wake=yes  driver=frozen  iommu=no | pid 27967   Xorg             stale: holds a handle to a device that is gone | pid 61295   vkcube           migratable
+[  0.956] + 0.29s: application: alive, state S, holds ['/dev/dri/renderD128', '/dev/dri/renderD129', '/dev/nvidia-modeset', '/dev/nvidia0', '/dev/nvidiactl']
+[  0.988] + 0.29s: X server: answers
+[  1.004] + 0.29s: kernel: NVRM: GPU at PCI:0000:01:00: GPU-0b408da4-2e5c-e152-9491-e9f264d11c9e
+[  1.022] + 0.29s: kernel: NVRM: Xid (PCI:0000:01:00): 79, pid=61295, GPU has fallen off the bus.
+[  1.055] + 0.29s: kernel: NVRM: GPU 0000:01:00.0: GPU has fallen off the bus.
+[  1.079] + 0.29s: kernel: systemd-coredump[61992]: /etc/systemd/coredump.conf.d/50-limits.conf:4: Unknown key 'MaxAge' in section [Coredump], ignoring.
+[  1.105] + 0.29s: kernel: NVRM: ZSS: frozen; nothing was asked of the device
+[  1.116] + 0.29s: kernel: zss: 0000:01:00.0: lost (stopped answering, driver frozen)
+[  1.451] + 0.90s: bus=ffff module=lost driver_frozen=1 nvidia=frozen [0000:01:00.0 nvidia offline; 0000:01:00.1 snd_hda_intel offline]
+[  1.513] + 0.90s: daemon: 0000:01:00.0  state=lost  backend=zss-kmod  removal=not supported  wake=yes  driver=frozen  iommu=no | pid 27967   Xorg             stale: holds a handle to a device that is gone | pid 61295   vkcube           migratable
+[  1.552] + 0.90s: application: alive, state Z, holds no GPU node
+[  1.568] + 0.90s: X server: answers
+[  2.188] + 1.62s: bus=ffff module=lost driver_frozen=1 nvidia=frozen [0000:01:00.0 nvidia offline; 0000:01:00.1 snd_hda_intel offline]
+[  2.262] + 1.62s: daemon: 0000:01:00.0  state=lost  backend=zss-kmod  removal=not supported  wake=yes  driver=frozen  iommu=no | pid 27967   Xorg             stale: holds a handle to a device that is gone | pid 61295   vkcube           migratable
+[  2.306] + 1.62s: application: alive, state Z, holds no GPU node
+[  2.326] + 1.62s: X server: answers
+[  4.403] + 3.82s: bus=ffff module=lost driver_frozen=1 nvidia=frozen [0000:01:00.0 nvidia offline; 0000:01:00.1 snd_hda_intel offline]
+[  4.455] + 3.82s: daemon: 0000:01:00.0  state=lost  backend=zss-kmod  removal=not supported  wake=yes  driver=frozen  iommu=no | pid 27967   Xorg             stale: holds a handle to a device that is gone | pid 61295   vkcube           migratable
+[  4.482] + 3.82s: application: alive, state Z, holds no GPU node
+[  4.498] + 3.82s: X server: answers
+[  7.617] + 7.05s: bus=ffff module=lost driver_frozen=1 nvidia=frozen [0000:01:00.0 nvidia offline; 0000:01:00.1 snd_hda_intel offline]
+[  7.685] + 7.05s: daemon: 0000:01:00.0  state=lost  backend=zss-kmod  removal=not supported  wake=yes  driver=frozen  iommu=no | pid 27967   Xorg             stale: holds a handle to a device that is gone | pid 61295   vkcube           migratable
+[  7.723] + 7.05s: application: alive, state Z, holds no GPU node
+[  7.738] + 7.05s: X server: answers
+[ 12.854] +12.28s: bus=ffff module=lost driver_frozen=1 nvidia=frozen [0000:01:00.0 nvidia offline; 0000:01:00.1 snd_hda_intel offline]
+[ 12.900] +12.28s: daemon: 0000:01:00.0  state=lost  backend=zss-kmod  removal=not supported  wake=yes  driver=frozen  iommu=no | pid 27967   Xorg             stale: holds a handle to a device that is gone | pid 61295   vkcube           migratable
+[ 12.941] +12.28s: application: alive, state Z, holds no GPU node
+[ 12.956] +12.28s: X server: answers
+[ 18.075] +17.50s: bus=ffff module=lost driver_frozen=1 nvidia=frozen [0000:01:00.0 nvidia offline; 0000:01:00.1 snd_hda_intel offline]
+[ 18.154] +17.50s: daemon: 0000:01:00.0  state=lost  backend=zss-kmod  removal=not supported  wake=yes  driver=frozen  iommu=no | pid 27967   Xorg             stale: holds a handle to a device that is gone | pid 61295   vkcube           migratable
+[ 18.190] +17.50s: application: alive, state Z, holds no GPU node
+[ 18.206] +17.50s: X server: answers
+[ 18.263] observation over; the rail is still OFF and nothing was restored
+[ 18.279] summary: loss seen by the module after 0.1247396469116211, application moved after None, application alive, state Z, holds no GPU node, X answers
+[13:57:39] ==== bringing it back: zssctl on
+[13:57:53] zssctl on: error: another operation is in progress|exit 1|
+[13:57:54] state: 0000:01:00.0  state=lost  backend=zss-kmod  removal=not supported  wake=yes  driver=frozen  iommu=no
+[13:57:54] hold=frozen bus=ffff
+[13:57:56] kernel: 
+[13:58:06] nvidia-smi: 
+[13:58:07] X answers
+[13:58:22] ==== second try: zssctl on
+[14:03:53] ==== bringing it back, second try: state  state=attached  backend=zss-kmod  removal=not supported  wake=yes  iommu=no
+[14:03:54] zssctl on (exit 1): error: the device is not powered off|0000:01:00.0: attached|
+[14:03:54] state: 0000:01:00.0  state=attached  backend=zss-kmod  removal=not supported  wake=yes  iommu=no
+[14:03:54] hold=running bus=de10 module=on  
+[14:03:54] kernel: 

@@ -11,9 +11,10 @@ The table below says which.
 
 > **Status (October 2026).** Working on real hardware: a MacBookPro9,1 powers
 > its NVIDIA GT 650M off and on under a running X session in about 0.3 s, with
-> applications moved to the Intel GPU and back. Working in a virtual machine
-> only: hot-removal of a PCIe card, and recovery when a card disappears without
-> warning. There is no ZSS kernel module; see "What runs where".
+> applications moved to the Intel GPU and back, through the `zss` kernel module
+> or without it. Working in a virtual machine only: powering off a GPU with an
+> open-source driver, hot-removal of a PCIe card, and recovery when a card
+> disappears without warning. See "What is universal and what is not".
 
 ---
 
@@ -24,19 +25,25 @@ The table below says which.
 | Moving applications between GPUs (the layer) | Any Vulkan driver: NVIDIA, Mesa (Intel, AMD, Nouveau), software | NVIDIA 470, Intel `anv`, llvmpipe |
 | Recovering applications when a GPU vanishes | Any Vulkan driver | QEMU, by pulling a virtual card |
 | Daemon, `zssctl`, rules for who may hold a GPU, freezing, idle timer | Any GPU | Host tests and QEMU |
-| Detach by unbinding the driver and cutting slot power | Any driver, on a PCIe hot-plug slot (`pciehp-slot` backend) | QEMU only |
-| Power-off with the driver suspended in place | **NVIDIA proprietary driver on an Apple classic gmux only** (`apple-gmux` backend) | MacBookPro9,1 |
+| Quiescing the driver before a power cut (kernel module, `quiesce=pm`) | Any driver that survives a laptop suspend: `amdgpu`, `i915`, `xe`, `nouveau`, and others | **QEMU's `bochs` driver only** |
+| Saving and restoring PCI state, noticing a lost card within 0.3 s (kernel module) | Any PCI GPU | QEMU; MacBookPro9,1 |
+| Cutting power: Apple classic gmux (`gmux` backend) | Apple laptops with a classic gmux | MacBookPro9,1 |
+| Cutting power: firmware power resources (`acpi` backend) | Most hybrid laptops since about 2015 | **Nowhere yet: written, never run** |
+| Cutting power: PCIe hot-plug slot (`pciehp-slot`, user space) | Any driver, on a hot-plug slot | QEMU only |
 | Power-off under a running display server | **NVIDIA 470.256.02 only**: needs the wake-on-touch driver patch | MacBookPro9,1 |
 | Hiding a switched-off GPU from new programs | Device nodes: any driver. Loader files and `/proc` files: **NVIDIA only** | MacBookPro9,1 |
 
 What it would take to cover more hardware:
 
-- **Another laptop or desktop**: a power backend for its platform (ACPI
-  `_PR3`, another mux, a Thunderbolt or OCuLink slot). The backend interface
-  is small: probe, power off, power on, is it powered.
-- **`amdgpu`, `i915`/`xe`, `nouveau`**: these are open drivers with runtime
-  power management, so suspend-in-place should need no driver patch, only a
-  backend that asks the kernel to do it. Not written yet.
+- **`amdgpu`, `i915`/`xe`, `nouveau`**: the kernel module already runs any
+  driver's own sleep and wake code, which is also what re-runs the card's
+  video BIOS after power returns. What is missing is a trial on real hardware
+  for each driver, and a rule for the display server on those drivers (they
+  wake by themselves through runtime power management, so no patch is
+  expected, but that is untested).
+- **Another laptop**: the `acpi` backend should cover most of them and needs
+  someone with such a machine to try it. Other platforms need a backend of
+  their own; one is three functions (probe, power off, power on).
 - **Other NVIDIA versions**: the patch has to be checked against each one and
   added to `patches/validated-versions`.
 
@@ -48,9 +55,16 @@ What it would take to cover more hardware:
   when asked or when the GPU is lost.
 - **The daemon** (`zssd`) decides and sequences: who is using the GPU, what to
   move, freeze or stop, then driver suspend and the power cut, and the reverse.
-- **In the kernel there is no ZSS module.** The only kernel change is a small
-  patch to NVIDIA's own driver, so that a caller arriving while the driver is
-  suspended asks for a wake and sleeps instead of spinning for ever.
+- **The kernel module** (`zss.ko`, optional) is the part that touches the
+  hardware: it quiesces the driver through the driver's own sleep code, saves
+  and restores PCI state, cuts and restores power through a backend, and
+  watches for a card that goes silent. Loaded, it does nothing until the
+  daemon hands it a device. Without it the daemon does a narrower version of
+  the same from user space (NVIDIA and gmux only). See
+  [`docs/kernel-module.md`](docs/kernel-module.md).
+- **The NVIDIA driver patch** is separate and still needed for NVIDIA: with it,
+  a caller arriving while the driver is suspended asks for a wake and sleeps
+  instead of spinning for ever.
 
 Consequences worth knowing:
 
@@ -58,23 +72,28 @@ Consequences worth knowing:
   holds the GPU is frozen while it is off, or blocks a detach.
 - The layer offers Vulkan 1.0 with swapchains. Programs that need a newer
   Vulkan, and OpenGL programs, are not covered by it.
-- A card that vanishes without warning is handled in user space only. Nothing
-  protects the kernel driver of the vanished card; that has never been tried
-  on real hardware.
+- A card that vanishes without warning is noticed by the kernel module, marked
+  disconnected, and its driver told through the kernel's PCI error-recovery
+  handlers if it has them. That is as far as protection goes: a driver that
+  ignores the mark can still misbehave, and none of it has been tried with a
+  card physically pulled from real hardware.
+- The module reports whether an IOMMU confines the GPU's memory access
+  (`iommu=` in `zssctl status`). It does not add confinement of its own.
 
-[`SPEC.md`](SPEC.md) describes the long-term design, including in-kernel
-protection against surprise removal (PCIe shield, MMIO shadow, DMA isolation).
-None of that is implemented.
+[`SPEC.md`](SPEC.md) describes the long-term design and says, subsystem by
+subsystem, what was built, what was built differently, and what was dropped
+and why (MMIO shadowing and a DMA isolator of our own are not planned).
 
 ---
 
 ## Project Structure
 
 * [`SPEC.md`](SPEC.md) - Long-term architecture, multi-vendor design, and failure analysis. Not a description of what exists.
-* [`openspec/changes/`](openspec/changes/) - Proposal, design, specs and tasks for each milestone: `zss-happy-path` (orderly detach and attach), `zss-device-loss` (a GPU that disappears), `zss-system-integration` (service, installer, power-off under a desktop).
+* [`openspec/changes/`](openspec/changes/) - Proposal, design, specs and tasks for each milestone: `zss-happy-path` (orderly detach and attach), `zss-device-loss` (a GPU that disappears), `zss-system-integration` (service, installer, power-off under a desktop), `zss-kernel-shim` (the kernel module).
 * [`src/layer/`](src/layer/) - The graphics layer: a Vulkan driver shim that makes applications migratable.
 * [`src/daemon/`](src/daemon/) - `zssd`, which runs detach, attach, off and on, and the power backends.
 * [`src/zssctl/`](src/zssctl/) - Command-line client.
+* [`kmod/`](kmod/) - The `zss` kernel module and its DKMS files.
 * [`packaging/`](packaging/) - Installer, service units, the NVIDIA patch tool, and an Arch package.
 * [`patches/`](patches/) - The wake-on-touch patch to the NVIDIA driver.
 * [`tests/`](tests/) - Test application, frame comparison, and the host, QEMU and hardware harnesses.
@@ -101,6 +120,12 @@ re-applies it after a driver update. The stock modules are kept and restored at
 boot if the patched driver does not load. `zss-nvidia-patch status` shows where
 things stand, and `zss-nvidia-patch remove` puts the stock driver back.
 
+The installer also offers the **kernel module** (`--kernel-module` to accept
+without being asked, `--no-kernel-module` to decline). It is built through
+DKMS, so it follows kernel updates, and it is loaded when the `zssd` service
+starts, never from the initial ramdisk, so it cannot keep the machine from
+booting. `rmmod zss` (with the daemon stopped) takes it out again.
+
 Remove everything with `sudo ./packaging/uninstall.sh` (add `--purge` to drop
 the configuration and the group too). On Arch, `packaging/arch/` builds a
 package instead.
@@ -121,14 +146,14 @@ Each step is printed as it happens:
 
 ```
 [ZrnSelectiveSuspend] Suspending device: 0000:01:00.0  NVIDIA Corporation GK107M [GeForce GT 650M Mac Edition]
-[ZrnSelectiveSuspend]   driver nvidia, power through apple-gmux, wake on demand: yes
+[ZrnSelectiveSuspend]   driver nvidia, power through zss-kmod, wake on demand: yes
 [ZrnSelectiveSuspend]   [1/7] In use by: Xorg (display server, idle), vkcube (application, will be moved)
 [ZrnSelectiveSuspend]   [2/7] Applications: 1 moved to 0000:00:02.0, 0 parked
 [ZrnSelectiveSuspend]   [3/7] Services stopped: nvidia-persistenced; processes frozen: none
 [ZrnSelectiveSuspend]         Hidden from new programs (17): /dev/nvidia0, /dev/dri/card2, ...
-[ZrnSelectiveSuspend]   [4/7] PCI configuration saved: 256 bytes
-[ZrnSelectiveSuspend]   [5/7] Driver nvidia suspended (0.12 s)
-[ZrnSelectiveSuspend]   [6/7] Power cut through apple-gmux (0.12 s); the device has left the bus
+[ZrnSelectiveSuspend]   [4/7] PCI state: saved and restored in the kernel (zss module)
+[ZrnSelectiveSuspend]   [5/7] Driver nvidia suspended (0.13 s)
+[ZrnSelectiveSuspend]   [6/7] Power cut through zss-kmod (0.03 s); the device has left the bus
 [ZrnSelectiveSuspend]   [7/7] Watching for wake requests
 [ZrnSelectiveSuspend] Device 0000:01:00.0 is powered off (0.43 s).
 [ZrnSelectiveSuspend] It stays off (the display server may borrow it for a moment) until: zssctl on 0000:01:00.0
@@ -178,7 +203,8 @@ about displays or you run `zssctl on`.
 
 ```sh
 meson setup build && ninja -C build
-meson test -C build                       # host tests; nothing is powered off
+meson test -C build                       # host and QEMU tests; nothing on this machine is powered off,
+                                          # and the kernel module is loaded only inside the QEMU guest
 
 # Terminal 1: manage the dGPU without touching its power
 build/src/daemon/zssd --socket "$XDG_RUNTIME_DIR/zss.sock" --gpu 0000:01:00.0=dry-run --allow-software
@@ -202,6 +228,7 @@ newer Vulkan version do not start under it yet.
 | `ZSS_RETAIN_LIMIT_MB`, `ZSS_RETAIN_QUEUE_MB` | Size cap of the store (4096) and of data waiting to be written (256) |
 | `ZSS_BIND_PCI` | Test aid: makes the software renderer pose as the PCI device at that address |
 | `ZSS_TEST_LOSE_AT_SUBMIT` | Test aid: the layer behaves as if the GPU died at that submit |
+| `ZSS_TEST_LOSE_AFTER_SUBMIT` | Test aid: the GPU dies just after that submit was accepted, with its work in flight |
 | `ZSS_TEST_STUCK_MS`, `ZSS_LOSS_GRACE_MS` | Test aids: hold a thread inside the layer during a loss; how long recovery waits for such threads (3000) |
 
 ## Licence

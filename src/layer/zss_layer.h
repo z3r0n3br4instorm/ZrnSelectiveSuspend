@@ -238,6 +238,7 @@ struct zss_obj {
             struct zss_cmd *head, *tail;
             struct zss_obj **refs;
             uint32_t nrefs, caprefs;
+            uint32_t version; /* bumped whenever the recorded commands are thrown away */
         } cb;
         struct { bool signaled, pending; } fence;
         struct { bool signaled; } sem;
@@ -255,6 +256,21 @@ struct zss_queue {
     struct zss_dev *dev;
     uint32_t family, index;
     VkQueue real;
+};
+
+/*
+ * A submission the device accepted and that has not been seen to finish. If
+ * the device is lost first, its work is gone with it, and is issued again on
+ * the device the application is rebuilt on.
+ */
+#define ZSS_MAX_INFLIGHT 16
+
+struct zss_inflight {
+    struct zss_queue *q;
+    struct zss_obj *fence; /* or NULL */
+    struct zss_obj **cbs;
+    uint32_t *versions;    /* of each command buffer when it was submitted */
+    uint32_t ncbs;
 };
 
 struct zss_dev {
@@ -284,6 +300,8 @@ struct zss_dev {
     bool dead;           /* recovery is impossible: the application gets the error */
     uint32_t generation; /* bumped every time the real device is replaced */
     int lost_contents;   /* objects zero-filled by the last recovery */
+    struct zss_inflight inflight[ZSS_MAX_INFLIGHT]; /* oldest first */
+    uint32_t ninflight;
 
     /* Helpers on the current real device for copies during migration. */
     VkQueue util_queue;
@@ -312,6 +330,8 @@ void zss_log(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 void zss_dbg(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 VkResult zss_driver_open(struct zss_driver *drv);
 void zss_driver_close(struct zss_driver *drv);
+void zss_driver_break_links(struct zss_driver *drv);
+void zss_dev_mark_lost(struct zss_dev *dev);
 VkPhysicalDevice zss_gpu_real(struct zss_gpu *gpu);
 struct zss_gpu *zss_gpu_by_pci(const char *pci);
 void zss_gpu_hold(struct zss_gpu *gpu, bool hold);
@@ -386,6 +406,8 @@ enum zss_outcome zss_recover(struct zss_dev *dev, struct zss_gpu *target, bool a
 bool zss_lost(struct zss_dev *dev, VkResult r);
 void zss_dev_unrecoverable(struct zss_dev *dev);
 VkDeviceSize zss_sub_size(const VkImageCreateInfo *ci, VkImageAspectFlags aspect, uint32_t mip);
+void zss_inflight_done(struct zss_dev *dev, const struct zss_obj *fence);
+uint32_t zss_inflight_reissue(struct zss_dev *dev);
 extern uint32_t zss_submits; /* submits completed by this process, for logs and tests */
 /* Repeats a real call for as long as the device it was made on turns out to be lost. */
 #define ZSS_RETRY(dev, r, call) do { (r) = (call); } while (zss_lost((dev), (r)))

@@ -130,6 +130,12 @@ def forgotten_at(stderr):
     raise Failure("the layer logged no recovery: " + stderr[-400:])
 
 
+def what_the_layer_said(stderr, daemon_log):
+    """For a frame mismatch: every migration and recovery the layer and the daemon recorded."""
+    lines = [l for l in stderr.split("\n") if any(w in l for w in ("submit", "recover", "migrat", "park", "lost", "resum"))]
+    return ("\n--- layer:\n" + "\n".join(lines[-30:]) + "\n--- daemon:\n" + daemon_log[-2500:])
+
+
 # ---- scenarios ------------------------------------------------------------------
 
 
@@ -370,12 +376,13 @@ def pulled_card_evacuates_its_application():
         check(rc == 0, f"the application exited with {rc}: {err[-400:]}")
         check("recovered; lost contents: 1" in d.log_text(), "the daemon did not record the recovery:\n" + d.log_text())
     finally:
+        log = d.log_text()
         outsider.kill()
         outsider.wait()
         app.kill()
         d.stop()
     ok, message = compare(reference("pull", "--forget-history-at", forgotten_at(err)), out)
-    check(ok, message)
+    check(ok, message + what_the_layer_said(err, log))
 
 
 def pulled_card_with_nowhere_to_go_parks():
@@ -399,10 +406,11 @@ def pulled_card_with_nowhere_to_go_parks():
         rc, err = app.finish(180)
         check(rc == 0, f"the application exited with {rc}: {err[-400:]}")
     finally:
+        log = d.log_text()
         app.kill()
         d.stop()
     ok, message = compare(reference("pullpark", "--forget-history-at", forgotten_at(err)), out)
-    check(ok, message)
+    check(ok, message + what_the_layer_said(err, log))
 
 
 # ---- progress on the text console -----------------------------------------------------

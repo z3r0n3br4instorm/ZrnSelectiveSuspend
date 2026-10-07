@@ -28,7 +28,13 @@ if [ -z "$DESTDIR" ]; then
         ZSS_PATCH_DIR="$PREFIX/share/zss/patches" "$PREFIX/sbin/zss-nvidia-patch" remove
     fi
     systemctl disable zss-nvidia-check.service >/dev/null 2>&1
+    # The module restores every device it holds as it unloads.
+    [ -d /sys/kernel/zss ] && rmmod zss
+    for src in /usr/src/zss-[0-9]*; do
+        [ -f "$src/dkms.conf" ] && dkms remove "zss/${src#/usr/src/zss-}" --all >/dev/null 2>&1
+    done
 fi
+rm -rf "$D"/usr/src/zss-[0-9]*
 
 rm -f "$D$PREFIX/sbin/zssd" "$D$PREFIX/sbin/zss-nvidia-patch" "$D$PREFIX/bin/zssctl" "$D$PREFIX/bin/zss-run" \
       "$D/etc/systemd/system/zssd.service" "$D/etc/systemd/system/zss-nvidia-check.service" \

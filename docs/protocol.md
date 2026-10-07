@@ -135,7 +135,7 @@ Optional `gpu` limits the answer to one device. The daemon sends, per GPU, one
 `gpu`: `gpu`, `state` (`attached`, `detaching`, `powered-off`,
 `safe-to-remove`, `attaching`, or `lost` for a device that left the bus
 without a detach), `wake_support` (the driver can signal a waiting caller),
-`wakes` (times woken by a request), `served` (times a device switched off on request was powered briefly for the display server), `serving` (it is powered for that reason right now), `waiting` (programs asleep on the driver of a device that was switched off on request), `idle_wait` (seconds until an automatic
+`wakes` (times woken by a request), `driver_frozen` (the driver was frozen when the device went silent, and will be resumed when it is back), `iommu` (the kernel confines the device's memory access), `served` (times a device switched off on request was powered briefly for the display server), `serving` (it is powered for that reason right now), `waiting` (programs asleep on the driver of a device that was switched off on request), `idle_wait` (seconds until an automatic
 power-off; 0 when none is configured), `dry_run` (applications were moved away by a
 dry run), `backend`, `removal_supported`.
 

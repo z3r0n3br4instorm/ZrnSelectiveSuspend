@@ -64,6 +64,9 @@ static int show_status(struct zss_reader *rd)
                    zj_str(&m, "backend", ""),
                    zj_bool(&m, "removal_supported", false) ? "supported" : "not supported",
                    zj_bool(&m, "wake_support", false) ? "yes" : "no");
+            if (zj_bool(&m, "driver_frozen", false))
+                printf("  driver=frozen");
+            printf("  iommu=%s", zj_bool(&m, "iommu", false) ? "yes" : "no");
             if (zj_bool(&m, "serving", false))
                 printf("  (on for a moment for the display server)");
             if (zj_int(&m, "served", 0))

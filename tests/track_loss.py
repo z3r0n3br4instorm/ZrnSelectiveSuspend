@@ -95,6 +95,26 @@ def gone_evacuates_to_software():
     exact(reference("llvmpipe"), out)
 
 
+def work_in_flight_is_run_again():
+    """
+    The device dies after a frame was submitted and before the application waited
+    for it. That frame must still be drawn, on the new device, not skipped: the
+    result is the same as losing the device just before the frame.
+    """
+    if not SOFTWARE:
+        return "no software renderer installed"
+    log, err, out = run_lossy("inflight", SOFT_DAEMON, f"[ZSS {FAKE_PCI}]",
+                              {**BOUND, "ZSS_TEST_LOSE_AFTER_SUBMIT": str(LOSE_FRAME + 2)})
+    check(f"recovered after submit {LOSE_FRAME + 1} " in err,
+          "the layer did not report the last submit whose results survived: " + err[-300:])
+    check("1 submission(s) in flight were issued again" in err, "the layer did not say it re-issued the frame: " + err[-300:])
+    exact(reference("llvmpipe"), out)
+
+    # The same with no daemon and nowhere to go: the frame is issued again when a device turns up.
+    log, err, out = run_lossy("inflight-local", None, "llvmpipe", {"ZSS_TEST_LOSE_AFTER_SUBMIT": str(LOSE_FRAME + 2)})
+    exact(reference("llvmpipe"), out)
+
+
 def reset_rebuilds_in_place():
     if not NVIDIA:
         return "needs an NVIDIA GPU"
@@ -239,6 +259,7 @@ if __name__ == "__main__":
     try:
         rc = run_scenarios([
             ("GPU gone: evacuated to software, exact frames, returns home", gone_evacuates_to_software),
+            ("work in flight when the device dies is run again", work_in_flight_is_run_again),
             ("GPU still present: rebuilt in place", reset_rebuilds_in_place),
             ("a reset under one application leaves its neighbour alone", healthy_neighbour_is_left_alone),
             ("nowhere to go: parked, then resumed when the GPU returns", nowhere_to_go_parks_then_resumes),

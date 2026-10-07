@@ -233,6 +233,17 @@ static void do_evacuate(const struct zj_msg *m)
         reply(zj_int(m, "id", 0), "migrated", "", "", "this process does not use that GPU");
         return;
     }
+    if (target != from) {
+        /*
+         * The device itself is gone. Say so before waiting for threads to come
+         * out of its driver, and cut what they may be waiting on there, so that
+         * they come out failing rather than not at all.
+         */
+        for (struct zss_dev *d = zss_devices; d; d = d->next_dev)
+            if (d->gpu == from)
+                zss_dev_mark_lost(d);
+        zss_driver_break_links(from->drv);
+    }
     empty = hold_for_loss();
     for (struct zss_dev *d = zss_devices; d; d = d->next_dev) {
         enum zss_outcome out;
