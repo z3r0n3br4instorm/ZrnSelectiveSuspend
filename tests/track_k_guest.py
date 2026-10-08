@@ -315,6 +315,35 @@ def driver_refuses_when_told():
         subprocess.run(["rmmod", "zss_test_hooks"])
 
 
+def system_sleep_is_not_a_loss():
+    """A system sleep pauses the guard, and after it a silence is given the settling time of a returned device."""
+    unload()
+    check(subprocess.run(["insmod", KO]).returncode == 0, "zss.ko did not load")
+    try:
+        check(write(f"{ROOT}/manage", f"{CARD} backend=test quiesce=none") == 0, "manage failed")
+        # A sleep that goes as far as freezing tasks and comes back (the kernel's own test mode).
+        check(write("/sys/power/pm_test", "freezer") == 0, "the kernel has no sleep test mode")
+        t = time.time()
+        r = subprocess.run(["sh", "-c", "echo freeze > /sys/power/state"], timeout=30)
+        write("/sys/power/pm_test", "none")
+        check(r.returncode == 0, "the test sleep failed")
+        check(read(dev("state")) == "on", "the device was taken for lost across the sleep: " + read(dev("state")))
+        # Just after the sleep, silence is not yet a loss...
+        write(dev("test_fault"), "8")
+        time.sleep(1.0)
+        check(read(dev("state")) == "on", "a silence just after the sleep was taken for a loss")
+        # ...but once the settling time is over, it is.
+        deadline = time.time() + 8
+        while read(dev("state")) != "lost" and time.time() < deadline:
+            time.sleep(0.2)
+        check(read(dev("state")) == "lost", "the guard did not start again after the sleep")
+        check(time.time() - t < 20, "the sleep and settling took too long")
+    finally:
+        write(dev("test_fault"), "0")
+        write(f"{ROOT}/unmanage", CARD)
+        unload()
+
+
 def driver_is_left_alone_when_told():
     """Told to leave the driver on a loss, the module does not freeze it: the driver finds out by itself."""
     hooks = os.path.join(BUILD, "kmod", "zss_test_hooks.ko")
@@ -484,6 +513,7 @@ if __name__ == "__main__":
         ("a device that goes silent is noticed and can be taken back", silence_is_noticed),
         ("a pulled card is reported and its return can be managed", a_pulled_card_is_reported),
         ("a driver with freeze hooks is frozen on a loss and thawed on the return", driver_is_frozen_on_loss_and_thawed_on_return),
+        ("a system sleep is not taken for a loss, and the guard resumes after it", system_sleep_is_not_a_loss),
         ("told to leave the driver on a loss, the module does not freeze it", driver_is_left_alone_when_told),
         ("told to refuse on a loss, the module freezes the driver in its refusing way", driver_refuses_when_told),
         ("the daemon powers a device off and on through the module", daemon_uses_the_module),

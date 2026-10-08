@@ -11,9 +11,9 @@ Run with `vkcube`, stopped after 4 s. 1 process(es) used Vulkan.
 
 ### Extensions enabled (instance)
 
-- `VK_KHR_display` — **not offered by the ZSS layer**
-- `VK_KHR_get_physical_device_properties2` (core in 1.1) — **not offered by the ZSS layer**
-- `VK_KHR_portability_enumeration` — **not offered by the ZSS layer**
+- `VK_KHR_display` — **not offered by ZSS_AirLock**
+- `VK_KHR_get_physical_device_properties2` (core in 1.1) — **not offered by ZSS_AirLock**
+- `VK_KHR_portability_enumeration` — **not offered by ZSS_AirLock**
 - `VK_KHR_surface`
 - `VK_KHR_wayland_surface`
 - `VK_KHR_xcb_surface`
@@ -23,7 +23,7 @@ Run with `vkcube`, stopped after 4 s. 1 process(es) used Vulkan.
 
 - `VK_KHR_swapchain`
 
-### Commands called: 62 different, 0 not in the ZSS layer
+### Commands called: 62 different, 0 not in ZSS_AirLock
 
 | Command | Calls | Since | In the layer |
 | :--- | ---: | :--- | :--- |

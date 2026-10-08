@@ -247,6 +247,8 @@ def applications_are_moved_first():
         rc, text = d.ctl("off", FAKE_PCI)
         check(rc == 0 and "zss-testapp (application, will be moved)" in text and "1 moved to software" in text,
               "the application was not moved first: " + text)
+        check("moving applications: 0 of 1" in text and "moving applications: 1 of 1 (zss-testapp, moved)" in text,
+              "each application moved is not reported as it happens: " + text)
         check("migrated-away" in state(d)[1], state(d)[1])
         seen = app.last_frame()
         app.wait_frame(seen + 5)
@@ -258,8 +260,15 @@ def applications_are_moved_first():
         check("left where they are" in d.log_text(), d.log_text()[-300:])
 
         check(d.ctl("off", FAKE_PCI)[0] == 0, "second off failed")
-        rc, text = d.ctl("on", FAKE_PCI, "--return")
-        check(rc == 0 and "returned to the device" in text, "on --return did not bring the application back: " + text)
+        rc, text = d.ctl("on", FAKE_PCI, "--stay")
+        check(rc == 0 and "left where they are" in text, "on --stay brought the application back: " + text)
+        check("migrated-away" in state(d)[1], state(d)[1])
+
+        check(d.ctl("off", FAKE_PCI)[0] == 0, "third off failed")
+        rc, text = d.ctl("on", FAKE_PCI)
+        check(rc == 0 and "returned to the device" in text, "on did not bring the application back: " + text)
+        check("moving applications: 1 of 1 (zss-testapp, moved)" in text,
+              "the application brought back is not reported as it happens: " + text)
         check("migrated-away" not in state(d)[1], state(d)[1])
         rc, err = app.finish()
         check(rc == 0, f"application exited with {rc}: {err[-300:]}")
@@ -291,7 +300,7 @@ def outsiders_are_frozen_not_refused():
             # Without the right to freeze it, the process must stop the power-off rather than be ignored.
             check("could not be frozen" in text and state(d)[0] == "attached" and f.read("power") == "1", text)
             return "this user may not freeze processes here; the refusal was checked instead (the QEMU test freezes for real)"
-        check("sleep (not under the ZSS layer, will be frozen)" in text and f"processes frozen: sleep (pid {outsider.pid})" in text, text)
+        check("sleep (not under ZSS_AirLock, will be frozen)" in text and f"processes frozen: sleep (pid {outsider.pid})" in text, text)
         check(frozen(outsider.pid), "the process is not frozen while the device is off")
         rc, text = d.ctl("on", FAKE_PCI)
         check(rc == 0 and "processes thawed: 1" in text, text)
@@ -306,7 +315,7 @@ def outsiders_are_frozen_not_refused():
 
         # A plain detach still refuses: the device might not come back the same.
         rc, text = d.ctl("detach", FAKE_PCI)
-        check(rc != 0 and "ZSSDetachBlocked" in text and "not started under the ZSS layer" in text, "detach did not refuse: " + text)
+        check(rc != 0 and "ZSSDetachBlocked" in text and "not started under ZSS_AirLock" in text, "detach did not refuse: " + text)
     finally:
         outsider.kill()
         outsider.wait()

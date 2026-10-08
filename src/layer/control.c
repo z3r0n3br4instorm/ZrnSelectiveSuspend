@@ -354,21 +354,41 @@ void zss_control_recover_local(struct zss_dev *dev)
 /* The GPU is back: bring home everything that started on it. */
 static void do_restore(const struct zj_msg *m)
 {
-    struct zss_gpu *gpu = zss_gpu_by_pci(zj_str(m, "gpu", ""));
+    const char *pci = zj_str(m, "gpu", "");
+    struct zss_gpu *gpu;
     enum zss_outcome worst = ZO_MIGRATED;
     char reason[256] = "";
 
+    hold();
+    gpu = zss_gpu_by_pci(pci);
+    if (!gpu && pci[0]) {
+        /* Away when the program started, so never loaded: it may be one the program asked for. */
+        char *at = strstr(detached, pci);
+
+        /* No longer away: taken out of the list, so that its driver is not skipped again. */
+        if (at)
+            memmove(at, at + strlen(pci), strlen(at + strlen(pci)) + 1);
+        zss_load_skipped();
+        gpu = zss_gpu_by_pci(pci);
+    }
     if (!gpu) {
+        release();
         reply(zj_int(m, "id", 0), "migrated", "", "", "");
         return;
     }
     gpu->detached = false;
-    hold();
     for (struct zss_dev *d = zss_devices; d; d = d->next_dev) {
         enum zss_outcome out;
+        bool home = d->origin == gpu;
 
-        if (d->origin != gpu || d->gpu == gpu)
+        if (d->gpu == gpu || !(home || zss_start_wanted(gpu)))
             continue;
+        if (!home && d->gpu && !zss_compatible(d, gpu, reason, sizeof(reason))) {
+            /* Not where it started, and it could not run there: it stays where it is. */
+            zss_dbg("not moved to %s: %s", gpu->props.deviceName, reason);
+            reason[0] = '\0';
+            continue;
+        }
         out = d->gpu ? zss_migrate(d, gpu, reason, sizeof(reason))
                      : zss_resume(d, gpu, reason, sizeof(reason));
         if (out != ZO_MIGRATED)

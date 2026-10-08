@@ -15,56 +15,56 @@ Run with `chromium --user-data-dir=/tmp/claude-1000/-home-zerone-Documents-Proje
 
 ### Extensions enabled (instance)
 
-- `VK_EXT_debug_report` — **not offered by the ZSS layer**
-- `VK_EXT_surface_maintenance1` (core in VK.KHR.surface.maintenance1) — **not offered by the ZSS layer**
-- `VK_EXT_swapchain_colorspace` — **not offered by the ZSS layer**
-- `VK_KHR_external_memory_capabilities` (core in 1.1) — **not offered by the ZSS layer**
-- `VK_KHR_external_semaphore_capabilities` (core in 1.1) — **not offered by the ZSS layer**
-- `VK_KHR_get_surface_capabilities2` — **not offered by the ZSS layer**
+- `VK_EXT_debug_report` — **not offered by ZSS_AirLock**
+- `VK_EXT_surface_maintenance1` (core in VK.KHR.surface.maintenance1) — **not offered by ZSS_AirLock**
+- `VK_EXT_swapchain_colorspace` — **not offered by ZSS_AirLock**
+- `VK_KHR_external_memory_capabilities` (core in 1.1) — **not offered by ZSS_AirLock**
+- `VK_KHR_external_semaphore_capabilities` (core in 1.1) — **not offered by ZSS_AirLock**
+- `VK_KHR_get_surface_capabilities2` — **not offered by ZSS_AirLock**
 - `VK_KHR_surface`
-- `VK_KHR_surface_maintenance1` — **not offered by the ZSS layer**
-- `VK_KHR_surface_protected_capabilities` — **not offered by the ZSS layer**
+- `VK_KHR_surface_maintenance1` — **not offered by ZSS_AirLock**
+- `VK_KHR_surface_protected_capabilities` — **not offered by ZSS_AirLock**
 - `VK_KHR_xcb_surface`
 
 ### Extensions enabled (device)
 
-- `VK_EXT_custom_border_color` — **not offered by the ZSS layer**
-- `VK_EXT_extended_dynamic_state` (core in 1.3) — **not offered by the ZSS layer**
-- `VK_EXT_extended_dynamic_state2` (core in 1.3) — **not offered by the ZSS layer**
-- `VK_EXT_external_memory_dma_buf` — **not offered by the ZSS layer**
-- `VK_EXT_global_priority` (core in VK.KHR.global.priority) — **not offered by the ZSS layer**
-- `VK_EXT_host_query_reset` (core in 1.2) — **not offered by the ZSS layer**
-- `VK_EXT_image_drm_format_modifier` — **not offered by the ZSS layer**
-- `VK_EXT_index_type_uint8` (core in VK.KHR.index.type.uint8) — **not offered by the ZSS layer**
-- `VK_EXT_line_rasterization` (core in VK.KHR.line.rasterization) — **not offered by the ZSS layer**
-- `VK_EXT_memory_budget` — **not offered by the ZSS layer**
-- `VK_EXT_pipeline_creation_cache_control` (core in 1.3) — **not offered by the ZSS layer**
-- `VK_EXT_pipeline_creation_feedback` (core in 1.3) — **not offered by the ZSS layer**
-- `VK_EXT_provoking_vertex` — **not offered by the ZSS layer**
-- `VK_EXT_shader_demote_to_helper_invocation` (core in 1.3) — **not offered by the ZSS layer**
-- `VK_EXT_transform_feedback` — **not offered by the ZSS layer**
-- `VK_EXT_vertex_attribute_divisor` (core in VK.KHR.vertex.attribute.divisor) — **not offered by the ZSS layer**
-- `VK_EXT_vertex_input_dynamic_state` — **not offered by the ZSS layer**
-- `VK_KHR_copy_commands2` (core in 1.3) — **not offered by the ZSS layer**
-- `VK_KHR_create_renderpass2` (core in 1.2) — **not offered by the ZSS layer**
-- `VK_KHR_depth_stencil_resolve` (core in 1.2) — **not offered by the ZSS layer**
-- `VK_KHR_driver_properties` (core in 1.2) — **not offered by the ZSS layer**
-- `VK_KHR_external_fence_fd` — **not offered by the ZSS layer**
-- `VK_KHR_external_memory` (core in 1.1) — **not offered by the ZSS layer**
-- `VK_KHR_external_memory_fd` — **not offered by the ZSS layer**
-- `VK_KHR_external_semaphore` (core in 1.1) — **not offered by the ZSS layer**
-- `VK_KHR_external_semaphore_fd` — **not offered by the ZSS layer**
-- `VK_KHR_format_feature_flags2` (core in 1.3) — **not offered by the ZSS layer**
-- `VK_KHR_image_format_list` (core in 1.2) — **not offered by the ZSS layer**
-- `VK_KHR_imageless_framebuffer` (core in 1.2) — **not offered by the ZSS layer**
-- `VK_KHR_incremental_present` — **not offered by the ZSS layer**
-- `VK_KHR_sampler_mirror_clamp_to_edge` (core in 1.2) — **not offered by the ZSS layer**
-- `VK_KHR_shader_float_controls` (core in 1.2) — **not offered by the ZSS layer**
-- `VK_KHR_shader_subgroup_extended_types` (core in 1.2) — **not offered by the ZSS layer**
+- `VK_EXT_custom_border_color` — **not offered by ZSS_AirLock**
+- `VK_EXT_extended_dynamic_state` (core in 1.3) — **not offered by ZSS_AirLock**
+- `VK_EXT_extended_dynamic_state2` (core in 1.3) — **not offered by ZSS_AirLock**
+- `VK_EXT_external_memory_dma_buf` — **not offered by ZSS_AirLock**
+- `VK_EXT_global_priority` (core in VK.KHR.global.priority) — **not offered by ZSS_AirLock**
+- `VK_EXT_host_query_reset` (core in 1.2) — **not offered by ZSS_AirLock**
+- `VK_EXT_image_drm_format_modifier` — **not offered by ZSS_AirLock**
+- `VK_EXT_index_type_uint8` (core in VK.KHR.index.type.uint8) — **not offered by ZSS_AirLock**
+- `VK_EXT_line_rasterization` (core in VK.KHR.line.rasterization) — **not offered by ZSS_AirLock**
+- `VK_EXT_memory_budget` — **not offered by ZSS_AirLock**
+- `VK_EXT_pipeline_creation_cache_control` (core in 1.3) — **not offered by ZSS_AirLock**
+- `VK_EXT_pipeline_creation_feedback` (core in 1.3) — **not offered by ZSS_AirLock**
+- `VK_EXT_provoking_vertex` — **not offered by ZSS_AirLock**
+- `VK_EXT_shader_demote_to_helper_invocation` (core in 1.3) — **not offered by ZSS_AirLock**
+- `VK_EXT_transform_feedback` — **not offered by ZSS_AirLock**
+- `VK_EXT_vertex_attribute_divisor` (core in VK.KHR.vertex.attribute.divisor) — **not offered by ZSS_AirLock**
+- `VK_EXT_vertex_input_dynamic_state` — **not offered by ZSS_AirLock**
+- `VK_KHR_copy_commands2` (core in 1.3) — **not offered by ZSS_AirLock**
+- `VK_KHR_create_renderpass2` (core in 1.2) — **not offered by ZSS_AirLock**
+- `VK_KHR_depth_stencil_resolve` (core in 1.2) — **not offered by ZSS_AirLock**
+- `VK_KHR_driver_properties` (core in 1.2) — **not offered by ZSS_AirLock**
+- `VK_KHR_external_fence_fd` — **not offered by ZSS_AirLock**
+- `VK_KHR_external_memory` (core in 1.1) — **not offered by ZSS_AirLock**
+- `VK_KHR_external_memory_fd` — **not offered by ZSS_AirLock**
+- `VK_KHR_external_semaphore` (core in 1.1) — **not offered by ZSS_AirLock**
+- `VK_KHR_external_semaphore_fd` — **not offered by ZSS_AirLock**
+- `VK_KHR_format_feature_flags2` (core in 1.3) — **not offered by ZSS_AirLock**
+- `VK_KHR_image_format_list` (core in 1.2) — **not offered by ZSS_AirLock**
+- `VK_KHR_imageless_framebuffer` (core in 1.2) — **not offered by ZSS_AirLock**
+- `VK_KHR_incremental_present` — **not offered by ZSS_AirLock**
+- `VK_KHR_sampler_mirror_clamp_to_edge` (core in 1.2) — **not offered by ZSS_AirLock**
+- `VK_KHR_shader_float_controls` (core in 1.2) — **not offered by ZSS_AirLock**
+- `VK_KHR_shader_subgroup_extended_types` (core in 1.2) — **not offered by ZSS_AirLock**
 - `VK_KHR_swapchain`
-- `VK_KHR_swapchain_mutable_format` — **not offered by the ZSS layer**
-- `VK_KHR_synchronization2` (core in 1.3) — **not offered by the ZSS layer**
-- `VK_KHR_timeline_semaphore` (core in 1.2) — **not offered by the ZSS layer**
+- `VK_KHR_swapchain_mutable_format` — **not offered by ZSS_AirLock**
+- `VK_KHR_synchronization2` (core in 1.3) — **not offered by ZSS_AirLock**
+- `VK_KHR_timeline_semaphore` (core in 1.2) — **not offered by ZSS_AirLock**
 
 ### Features enabled
 
@@ -164,7 +164,7 @@ Run with `chromium --user-data-dir=/tmp/claude-1000/-home-zerone-Documents-Proje
 - `VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VERTEX_ATTRIBUTE_DIVISOR_FEATURES`
 - `VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VERTEX_INPUT_DYNAMIC_STATE_FEATURES_EXT`
 
-### Commands called: 82 different, 9 not in the ZSS layer
+### Commands called: 82 different, 9 not in ZSS_AirLock
 
 | Command | Calls | Since | In the layer |
 | :--- | ---: | :--- | :--- |

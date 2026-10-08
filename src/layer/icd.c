@@ -36,7 +36,7 @@ void zss_log(const char *fmt, ...)
 {
     va_list ap;
 
-    fputs("[zss] ", stderr);
+    fputs("[ZSS_AirLock] ", stderr);
     va_start(ap, fmt);
     vfprintf(stderr, fmt, ap);
     va_end(ap);
@@ -51,7 +51,7 @@ void zss_dbg(const char *fmt, ...)
         debug = getenv("ZSS_DEBUG") != NULL;
     if (!debug)
         return;
-    fputs("[zss] ", stderr);
+    fputs("[ZSS_AirLock] ", stderr);
     va_start(ap, fmt);
     vfprintf(stderr, fmt, ap);
     va_end(ap);
@@ -455,17 +455,23 @@ static struct zss_gpu *gpu_effective(struct zss_gpu *gpu)
     return eff;
 }
 
-static void driver_add(const char *lib)
+/* Drivers left out because their GPU was away when the program started (see zss_load_skipped). */
+static char skipped[ZSS_MAX_DRIVERS][256];
+static int nskipped;
+
+static void driver_add_now(const char *lib, bool skip_detached)
 {
     struct zss_driver *drv;
 
     for (int i = 0; i < ndrivers; i++)
         if (!strcmp(drivers[i].lib, lib))
             return;
-    if (ndrivers == ZSS_MAX_DRIVERS || strstr(lib, "zss_vk"))
+    if (ndrivers == ZSS_MAX_DRIVERS || strstr(lib, "zss_airlock") || strstr(lib, "zss_vk")) /* itself, under its name and its former one */
         return;
-    if (map_lib_is_detached(lib)) {
+    if (skip_detached && map_lib_is_detached(lib)) {
         zss_dbg("skipping %s: its GPU is detached", lib);
+        if (nskipped < ZSS_MAX_DRIVERS)
+            snprintf(skipped[nskipped++], sizeof(skipped[0]), "%s", lib);
         return;
     }
 
@@ -485,6 +491,31 @@ static void driver_add(const char *lib)
     map_update(lib);
     /* Opened only to look; reopened when a GPU of this driver is used. */
     zss_driver_close(drv);
+}
+
+static void driver_add(const char *lib)
+{
+    driver_add_now(lib, true);
+}
+
+/*
+ * A GPU that was away when the program started is back. Its driver was not
+ * loaded then, so the program has never heard of it: load it now, and its
+ * GPUs join the end of the list. Called with every application thread held
+ * out of the layer.
+ */
+void zss_load_skipped(void)
+{
+    int before = zss_ngpus, n = nskipped;
+
+    nskipped = 0;
+    for (int i = 0; i < n; i++)
+        driver_add_now(skipped[i], false);
+    for (int i = before; i < zss_ngpus; i++) {
+        zss_dbg("gpu %d: %s pci=%s driver=%s (back since the program started)", i, zss_gpus[i]->props.deviceName,
+                zss_gpus[i]->pci[0] ? zss_gpus[i]->pci : "-", zss_gpus[i]->drv->lib);
+        zss_profile_describe(zss_gpus[i]);
+    }
 }
 
 static void manifest_add(const char *path)
@@ -1007,6 +1038,19 @@ static bool start_match(const struct zss_gpu *gpu, const char *want)
     return !strcmp(gpu->pci, want) || strcasestr(gpu->props.deviceName, want) != NULL;
 }
 
+/*
+ * Whether the program asked to run on this GPU (zss-run's default is the
+ * dedicated one). A program started while that GPU was away began elsewhere;
+ * when it is back, the program is moved to it, as one that had started there
+ * would be.
+ */
+bool zss_start_wanted(const struct zss_gpu *gpu)
+{
+    const char *want = getenv("ZSS_START_ON");
+
+    return want && *want && strcmp(want, "any") && start_match(gpu, want);
+}
+
 static bool gpu_listed(const struct zss_gpu *gpu)
 {
     static bool said;
@@ -1142,7 +1186,7 @@ static VKAPI_ATTR void VKAPI_CALL zss_GetPhysicalDeviceSparseImageFormatProperti
 static VKAPI_ATTR VkResult VKAPI_CALL zss_EnumerateDeviceExtensionProperties(
     VkPhysicalDevice pd, const char *layer, uint32_t *count, VkExtensionProperties *props)
 {
-    const char *names[17];
+    const char *names[64];
     struct zss_gpu *gpu = (struct zss_gpu *)pd;
     uint32_t n = 0;
 
@@ -1151,7 +1195,7 @@ static VKAPI_ATTR VkResult VKAPI_CALL zss_EnumerateDeviceExtensionProperties(
     /* The swapchain, and whatever else the layer offers that this GPU's driver has too. */
     if (has_ext(gpu->ext, gpu->next, VK_KHR_SWAPCHAIN_EXTENSION_NAME))
         names[n++] = VK_KHR_SWAPCHAIN_EXTENSION_NAME;
-    for (uint32_t i = 0; i < zss_offered_ext_count() && n < 17; i++)
+    for (uint32_t i = 0; i < zss_offered_ext_count() && n < 64; i++)
         if (zss_profile_has_ext(gpu, zss_offered_ext(i)))
             names[n++] = zss_offered_ext(i);
     return fill_exts(names, n, count, props);
@@ -1347,6 +1391,807 @@ static VKAPI_ATTR VkBool32 VKAPI_CALL zss_PresentationSupport(void)
 static VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL zss_GetDeviceProcAddr(VkDevice device,
                                                                       const char *name);
 
+/*
+ * Debugging aid, on with ZSS_TRAP=1: a command the layer does not provide is
+ * answered with a stand-in that names the command and stops the program, so
+ * that an application which calls one regardless (instead of checking for
+ * NULL) says which.
+ */
+static const char *trap_names[768];
+static int ntraps;
+
+static void zss_trap_hit(int i)
+{
+    zss_log("the application called %s, which the layer does not provide; stopping it here", trap_names[i]);
+    abort();
+}
+
+static void zss_trap_0(void) { zss_trap_hit(0); }
+static void zss_trap_1(void) { zss_trap_hit(1); }
+static void zss_trap_2(void) { zss_trap_hit(2); }
+static void zss_trap_3(void) { zss_trap_hit(3); }
+static void zss_trap_4(void) { zss_trap_hit(4); }
+static void zss_trap_5(void) { zss_trap_hit(5); }
+static void zss_trap_6(void) { zss_trap_hit(6); }
+static void zss_trap_7(void) { zss_trap_hit(7); }
+static void zss_trap_8(void) { zss_trap_hit(8); }
+static void zss_trap_9(void) { zss_trap_hit(9); }
+static void zss_trap_10(void) { zss_trap_hit(10); }
+static void zss_trap_11(void) { zss_trap_hit(11); }
+static void zss_trap_12(void) { zss_trap_hit(12); }
+static void zss_trap_13(void) { zss_trap_hit(13); }
+static void zss_trap_14(void) { zss_trap_hit(14); }
+static void zss_trap_15(void) { zss_trap_hit(15); }
+static void zss_trap_16(void) { zss_trap_hit(16); }
+static void zss_trap_17(void) { zss_trap_hit(17); }
+static void zss_trap_18(void) { zss_trap_hit(18); }
+static void zss_trap_19(void) { zss_trap_hit(19); }
+static void zss_trap_20(void) { zss_trap_hit(20); }
+static void zss_trap_21(void) { zss_trap_hit(21); }
+static void zss_trap_22(void) { zss_trap_hit(22); }
+static void zss_trap_23(void) { zss_trap_hit(23); }
+static void zss_trap_24(void) { zss_trap_hit(24); }
+static void zss_trap_25(void) { zss_trap_hit(25); }
+static void zss_trap_26(void) { zss_trap_hit(26); }
+static void zss_trap_27(void) { zss_trap_hit(27); }
+static void zss_trap_28(void) { zss_trap_hit(28); }
+static void zss_trap_29(void) { zss_trap_hit(29); }
+static void zss_trap_30(void) { zss_trap_hit(30); }
+static void zss_trap_31(void) { zss_trap_hit(31); }
+static void zss_trap_32(void) { zss_trap_hit(32); }
+static void zss_trap_33(void) { zss_trap_hit(33); }
+static void zss_trap_34(void) { zss_trap_hit(34); }
+static void zss_trap_35(void) { zss_trap_hit(35); }
+static void zss_trap_36(void) { zss_trap_hit(36); }
+static void zss_trap_37(void) { zss_trap_hit(37); }
+static void zss_trap_38(void) { zss_trap_hit(38); }
+static void zss_trap_39(void) { zss_trap_hit(39); }
+static void zss_trap_40(void) { zss_trap_hit(40); }
+static void zss_trap_41(void) { zss_trap_hit(41); }
+static void zss_trap_42(void) { zss_trap_hit(42); }
+static void zss_trap_43(void) { zss_trap_hit(43); }
+static void zss_trap_44(void) { zss_trap_hit(44); }
+static void zss_trap_45(void) { zss_trap_hit(45); }
+static void zss_trap_46(void) { zss_trap_hit(46); }
+static void zss_trap_47(void) { zss_trap_hit(47); }
+static void zss_trap_48(void) { zss_trap_hit(48); }
+static void zss_trap_49(void) { zss_trap_hit(49); }
+static void zss_trap_50(void) { zss_trap_hit(50); }
+static void zss_trap_51(void) { zss_trap_hit(51); }
+static void zss_trap_52(void) { zss_trap_hit(52); }
+static void zss_trap_53(void) { zss_trap_hit(53); }
+static void zss_trap_54(void) { zss_trap_hit(54); }
+static void zss_trap_55(void) { zss_trap_hit(55); }
+static void zss_trap_56(void) { zss_trap_hit(56); }
+static void zss_trap_57(void) { zss_trap_hit(57); }
+static void zss_trap_58(void) { zss_trap_hit(58); }
+static void zss_trap_59(void) { zss_trap_hit(59); }
+static void zss_trap_60(void) { zss_trap_hit(60); }
+static void zss_trap_61(void) { zss_trap_hit(61); }
+static void zss_trap_62(void) { zss_trap_hit(62); }
+static void zss_trap_63(void) { zss_trap_hit(63); }
+static void zss_trap_64(void) { zss_trap_hit(64); }
+static void zss_trap_65(void) { zss_trap_hit(65); }
+static void zss_trap_66(void) { zss_trap_hit(66); }
+static void zss_trap_67(void) { zss_trap_hit(67); }
+static void zss_trap_68(void) { zss_trap_hit(68); }
+static void zss_trap_69(void) { zss_trap_hit(69); }
+static void zss_trap_70(void) { zss_trap_hit(70); }
+static void zss_trap_71(void) { zss_trap_hit(71); }
+static void zss_trap_72(void) { zss_trap_hit(72); }
+static void zss_trap_73(void) { zss_trap_hit(73); }
+static void zss_trap_74(void) { zss_trap_hit(74); }
+static void zss_trap_75(void) { zss_trap_hit(75); }
+static void zss_trap_76(void) { zss_trap_hit(76); }
+static void zss_trap_77(void) { zss_trap_hit(77); }
+static void zss_trap_78(void) { zss_trap_hit(78); }
+static void zss_trap_79(void) { zss_trap_hit(79); }
+static void zss_trap_80(void) { zss_trap_hit(80); }
+static void zss_trap_81(void) { zss_trap_hit(81); }
+static void zss_trap_82(void) { zss_trap_hit(82); }
+static void zss_trap_83(void) { zss_trap_hit(83); }
+static void zss_trap_84(void) { zss_trap_hit(84); }
+static void zss_trap_85(void) { zss_trap_hit(85); }
+static void zss_trap_86(void) { zss_trap_hit(86); }
+static void zss_trap_87(void) { zss_trap_hit(87); }
+static void zss_trap_88(void) { zss_trap_hit(88); }
+static void zss_trap_89(void) { zss_trap_hit(89); }
+static void zss_trap_90(void) { zss_trap_hit(90); }
+static void zss_trap_91(void) { zss_trap_hit(91); }
+static void zss_trap_92(void) { zss_trap_hit(92); }
+static void zss_trap_93(void) { zss_trap_hit(93); }
+static void zss_trap_94(void) { zss_trap_hit(94); }
+static void zss_trap_95(void) { zss_trap_hit(95); }
+static void zss_trap_96(void) { zss_trap_hit(96); }
+static void zss_trap_97(void) { zss_trap_hit(97); }
+static void zss_trap_98(void) { zss_trap_hit(98); }
+static void zss_trap_99(void) { zss_trap_hit(99); }
+static void zss_trap_100(void) { zss_trap_hit(100); }
+static void zss_trap_101(void) { zss_trap_hit(101); }
+static void zss_trap_102(void) { zss_trap_hit(102); }
+static void zss_trap_103(void) { zss_trap_hit(103); }
+static void zss_trap_104(void) { zss_trap_hit(104); }
+static void zss_trap_105(void) { zss_trap_hit(105); }
+static void zss_trap_106(void) { zss_trap_hit(106); }
+static void zss_trap_107(void) { zss_trap_hit(107); }
+static void zss_trap_108(void) { zss_trap_hit(108); }
+static void zss_trap_109(void) { zss_trap_hit(109); }
+static void zss_trap_110(void) { zss_trap_hit(110); }
+static void zss_trap_111(void) { zss_trap_hit(111); }
+static void zss_trap_112(void) { zss_trap_hit(112); }
+static void zss_trap_113(void) { zss_trap_hit(113); }
+static void zss_trap_114(void) { zss_trap_hit(114); }
+static void zss_trap_115(void) { zss_trap_hit(115); }
+static void zss_trap_116(void) { zss_trap_hit(116); }
+static void zss_trap_117(void) { zss_trap_hit(117); }
+static void zss_trap_118(void) { zss_trap_hit(118); }
+static void zss_trap_119(void) { zss_trap_hit(119); }
+static void zss_trap_120(void) { zss_trap_hit(120); }
+static void zss_trap_121(void) { zss_trap_hit(121); }
+static void zss_trap_122(void) { zss_trap_hit(122); }
+static void zss_trap_123(void) { zss_trap_hit(123); }
+static void zss_trap_124(void) { zss_trap_hit(124); }
+static void zss_trap_125(void) { zss_trap_hit(125); }
+static void zss_trap_126(void) { zss_trap_hit(126); }
+static void zss_trap_127(void) { zss_trap_hit(127); }
+static void zss_trap_128(void) { zss_trap_hit(128); }
+static void zss_trap_129(void) { zss_trap_hit(129); }
+static void zss_trap_130(void) { zss_trap_hit(130); }
+static void zss_trap_131(void) { zss_trap_hit(131); }
+static void zss_trap_132(void) { zss_trap_hit(132); }
+static void zss_trap_133(void) { zss_trap_hit(133); }
+static void zss_trap_134(void) { zss_trap_hit(134); }
+static void zss_trap_135(void) { zss_trap_hit(135); }
+static void zss_trap_136(void) { zss_trap_hit(136); }
+static void zss_trap_137(void) { zss_trap_hit(137); }
+static void zss_trap_138(void) { zss_trap_hit(138); }
+static void zss_trap_139(void) { zss_trap_hit(139); }
+static void zss_trap_140(void) { zss_trap_hit(140); }
+static void zss_trap_141(void) { zss_trap_hit(141); }
+static void zss_trap_142(void) { zss_trap_hit(142); }
+static void zss_trap_143(void) { zss_trap_hit(143); }
+static void zss_trap_144(void) { zss_trap_hit(144); }
+static void zss_trap_145(void) { zss_trap_hit(145); }
+static void zss_trap_146(void) { zss_trap_hit(146); }
+static void zss_trap_147(void) { zss_trap_hit(147); }
+static void zss_trap_148(void) { zss_trap_hit(148); }
+static void zss_trap_149(void) { zss_trap_hit(149); }
+static void zss_trap_150(void) { zss_trap_hit(150); }
+static void zss_trap_151(void) { zss_trap_hit(151); }
+static void zss_trap_152(void) { zss_trap_hit(152); }
+static void zss_trap_153(void) { zss_trap_hit(153); }
+static void zss_trap_154(void) { zss_trap_hit(154); }
+static void zss_trap_155(void) { zss_trap_hit(155); }
+static void zss_trap_156(void) { zss_trap_hit(156); }
+static void zss_trap_157(void) { zss_trap_hit(157); }
+static void zss_trap_158(void) { zss_trap_hit(158); }
+static void zss_trap_159(void) { zss_trap_hit(159); }
+static void zss_trap_160(void) { zss_trap_hit(160); }
+static void zss_trap_161(void) { zss_trap_hit(161); }
+static void zss_trap_162(void) { zss_trap_hit(162); }
+static void zss_trap_163(void) { zss_trap_hit(163); }
+static void zss_trap_164(void) { zss_trap_hit(164); }
+static void zss_trap_165(void) { zss_trap_hit(165); }
+static void zss_trap_166(void) { zss_trap_hit(166); }
+static void zss_trap_167(void) { zss_trap_hit(167); }
+static void zss_trap_168(void) { zss_trap_hit(168); }
+static void zss_trap_169(void) { zss_trap_hit(169); }
+static void zss_trap_170(void) { zss_trap_hit(170); }
+static void zss_trap_171(void) { zss_trap_hit(171); }
+static void zss_trap_172(void) { zss_trap_hit(172); }
+static void zss_trap_173(void) { zss_trap_hit(173); }
+static void zss_trap_174(void) { zss_trap_hit(174); }
+static void zss_trap_175(void) { zss_trap_hit(175); }
+static void zss_trap_176(void) { zss_trap_hit(176); }
+static void zss_trap_177(void) { zss_trap_hit(177); }
+static void zss_trap_178(void) { zss_trap_hit(178); }
+static void zss_trap_179(void) { zss_trap_hit(179); }
+static void zss_trap_180(void) { zss_trap_hit(180); }
+static void zss_trap_181(void) { zss_trap_hit(181); }
+static void zss_trap_182(void) { zss_trap_hit(182); }
+static void zss_trap_183(void) { zss_trap_hit(183); }
+static void zss_trap_184(void) { zss_trap_hit(184); }
+static void zss_trap_185(void) { zss_trap_hit(185); }
+static void zss_trap_186(void) { zss_trap_hit(186); }
+static void zss_trap_187(void) { zss_trap_hit(187); }
+static void zss_trap_188(void) { zss_trap_hit(188); }
+static void zss_trap_189(void) { zss_trap_hit(189); }
+static void zss_trap_190(void) { zss_trap_hit(190); }
+static void zss_trap_191(void) { zss_trap_hit(191); }
+static void zss_trap_192(void) { zss_trap_hit(192); }
+static void zss_trap_193(void) { zss_trap_hit(193); }
+static void zss_trap_194(void) { zss_trap_hit(194); }
+static void zss_trap_195(void) { zss_trap_hit(195); }
+static void zss_trap_196(void) { zss_trap_hit(196); }
+static void zss_trap_197(void) { zss_trap_hit(197); }
+static void zss_trap_198(void) { zss_trap_hit(198); }
+static void zss_trap_199(void) { zss_trap_hit(199); }
+static void zss_trap_200(void) { zss_trap_hit(200); }
+static void zss_trap_201(void) { zss_trap_hit(201); }
+static void zss_trap_202(void) { zss_trap_hit(202); }
+static void zss_trap_203(void) { zss_trap_hit(203); }
+static void zss_trap_204(void) { zss_trap_hit(204); }
+static void zss_trap_205(void) { zss_trap_hit(205); }
+static void zss_trap_206(void) { zss_trap_hit(206); }
+static void zss_trap_207(void) { zss_trap_hit(207); }
+static void zss_trap_208(void) { zss_trap_hit(208); }
+static void zss_trap_209(void) { zss_trap_hit(209); }
+static void zss_trap_210(void) { zss_trap_hit(210); }
+static void zss_trap_211(void) { zss_trap_hit(211); }
+static void zss_trap_212(void) { zss_trap_hit(212); }
+static void zss_trap_213(void) { zss_trap_hit(213); }
+static void zss_trap_214(void) { zss_trap_hit(214); }
+static void zss_trap_215(void) { zss_trap_hit(215); }
+static void zss_trap_216(void) { zss_trap_hit(216); }
+static void zss_trap_217(void) { zss_trap_hit(217); }
+static void zss_trap_218(void) { zss_trap_hit(218); }
+static void zss_trap_219(void) { zss_trap_hit(219); }
+static void zss_trap_220(void) { zss_trap_hit(220); }
+static void zss_trap_221(void) { zss_trap_hit(221); }
+static void zss_trap_222(void) { zss_trap_hit(222); }
+static void zss_trap_223(void) { zss_trap_hit(223); }
+static void zss_trap_224(void) { zss_trap_hit(224); }
+static void zss_trap_225(void) { zss_trap_hit(225); }
+static void zss_trap_226(void) { zss_trap_hit(226); }
+static void zss_trap_227(void) { zss_trap_hit(227); }
+static void zss_trap_228(void) { zss_trap_hit(228); }
+static void zss_trap_229(void) { zss_trap_hit(229); }
+static void zss_trap_230(void) { zss_trap_hit(230); }
+static void zss_trap_231(void) { zss_trap_hit(231); }
+static void zss_trap_232(void) { zss_trap_hit(232); }
+static void zss_trap_233(void) { zss_trap_hit(233); }
+static void zss_trap_234(void) { zss_trap_hit(234); }
+static void zss_trap_235(void) { zss_trap_hit(235); }
+static void zss_trap_236(void) { zss_trap_hit(236); }
+static void zss_trap_237(void) { zss_trap_hit(237); }
+static void zss_trap_238(void) { zss_trap_hit(238); }
+static void zss_trap_239(void) { zss_trap_hit(239); }
+static void zss_trap_240(void) { zss_trap_hit(240); }
+static void zss_trap_241(void) { zss_trap_hit(241); }
+static void zss_trap_242(void) { zss_trap_hit(242); }
+static void zss_trap_243(void) { zss_trap_hit(243); }
+static void zss_trap_244(void) { zss_trap_hit(244); }
+static void zss_trap_245(void) { zss_trap_hit(245); }
+static void zss_trap_246(void) { zss_trap_hit(246); }
+static void zss_trap_247(void) { zss_trap_hit(247); }
+static void zss_trap_248(void) { zss_trap_hit(248); }
+static void zss_trap_249(void) { zss_trap_hit(249); }
+static void zss_trap_250(void) { zss_trap_hit(250); }
+static void zss_trap_251(void) { zss_trap_hit(251); }
+static void zss_trap_252(void) { zss_trap_hit(252); }
+static void zss_trap_253(void) { zss_trap_hit(253); }
+static void zss_trap_254(void) { zss_trap_hit(254); }
+static void zss_trap_255(void) { zss_trap_hit(255); }
+static void zss_trap_256(void) { zss_trap_hit(256); }
+static void zss_trap_257(void) { zss_trap_hit(257); }
+static void zss_trap_258(void) { zss_trap_hit(258); }
+static void zss_trap_259(void) { zss_trap_hit(259); }
+static void zss_trap_260(void) { zss_trap_hit(260); }
+static void zss_trap_261(void) { zss_trap_hit(261); }
+static void zss_trap_262(void) { zss_trap_hit(262); }
+static void zss_trap_263(void) { zss_trap_hit(263); }
+static void zss_trap_264(void) { zss_trap_hit(264); }
+static void zss_trap_265(void) { zss_trap_hit(265); }
+static void zss_trap_266(void) { zss_trap_hit(266); }
+static void zss_trap_267(void) { zss_trap_hit(267); }
+static void zss_trap_268(void) { zss_trap_hit(268); }
+static void zss_trap_269(void) { zss_trap_hit(269); }
+static void zss_trap_270(void) { zss_trap_hit(270); }
+static void zss_trap_271(void) { zss_trap_hit(271); }
+static void zss_trap_272(void) { zss_trap_hit(272); }
+static void zss_trap_273(void) { zss_trap_hit(273); }
+static void zss_trap_274(void) { zss_trap_hit(274); }
+static void zss_trap_275(void) { zss_trap_hit(275); }
+static void zss_trap_276(void) { zss_trap_hit(276); }
+static void zss_trap_277(void) { zss_trap_hit(277); }
+static void zss_trap_278(void) { zss_trap_hit(278); }
+static void zss_trap_279(void) { zss_trap_hit(279); }
+static void zss_trap_280(void) { zss_trap_hit(280); }
+static void zss_trap_281(void) { zss_trap_hit(281); }
+static void zss_trap_282(void) { zss_trap_hit(282); }
+static void zss_trap_283(void) { zss_trap_hit(283); }
+static void zss_trap_284(void) { zss_trap_hit(284); }
+static void zss_trap_285(void) { zss_trap_hit(285); }
+static void zss_trap_286(void) { zss_trap_hit(286); }
+static void zss_trap_287(void) { zss_trap_hit(287); }
+static void zss_trap_288(void) { zss_trap_hit(288); }
+static void zss_trap_289(void) { zss_trap_hit(289); }
+static void zss_trap_290(void) { zss_trap_hit(290); }
+static void zss_trap_291(void) { zss_trap_hit(291); }
+static void zss_trap_292(void) { zss_trap_hit(292); }
+static void zss_trap_293(void) { zss_trap_hit(293); }
+static void zss_trap_294(void) { zss_trap_hit(294); }
+static void zss_trap_295(void) { zss_trap_hit(295); }
+static void zss_trap_296(void) { zss_trap_hit(296); }
+static void zss_trap_297(void) { zss_trap_hit(297); }
+static void zss_trap_298(void) { zss_trap_hit(298); }
+static void zss_trap_299(void) { zss_trap_hit(299); }
+static void zss_trap_300(void) { zss_trap_hit(300); }
+static void zss_trap_301(void) { zss_trap_hit(301); }
+static void zss_trap_302(void) { zss_trap_hit(302); }
+static void zss_trap_303(void) { zss_trap_hit(303); }
+static void zss_trap_304(void) { zss_trap_hit(304); }
+static void zss_trap_305(void) { zss_trap_hit(305); }
+static void zss_trap_306(void) { zss_trap_hit(306); }
+static void zss_trap_307(void) { zss_trap_hit(307); }
+static void zss_trap_308(void) { zss_trap_hit(308); }
+static void zss_trap_309(void) { zss_trap_hit(309); }
+static void zss_trap_310(void) { zss_trap_hit(310); }
+static void zss_trap_311(void) { zss_trap_hit(311); }
+static void zss_trap_312(void) { zss_trap_hit(312); }
+static void zss_trap_313(void) { zss_trap_hit(313); }
+static void zss_trap_314(void) { zss_trap_hit(314); }
+static void zss_trap_315(void) { zss_trap_hit(315); }
+static void zss_trap_316(void) { zss_trap_hit(316); }
+static void zss_trap_317(void) { zss_trap_hit(317); }
+static void zss_trap_318(void) { zss_trap_hit(318); }
+static void zss_trap_319(void) { zss_trap_hit(319); }
+static void zss_trap_320(void) { zss_trap_hit(320); }
+static void zss_trap_321(void) { zss_trap_hit(321); }
+static void zss_trap_322(void) { zss_trap_hit(322); }
+static void zss_trap_323(void) { zss_trap_hit(323); }
+static void zss_trap_324(void) { zss_trap_hit(324); }
+static void zss_trap_325(void) { zss_trap_hit(325); }
+static void zss_trap_326(void) { zss_trap_hit(326); }
+static void zss_trap_327(void) { zss_trap_hit(327); }
+static void zss_trap_328(void) { zss_trap_hit(328); }
+static void zss_trap_329(void) { zss_trap_hit(329); }
+static void zss_trap_330(void) { zss_trap_hit(330); }
+static void zss_trap_331(void) { zss_trap_hit(331); }
+static void zss_trap_332(void) { zss_trap_hit(332); }
+static void zss_trap_333(void) { zss_trap_hit(333); }
+static void zss_trap_334(void) { zss_trap_hit(334); }
+static void zss_trap_335(void) { zss_trap_hit(335); }
+static void zss_trap_336(void) { zss_trap_hit(336); }
+static void zss_trap_337(void) { zss_trap_hit(337); }
+static void zss_trap_338(void) { zss_trap_hit(338); }
+static void zss_trap_339(void) { zss_trap_hit(339); }
+static void zss_trap_340(void) { zss_trap_hit(340); }
+static void zss_trap_341(void) { zss_trap_hit(341); }
+static void zss_trap_342(void) { zss_trap_hit(342); }
+static void zss_trap_343(void) { zss_trap_hit(343); }
+static void zss_trap_344(void) { zss_trap_hit(344); }
+static void zss_trap_345(void) { zss_trap_hit(345); }
+static void zss_trap_346(void) { zss_trap_hit(346); }
+static void zss_trap_347(void) { zss_trap_hit(347); }
+static void zss_trap_348(void) { zss_trap_hit(348); }
+static void zss_trap_349(void) { zss_trap_hit(349); }
+static void zss_trap_350(void) { zss_trap_hit(350); }
+static void zss_trap_351(void) { zss_trap_hit(351); }
+static void zss_trap_352(void) { zss_trap_hit(352); }
+static void zss_trap_353(void) { zss_trap_hit(353); }
+static void zss_trap_354(void) { zss_trap_hit(354); }
+static void zss_trap_355(void) { zss_trap_hit(355); }
+static void zss_trap_356(void) { zss_trap_hit(356); }
+static void zss_trap_357(void) { zss_trap_hit(357); }
+static void zss_trap_358(void) { zss_trap_hit(358); }
+static void zss_trap_359(void) { zss_trap_hit(359); }
+static void zss_trap_360(void) { zss_trap_hit(360); }
+static void zss_trap_361(void) { zss_trap_hit(361); }
+static void zss_trap_362(void) { zss_trap_hit(362); }
+static void zss_trap_363(void) { zss_trap_hit(363); }
+static void zss_trap_364(void) { zss_trap_hit(364); }
+static void zss_trap_365(void) { zss_trap_hit(365); }
+static void zss_trap_366(void) { zss_trap_hit(366); }
+static void zss_trap_367(void) { zss_trap_hit(367); }
+static void zss_trap_368(void) { zss_trap_hit(368); }
+static void zss_trap_369(void) { zss_trap_hit(369); }
+static void zss_trap_370(void) { zss_trap_hit(370); }
+static void zss_trap_371(void) { zss_trap_hit(371); }
+static void zss_trap_372(void) { zss_trap_hit(372); }
+static void zss_trap_373(void) { zss_trap_hit(373); }
+static void zss_trap_374(void) { zss_trap_hit(374); }
+static void zss_trap_375(void) { zss_trap_hit(375); }
+static void zss_trap_376(void) { zss_trap_hit(376); }
+static void zss_trap_377(void) { zss_trap_hit(377); }
+static void zss_trap_378(void) { zss_trap_hit(378); }
+static void zss_trap_379(void) { zss_trap_hit(379); }
+static void zss_trap_380(void) { zss_trap_hit(380); }
+static void zss_trap_381(void) { zss_trap_hit(381); }
+static void zss_trap_382(void) { zss_trap_hit(382); }
+static void zss_trap_383(void) { zss_trap_hit(383); }
+static void zss_trap_384(void) { zss_trap_hit(384); }
+static void zss_trap_385(void) { zss_trap_hit(385); }
+static void zss_trap_386(void) { zss_trap_hit(386); }
+static void zss_trap_387(void) { zss_trap_hit(387); }
+static void zss_trap_388(void) { zss_trap_hit(388); }
+static void zss_trap_389(void) { zss_trap_hit(389); }
+static void zss_trap_390(void) { zss_trap_hit(390); }
+static void zss_trap_391(void) { zss_trap_hit(391); }
+static void zss_trap_392(void) { zss_trap_hit(392); }
+static void zss_trap_393(void) { zss_trap_hit(393); }
+static void zss_trap_394(void) { zss_trap_hit(394); }
+static void zss_trap_395(void) { zss_trap_hit(395); }
+static void zss_trap_396(void) { zss_trap_hit(396); }
+static void zss_trap_397(void) { zss_trap_hit(397); }
+static void zss_trap_398(void) { zss_trap_hit(398); }
+static void zss_trap_399(void) { zss_trap_hit(399); }
+static void zss_trap_400(void) { zss_trap_hit(400); }
+static void zss_trap_401(void) { zss_trap_hit(401); }
+static void zss_trap_402(void) { zss_trap_hit(402); }
+static void zss_trap_403(void) { zss_trap_hit(403); }
+static void zss_trap_404(void) { zss_trap_hit(404); }
+static void zss_trap_405(void) { zss_trap_hit(405); }
+static void zss_trap_406(void) { zss_trap_hit(406); }
+static void zss_trap_407(void) { zss_trap_hit(407); }
+static void zss_trap_408(void) { zss_trap_hit(408); }
+static void zss_trap_409(void) { zss_trap_hit(409); }
+static void zss_trap_410(void) { zss_trap_hit(410); }
+static void zss_trap_411(void) { zss_trap_hit(411); }
+static void zss_trap_412(void) { zss_trap_hit(412); }
+static void zss_trap_413(void) { zss_trap_hit(413); }
+static void zss_trap_414(void) { zss_trap_hit(414); }
+static void zss_trap_415(void) { zss_trap_hit(415); }
+static void zss_trap_416(void) { zss_trap_hit(416); }
+static void zss_trap_417(void) { zss_trap_hit(417); }
+static void zss_trap_418(void) { zss_trap_hit(418); }
+static void zss_trap_419(void) { zss_trap_hit(419); }
+static void zss_trap_420(void) { zss_trap_hit(420); }
+static void zss_trap_421(void) { zss_trap_hit(421); }
+static void zss_trap_422(void) { zss_trap_hit(422); }
+static void zss_trap_423(void) { zss_trap_hit(423); }
+static void zss_trap_424(void) { zss_trap_hit(424); }
+static void zss_trap_425(void) { zss_trap_hit(425); }
+static void zss_trap_426(void) { zss_trap_hit(426); }
+static void zss_trap_427(void) { zss_trap_hit(427); }
+static void zss_trap_428(void) { zss_trap_hit(428); }
+static void zss_trap_429(void) { zss_trap_hit(429); }
+static void zss_trap_430(void) { zss_trap_hit(430); }
+static void zss_trap_431(void) { zss_trap_hit(431); }
+static void zss_trap_432(void) { zss_trap_hit(432); }
+static void zss_trap_433(void) { zss_trap_hit(433); }
+static void zss_trap_434(void) { zss_trap_hit(434); }
+static void zss_trap_435(void) { zss_trap_hit(435); }
+static void zss_trap_436(void) { zss_trap_hit(436); }
+static void zss_trap_437(void) { zss_trap_hit(437); }
+static void zss_trap_438(void) { zss_trap_hit(438); }
+static void zss_trap_439(void) { zss_trap_hit(439); }
+static void zss_trap_440(void) { zss_trap_hit(440); }
+static void zss_trap_441(void) { zss_trap_hit(441); }
+static void zss_trap_442(void) { zss_trap_hit(442); }
+static void zss_trap_443(void) { zss_trap_hit(443); }
+static void zss_trap_444(void) { zss_trap_hit(444); }
+static void zss_trap_445(void) { zss_trap_hit(445); }
+static void zss_trap_446(void) { zss_trap_hit(446); }
+static void zss_trap_447(void) { zss_trap_hit(447); }
+static void zss_trap_448(void) { zss_trap_hit(448); }
+static void zss_trap_449(void) { zss_trap_hit(449); }
+static void zss_trap_450(void) { zss_trap_hit(450); }
+static void zss_trap_451(void) { zss_trap_hit(451); }
+static void zss_trap_452(void) { zss_trap_hit(452); }
+static void zss_trap_453(void) { zss_trap_hit(453); }
+static void zss_trap_454(void) { zss_trap_hit(454); }
+static void zss_trap_455(void) { zss_trap_hit(455); }
+static void zss_trap_456(void) { zss_trap_hit(456); }
+static void zss_trap_457(void) { zss_trap_hit(457); }
+static void zss_trap_458(void) { zss_trap_hit(458); }
+static void zss_trap_459(void) { zss_trap_hit(459); }
+static void zss_trap_460(void) { zss_trap_hit(460); }
+static void zss_trap_461(void) { zss_trap_hit(461); }
+static void zss_trap_462(void) { zss_trap_hit(462); }
+static void zss_trap_463(void) { zss_trap_hit(463); }
+static void zss_trap_464(void) { zss_trap_hit(464); }
+static void zss_trap_465(void) { zss_trap_hit(465); }
+static void zss_trap_466(void) { zss_trap_hit(466); }
+static void zss_trap_467(void) { zss_trap_hit(467); }
+static void zss_trap_468(void) { zss_trap_hit(468); }
+static void zss_trap_469(void) { zss_trap_hit(469); }
+static void zss_trap_470(void) { zss_trap_hit(470); }
+static void zss_trap_471(void) { zss_trap_hit(471); }
+static void zss_trap_472(void) { zss_trap_hit(472); }
+static void zss_trap_473(void) { zss_trap_hit(473); }
+static void zss_trap_474(void) { zss_trap_hit(474); }
+static void zss_trap_475(void) { zss_trap_hit(475); }
+static void zss_trap_476(void) { zss_trap_hit(476); }
+static void zss_trap_477(void) { zss_trap_hit(477); }
+static void zss_trap_478(void) { zss_trap_hit(478); }
+static void zss_trap_479(void) { zss_trap_hit(479); }
+static void zss_trap_480(void) { zss_trap_hit(480); }
+static void zss_trap_481(void) { zss_trap_hit(481); }
+static void zss_trap_482(void) { zss_trap_hit(482); }
+static void zss_trap_483(void) { zss_trap_hit(483); }
+static void zss_trap_484(void) { zss_trap_hit(484); }
+static void zss_trap_485(void) { zss_trap_hit(485); }
+static void zss_trap_486(void) { zss_trap_hit(486); }
+static void zss_trap_487(void) { zss_trap_hit(487); }
+static void zss_trap_488(void) { zss_trap_hit(488); }
+static void zss_trap_489(void) { zss_trap_hit(489); }
+static void zss_trap_490(void) { zss_trap_hit(490); }
+static void zss_trap_491(void) { zss_trap_hit(491); }
+static void zss_trap_492(void) { zss_trap_hit(492); }
+static void zss_trap_493(void) { zss_trap_hit(493); }
+static void zss_trap_494(void) { zss_trap_hit(494); }
+static void zss_trap_495(void) { zss_trap_hit(495); }
+static void zss_trap_496(void) { zss_trap_hit(496); }
+static void zss_trap_497(void) { zss_trap_hit(497); }
+static void zss_trap_498(void) { zss_trap_hit(498); }
+static void zss_trap_499(void) { zss_trap_hit(499); }
+static void zss_trap_500(void) { zss_trap_hit(500); }
+static void zss_trap_501(void) { zss_trap_hit(501); }
+static void zss_trap_502(void) { zss_trap_hit(502); }
+static void zss_trap_503(void) { zss_trap_hit(503); }
+static void zss_trap_504(void) { zss_trap_hit(504); }
+static void zss_trap_505(void) { zss_trap_hit(505); }
+static void zss_trap_506(void) { zss_trap_hit(506); }
+static void zss_trap_507(void) { zss_trap_hit(507); }
+static void zss_trap_508(void) { zss_trap_hit(508); }
+static void zss_trap_509(void) { zss_trap_hit(509); }
+static void zss_trap_510(void) { zss_trap_hit(510); }
+static void zss_trap_511(void) { zss_trap_hit(511); }
+static void zss_trap_512(void) { zss_trap_hit(512); }
+static void zss_trap_513(void) { zss_trap_hit(513); }
+static void zss_trap_514(void) { zss_trap_hit(514); }
+static void zss_trap_515(void) { zss_trap_hit(515); }
+static void zss_trap_516(void) { zss_trap_hit(516); }
+static void zss_trap_517(void) { zss_trap_hit(517); }
+static void zss_trap_518(void) { zss_trap_hit(518); }
+static void zss_trap_519(void) { zss_trap_hit(519); }
+static void zss_trap_520(void) { zss_trap_hit(520); }
+static void zss_trap_521(void) { zss_trap_hit(521); }
+static void zss_trap_522(void) { zss_trap_hit(522); }
+static void zss_trap_523(void) { zss_trap_hit(523); }
+static void zss_trap_524(void) { zss_trap_hit(524); }
+static void zss_trap_525(void) { zss_trap_hit(525); }
+static void zss_trap_526(void) { zss_trap_hit(526); }
+static void zss_trap_527(void) { zss_trap_hit(527); }
+static void zss_trap_528(void) { zss_trap_hit(528); }
+static void zss_trap_529(void) { zss_trap_hit(529); }
+static void zss_trap_530(void) { zss_trap_hit(530); }
+static void zss_trap_531(void) { zss_trap_hit(531); }
+static void zss_trap_532(void) { zss_trap_hit(532); }
+static void zss_trap_533(void) { zss_trap_hit(533); }
+static void zss_trap_534(void) { zss_trap_hit(534); }
+static void zss_trap_535(void) { zss_trap_hit(535); }
+static void zss_trap_536(void) { zss_trap_hit(536); }
+static void zss_trap_537(void) { zss_trap_hit(537); }
+static void zss_trap_538(void) { zss_trap_hit(538); }
+static void zss_trap_539(void) { zss_trap_hit(539); }
+static void zss_trap_540(void) { zss_trap_hit(540); }
+static void zss_trap_541(void) { zss_trap_hit(541); }
+static void zss_trap_542(void) { zss_trap_hit(542); }
+static void zss_trap_543(void) { zss_trap_hit(543); }
+static void zss_trap_544(void) { zss_trap_hit(544); }
+static void zss_trap_545(void) { zss_trap_hit(545); }
+static void zss_trap_546(void) { zss_trap_hit(546); }
+static void zss_trap_547(void) { zss_trap_hit(547); }
+static void zss_trap_548(void) { zss_trap_hit(548); }
+static void zss_trap_549(void) { zss_trap_hit(549); }
+static void zss_trap_550(void) { zss_trap_hit(550); }
+static void zss_trap_551(void) { zss_trap_hit(551); }
+static void zss_trap_552(void) { zss_trap_hit(552); }
+static void zss_trap_553(void) { zss_trap_hit(553); }
+static void zss_trap_554(void) { zss_trap_hit(554); }
+static void zss_trap_555(void) { zss_trap_hit(555); }
+static void zss_trap_556(void) { zss_trap_hit(556); }
+static void zss_trap_557(void) { zss_trap_hit(557); }
+static void zss_trap_558(void) { zss_trap_hit(558); }
+static void zss_trap_559(void) { zss_trap_hit(559); }
+static void zss_trap_560(void) { zss_trap_hit(560); }
+static void zss_trap_561(void) { zss_trap_hit(561); }
+static void zss_trap_562(void) { zss_trap_hit(562); }
+static void zss_trap_563(void) { zss_trap_hit(563); }
+static void zss_trap_564(void) { zss_trap_hit(564); }
+static void zss_trap_565(void) { zss_trap_hit(565); }
+static void zss_trap_566(void) { zss_trap_hit(566); }
+static void zss_trap_567(void) { zss_trap_hit(567); }
+static void zss_trap_568(void) { zss_trap_hit(568); }
+static void zss_trap_569(void) { zss_trap_hit(569); }
+static void zss_trap_570(void) { zss_trap_hit(570); }
+static void zss_trap_571(void) { zss_trap_hit(571); }
+static void zss_trap_572(void) { zss_trap_hit(572); }
+static void zss_trap_573(void) { zss_trap_hit(573); }
+static void zss_trap_574(void) { zss_trap_hit(574); }
+static void zss_trap_575(void) { zss_trap_hit(575); }
+static void zss_trap_576(void) { zss_trap_hit(576); }
+static void zss_trap_577(void) { zss_trap_hit(577); }
+static void zss_trap_578(void) { zss_trap_hit(578); }
+static void zss_trap_579(void) { zss_trap_hit(579); }
+static void zss_trap_580(void) { zss_trap_hit(580); }
+static void zss_trap_581(void) { zss_trap_hit(581); }
+static void zss_trap_582(void) { zss_trap_hit(582); }
+static void zss_trap_583(void) { zss_trap_hit(583); }
+static void zss_trap_584(void) { zss_trap_hit(584); }
+static void zss_trap_585(void) { zss_trap_hit(585); }
+static void zss_trap_586(void) { zss_trap_hit(586); }
+static void zss_trap_587(void) { zss_trap_hit(587); }
+static void zss_trap_588(void) { zss_trap_hit(588); }
+static void zss_trap_589(void) { zss_trap_hit(589); }
+static void zss_trap_590(void) { zss_trap_hit(590); }
+static void zss_trap_591(void) { zss_trap_hit(591); }
+static void zss_trap_592(void) { zss_trap_hit(592); }
+static void zss_trap_593(void) { zss_trap_hit(593); }
+static void zss_trap_594(void) { zss_trap_hit(594); }
+static void zss_trap_595(void) { zss_trap_hit(595); }
+static void zss_trap_596(void) { zss_trap_hit(596); }
+static void zss_trap_597(void) { zss_trap_hit(597); }
+static void zss_trap_598(void) { zss_trap_hit(598); }
+static void zss_trap_599(void) { zss_trap_hit(599); }
+static void zss_trap_600(void) { zss_trap_hit(600); }
+static void zss_trap_601(void) { zss_trap_hit(601); }
+static void zss_trap_602(void) { zss_trap_hit(602); }
+static void zss_trap_603(void) { zss_trap_hit(603); }
+static void zss_trap_604(void) { zss_trap_hit(604); }
+static void zss_trap_605(void) { zss_trap_hit(605); }
+static void zss_trap_606(void) { zss_trap_hit(606); }
+static void zss_trap_607(void) { zss_trap_hit(607); }
+static void zss_trap_608(void) { zss_trap_hit(608); }
+static void zss_trap_609(void) { zss_trap_hit(609); }
+static void zss_trap_610(void) { zss_trap_hit(610); }
+static void zss_trap_611(void) { zss_trap_hit(611); }
+static void zss_trap_612(void) { zss_trap_hit(612); }
+static void zss_trap_613(void) { zss_trap_hit(613); }
+static void zss_trap_614(void) { zss_trap_hit(614); }
+static void zss_trap_615(void) { zss_trap_hit(615); }
+static void zss_trap_616(void) { zss_trap_hit(616); }
+static void zss_trap_617(void) { zss_trap_hit(617); }
+static void zss_trap_618(void) { zss_trap_hit(618); }
+static void zss_trap_619(void) { zss_trap_hit(619); }
+static void zss_trap_620(void) { zss_trap_hit(620); }
+static void zss_trap_621(void) { zss_trap_hit(621); }
+static void zss_trap_622(void) { zss_trap_hit(622); }
+static void zss_trap_623(void) { zss_trap_hit(623); }
+static void zss_trap_624(void) { zss_trap_hit(624); }
+static void zss_trap_625(void) { zss_trap_hit(625); }
+static void zss_trap_626(void) { zss_trap_hit(626); }
+static void zss_trap_627(void) { zss_trap_hit(627); }
+static void zss_trap_628(void) { zss_trap_hit(628); }
+static void zss_trap_629(void) { zss_trap_hit(629); }
+static void zss_trap_630(void) { zss_trap_hit(630); }
+static void zss_trap_631(void) { zss_trap_hit(631); }
+static void zss_trap_632(void) { zss_trap_hit(632); }
+static void zss_trap_633(void) { zss_trap_hit(633); }
+static void zss_trap_634(void) { zss_trap_hit(634); }
+static void zss_trap_635(void) { zss_trap_hit(635); }
+static void zss_trap_636(void) { zss_trap_hit(636); }
+static void zss_trap_637(void) { zss_trap_hit(637); }
+static void zss_trap_638(void) { zss_trap_hit(638); }
+static void zss_trap_639(void) { zss_trap_hit(639); }
+static void zss_trap_640(void) { zss_trap_hit(640); }
+static void zss_trap_641(void) { zss_trap_hit(641); }
+static void zss_trap_642(void) { zss_trap_hit(642); }
+static void zss_trap_643(void) { zss_trap_hit(643); }
+static void zss_trap_644(void) { zss_trap_hit(644); }
+static void zss_trap_645(void) { zss_trap_hit(645); }
+static void zss_trap_646(void) { zss_trap_hit(646); }
+static void zss_trap_647(void) { zss_trap_hit(647); }
+static void zss_trap_648(void) { zss_trap_hit(648); }
+static void zss_trap_649(void) { zss_trap_hit(649); }
+static void zss_trap_650(void) { zss_trap_hit(650); }
+static void zss_trap_651(void) { zss_trap_hit(651); }
+static void zss_trap_652(void) { zss_trap_hit(652); }
+static void zss_trap_653(void) { zss_trap_hit(653); }
+static void zss_trap_654(void) { zss_trap_hit(654); }
+static void zss_trap_655(void) { zss_trap_hit(655); }
+static void zss_trap_656(void) { zss_trap_hit(656); }
+static void zss_trap_657(void) { zss_trap_hit(657); }
+static void zss_trap_658(void) { zss_trap_hit(658); }
+static void zss_trap_659(void) { zss_trap_hit(659); }
+static void zss_trap_660(void) { zss_trap_hit(660); }
+static void zss_trap_661(void) { zss_trap_hit(661); }
+static void zss_trap_662(void) { zss_trap_hit(662); }
+static void zss_trap_663(void) { zss_trap_hit(663); }
+static void zss_trap_664(void) { zss_trap_hit(664); }
+static void zss_trap_665(void) { zss_trap_hit(665); }
+static void zss_trap_666(void) { zss_trap_hit(666); }
+static void zss_trap_667(void) { zss_trap_hit(667); }
+static void zss_trap_668(void) { zss_trap_hit(668); }
+static void zss_trap_669(void) { zss_trap_hit(669); }
+static void zss_trap_670(void) { zss_trap_hit(670); }
+static void zss_trap_671(void) { zss_trap_hit(671); }
+static void zss_trap_672(void) { zss_trap_hit(672); }
+static void zss_trap_673(void) { zss_trap_hit(673); }
+static void zss_trap_674(void) { zss_trap_hit(674); }
+static void zss_trap_675(void) { zss_trap_hit(675); }
+static void zss_trap_676(void) { zss_trap_hit(676); }
+static void zss_trap_677(void) { zss_trap_hit(677); }
+static void zss_trap_678(void) { zss_trap_hit(678); }
+static void zss_trap_679(void) { zss_trap_hit(679); }
+static void zss_trap_680(void) { zss_trap_hit(680); }
+static void zss_trap_681(void) { zss_trap_hit(681); }
+static void zss_trap_682(void) { zss_trap_hit(682); }
+static void zss_trap_683(void) { zss_trap_hit(683); }
+static void zss_trap_684(void) { zss_trap_hit(684); }
+static void zss_trap_685(void) { zss_trap_hit(685); }
+static void zss_trap_686(void) { zss_trap_hit(686); }
+static void zss_trap_687(void) { zss_trap_hit(687); }
+static void zss_trap_688(void) { zss_trap_hit(688); }
+static void zss_trap_689(void) { zss_trap_hit(689); }
+static void zss_trap_690(void) { zss_trap_hit(690); }
+static void zss_trap_691(void) { zss_trap_hit(691); }
+static void zss_trap_692(void) { zss_trap_hit(692); }
+static void zss_trap_693(void) { zss_trap_hit(693); }
+static void zss_trap_694(void) { zss_trap_hit(694); }
+static void zss_trap_695(void) { zss_trap_hit(695); }
+static void zss_trap_696(void) { zss_trap_hit(696); }
+static void zss_trap_697(void) { zss_trap_hit(697); }
+static void zss_trap_698(void) { zss_trap_hit(698); }
+static void zss_trap_699(void) { zss_trap_hit(699); }
+static void zss_trap_700(void) { zss_trap_hit(700); }
+static void zss_trap_701(void) { zss_trap_hit(701); }
+static void zss_trap_702(void) { zss_trap_hit(702); }
+static void zss_trap_703(void) { zss_trap_hit(703); }
+static void zss_trap_704(void) { zss_trap_hit(704); }
+static void zss_trap_705(void) { zss_trap_hit(705); }
+static void zss_trap_706(void) { zss_trap_hit(706); }
+static void zss_trap_707(void) { zss_trap_hit(707); }
+static void zss_trap_708(void) { zss_trap_hit(708); }
+static void zss_trap_709(void) { zss_trap_hit(709); }
+static void zss_trap_710(void) { zss_trap_hit(710); }
+static void zss_trap_711(void) { zss_trap_hit(711); }
+static void zss_trap_712(void) { zss_trap_hit(712); }
+static void zss_trap_713(void) { zss_trap_hit(713); }
+static void zss_trap_714(void) { zss_trap_hit(714); }
+static void zss_trap_715(void) { zss_trap_hit(715); }
+static void zss_trap_716(void) { zss_trap_hit(716); }
+static void zss_trap_717(void) { zss_trap_hit(717); }
+static void zss_trap_718(void) { zss_trap_hit(718); }
+static void zss_trap_719(void) { zss_trap_hit(719); }
+static void zss_trap_720(void) { zss_trap_hit(720); }
+static void zss_trap_721(void) { zss_trap_hit(721); }
+static void zss_trap_722(void) { zss_trap_hit(722); }
+static void zss_trap_723(void) { zss_trap_hit(723); }
+static void zss_trap_724(void) { zss_trap_hit(724); }
+static void zss_trap_725(void) { zss_trap_hit(725); }
+static void zss_trap_726(void) { zss_trap_hit(726); }
+static void zss_trap_727(void) { zss_trap_hit(727); }
+static void zss_trap_728(void) { zss_trap_hit(728); }
+static void zss_trap_729(void) { zss_trap_hit(729); }
+static void zss_trap_730(void) { zss_trap_hit(730); }
+static void zss_trap_731(void) { zss_trap_hit(731); }
+static void zss_trap_732(void) { zss_trap_hit(732); }
+static void zss_trap_733(void) { zss_trap_hit(733); }
+static void zss_trap_734(void) { zss_trap_hit(734); }
+static void zss_trap_735(void) { zss_trap_hit(735); }
+static void zss_trap_736(void) { zss_trap_hit(736); }
+static void zss_trap_737(void) { zss_trap_hit(737); }
+static void zss_trap_738(void) { zss_trap_hit(738); }
+static void zss_trap_739(void) { zss_trap_hit(739); }
+static void zss_trap_740(void) { zss_trap_hit(740); }
+static void zss_trap_741(void) { zss_trap_hit(741); }
+static void zss_trap_742(void) { zss_trap_hit(742); }
+static void zss_trap_743(void) { zss_trap_hit(743); }
+static void zss_trap_744(void) { zss_trap_hit(744); }
+static void zss_trap_745(void) { zss_trap_hit(745); }
+static void zss_trap_746(void) { zss_trap_hit(746); }
+static void zss_trap_747(void) { zss_trap_hit(747); }
+static void zss_trap_748(void) { zss_trap_hit(748); }
+static void zss_trap_749(void) { zss_trap_hit(749); }
+static void zss_trap_750(void) { zss_trap_hit(750); }
+static void zss_trap_751(void) { zss_trap_hit(751); }
+static void zss_trap_752(void) { zss_trap_hit(752); }
+static void zss_trap_753(void) { zss_trap_hit(753); }
+static void zss_trap_754(void) { zss_trap_hit(754); }
+static void zss_trap_755(void) { zss_trap_hit(755); }
+static void zss_trap_756(void) { zss_trap_hit(756); }
+static void zss_trap_757(void) { zss_trap_hit(757); }
+static void zss_trap_758(void) { zss_trap_hit(758); }
+static void zss_trap_759(void) { zss_trap_hit(759); }
+static void zss_trap_760(void) { zss_trap_hit(760); }
+static void zss_trap_761(void) { zss_trap_hit(761); }
+static void zss_trap_762(void) { zss_trap_hit(762); }
+static void zss_trap_763(void) { zss_trap_hit(763); }
+static void zss_trap_764(void) { zss_trap_hit(764); }
+static void zss_trap_765(void) { zss_trap_hit(765); }
+static void zss_trap_766(void) { zss_trap_hit(766); }
+static void zss_trap_767(void) { zss_trap_hit(767); }
+
+static void (*const trap_fns[768])(void) = { zss_trap_0, zss_trap_1, zss_trap_2, zss_trap_3, zss_trap_4, zss_trap_5, zss_trap_6, zss_trap_7, zss_trap_8, zss_trap_9, zss_trap_10, zss_trap_11, zss_trap_12, zss_trap_13, zss_trap_14, zss_trap_15, zss_trap_16, zss_trap_17, zss_trap_18, zss_trap_19, zss_trap_20, zss_trap_21, zss_trap_22, zss_trap_23, zss_trap_24, zss_trap_25, zss_trap_26, zss_trap_27, zss_trap_28, zss_trap_29, zss_trap_30, zss_trap_31, zss_trap_32, zss_trap_33, zss_trap_34, zss_trap_35, zss_trap_36, zss_trap_37, zss_trap_38, zss_trap_39, zss_trap_40, zss_trap_41, zss_trap_42, zss_trap_43, zss_trap_44, zss_trap_45, zss_trap_46, zss_trap_47, zss_trap_48, zss_trap_49, zss_trap_50, zss_trap_51, zss_trap_52, zss_trap_53, zss_trap_54, zss_trap_55, zss_trap_56, zss_trap_57, zss_trap_58, zss_trap_59, zss_trap_60, zss_trap_61, zss_trap_62, zss_trap_63, zss_trap_64, zss_trap_65, zss_trap_66, zss_trap_67, zss_trap_68, zss_trap_69, zss_trap_70, zss_trap_71, zss_trap_72, zss_trap_73, zss_trap_74, zss_trap_75, zss_trap_76, zss_trap_77, zss_trap_78, zss_trap_79, zss_trap_80, zss_trap_81, zss_trap_82, zss_trap_83, zss_trap_84, zss_trap_85, zss_trap_86, zss_trap_87, zss_trap_88, zss_trap_89, zss_trap_90, zss_trap_91, zss_trap_92, zss_trap_93, zss_trap_94, zss_trap_95, zss_trap_96, zss_trap_97, zss_trap_98, zss_trap_99, zss_trap_100, zss_trap_101, zss_trap_102, zss_trap_103, zss_trap_104, zss_trap_105, zss_trap_106, zss_trap_107, zss_trap_108, zss_trap_109, zss_trap_110, zss_trap_111, zss_trap_112, zss_trap_113, zss_trap_114, zss_trap_115, zss_trap_116, zss_trap_117, zss_trap_118, zss_trap_119, zss_trap_120, zss_trap_121, zss_trap_122, zss_trap_123, zss_trap_124, zss_trap_125, zss_trap_126, zss_trap_127, zss_trap_128, zss_trap_129, zss_trap_130, zss_trap_131, zss_trap_132, zss_trap_133, zss_trap_134, zss_trap_135, zss_trap_136, zss_trap_137, zss_trap_138, zss_trap_139, zss_trap_140, zss_trap_141, zss_trap_142, zss_trap_143, zss_trap_144, zss_trap_145, zss_trap_146, zss_trap_147, zss_trap_148, zss_trap_149, zss_trap_150, zss_trap_151, zss_trap_152, zss_trap_153, zss_trap_154, zss_trap_155, zss_trap_156, zss_trap_157, zss_trap_158, zss_trap_159, zss_trap_160, zss_trap_161, zss_trap_162, zss_trap_163, zss_trap_164, zss_trap_165, zss_trap_166, zss_trap_167, zss_trap_168, zss_trap_169, zss_trap_170, zss_trap_171, zss_trap_172, zss_trap_173, zss_trap_174, zss_trap_175, zss_trap_176, zss_trap_177, zss_trap_178, zss_trap_179, zss_trap_180, zss_trap_181, zss_trap_182, zss_trap_183, zss_trap_184, zss_trap_185, zss_trap_186, zss_trap_187, zss_trap_188, zss_trap_189, zss_trap_190, zss_trap_191, zss_trap_192, zss_trap_193, zss_trap_194, zss_trap_195, zss_trap_196, zss_trap_197, zss_trap_198, zss_trap_199, zss_trap_200, zss_trap_201, zss_trap_202, zss_trap_203, zss_trap_204, zss_trap_205, zss_trap_206, zss_trap_207, zss_trap_208, zss_trap_209, zss_trap_210, zss_trap_211, zss_trap_212, zss_trap_213, zss_trap_214, zss_trap_215, zss_trap_216, zss_trap_217, zss_trap_218, zss_trap_219, zss_trap_220, zss_trap_221, zss_trap_222, zss_trap_223, zss_trap_224, zss_trap_225, zss_trap_226, zss_trap_227, zss_trap_228, zss_trap_229, zss_trap_230, zss_trap_231, zss_trap_232, zss_trap_233, zss_trap_234, zss_trap_235, zss_trap_236, zss_trap_237, zss_trap_238, zss_trap_239, zss_trap_240, zss_trap_241, zss_trap_242, zss_trap_243, zss_trap_244, zss_trap_245, zss_trap_246, zss_trap_247, zss_trap_248, zss_trap_249, zss_trap_250, zss_trap_251, zss_trap_252, zss_trap_253, zss_trap_254, zss_trap_255, zss_trap_256, zss_trap_257, zss_trap_258, zss_trap_259, zss_trap_260, zss_trap_261, zss_trap_262, zss_trap_263, zss_trap_264, zss_trap_265, zss_trap_266, zss_trap_267, zss_trap_268, zss_trap_269, zss_trap_270, zss_trap_271, zss_trap_272, zss_trap_273, zss_trap_274, zss_trap_275, zss_trap_276, zss_trap_277, zss_trap_278, zss_trap_279, zss_trap_280, zss_trap_281, zss_trap_282, zss_trap_283, zss_trap_284, zss_trap_285, zss_trap_286, zss_trap_287, zss_trap_288, zss_trap_289, zss_trap_290, zss_trap_291, zss_trap_292, zss_trap_293, zss_trap_294, zss_trap_295, zss_trap_296, zss_trap_297, zss_trap_298, zss_trap_299, zss_trap_300, zss_trap_301, zss_trap_302, zss_trap_303, zss_trap_304, zss_trap_305, zss_trap_306, zss_trap_307, zss_trap_308, zss_trap_309, zss_trap_310, zss_trap_311, zss_trap_312, zss_trap_313, zss_trap_314, zss_trap_315, zss_trap_316, zss_trap_317, zss_trap_318, zss_trap_319, zss_trap_320, zss_trap_321, zss_trap_322, zss_trap_323, zss_trap_324, zss_trap_325, zss_trap_326, zss_trap_327, zss_trap_328, zss_trap_329, zss_trap_330, zss_trap_331, zss_trap_332, zss_trap_333, zss_trap_334, zss_trap_335, zss_trap_336, zss_trap_337, zss_trap_338, zss_trap_339, zss_trap_340, zss_trap_341, zss_trap_342, zss_trap_343, zss_trap_344, zss_trap_345, zss_trap_346, zss_trap_347, zss_trap_348, zss_trap_349, zss_trap_350, zss_trap_351, zss_trap_352, zss_trap_353, zss_trap_354, zss_trap_355, zss_trap_356, zss_trap_357, zss_trap_358, zss_trap_359, zss_trap_360, zss_trap_361, zss_trap_362, zss_trap_363, zss_trap_364, zss_trap_365, zss_trap_366, zss_trap_367, zss_trap_368, zss_trap_369, zss_trap_370, zss_trap_371, zss_trap_372, zss_trap_373, zss_trap_374, zss_trap_375, zss_trap_376, zss_trap_377, zss_trap_378, zss_trap_379, zss_trap_380, zss_trap_381, zss_trap_382, zss_trap_383, zss_trap_384, zss_trap_385, zss_trap_386, zss_trap_387, zss_trap_388, zss_trap_389, zss_trap_390, zss_trap_391, zss_trap_392, zss_trap_393, zss_trap_394, zss_trap_395, zss_trap_396, zss_trap_397, zss_trap_398, zss_trap_399, zss_trap_400, zss_trap_401, zss_trap_402, zss_trap_403, zss_trap_404, zss_trap_405, zss_trap_406, zss_trap_407, zss_trap_408, zss_trap_409, zss_trap_410, zss_trap_411, zss_trap_412, zss_trap_413, zss_trap_414, zss_trap_415, zss_trap_416, zss_trap_417, zss_trap_418, zss_trap_419, zss_trap_420, zss_trap_421, zss_trap_422, zss_trap_423, zss_trap_424, zss_trap_425, zss_trap_426, zss_trap_427, zss_trap_428, zss_trap_429, zss_trap_430, zss_trap_431, zss_trap_432, zss_trap_433, zss_trap_434, zss_trap_435, zss_trap_436, zss_trap_437, zss_trap_438, zss_trap_439, zss_trap_440, zss_trap_441, zss_trap_442, zss_trap_443, zss_trap_444, zss_trap_445, zss_trap_446, zss_trap_447, zss_trap_448, zss_trap_449, zss_trap_450, zss_trap_451, zss_trap_452, zss_trap_453, zss_trap_454, zss_trap_455, zss_trap_456, zss_trap_457, zss_trap_458, zss_trap_459, zss_trap_460, zss_trap_461, zss_trap_462, zss_trap_463, zss_trap_464, zss_trap_465, zss_trap_466, zss_trap_467, zss_trap_468, zss_trap_469, zss_trap_470, zss_trap_471, zss_trap_472, zss_trap_473, zss_trap_474, zss_trap_475, zss_trap_476, zss_trap_477, zss_trap_478, zss_trap_479, zss_trap_480, zss_trap_481, zss_trap_482, zss_trap_483, zss_trap_484, zss_trap_485, zss_trap_486, zss_trap_487, zss_trap_488, zss_trap_489, zss_trap_490, zss_trap_491, zss_trap_492, zss_trap_493, zss_trap_494, zss_trap_495, zss_trap_496, zss_trap_497, zss_trap_498, zss_trap_499, zss_trap_500, zss_trap_501, zss_trap_502, zss_trap_503, zss_trap_504, zss_trap_505, zss_trap_506, zss_trap_507, zss_trap_508, zss_trap_509, zss_trap_510, zss_trap_511, zss_trap_512, zss_trap_513, zss_trap_514, zss_trap_515, zss_trap_516, zss_trap_517, zss_trap_518, zss_trap_519, zss_trap_520, zss_trap_521, zss_trap_522, zss_trap_523, zss_trap_524, zss_trap_525, zss_trap_526, zss_trap_527, zss_trap_528, zss_trap_529, zss_trap_530, zss_trap_531, zss_trap_532, zss_trap_533, zss_trap_534, zss_trap_535, zss_trap_536, zss_trap_537, zss_trap_538, zss_trap_539, zss_trap_540, zss_trap_541, zss_trap_542, zss_trap_543, zss_trap_544, zss_trap_545, zss_trap_546, zss_trap_547, zss_trap_548, zss_trap_549, zss_trap_550, zss_trap_551, zss_trap_552, zss_trap_553, zss_trap_554, zss_trap_555, zss_trap_556, zss_trap_557, zss_trap_558, zss_trap_559, zss_trap_560, zss_trap_561, zss_trap_562, zss_trap_563, zss_trap_564, zss_trap_565, zss_trap_566, zss_trap_567, zss_trap_568, zss_trap_569, zss_trap_570, zss_trap_571, zss_trap_572, zss_trap_573, zss_trap_574, zss_trap_575, zss_trap_576, zss_trap_577, zss_trap_578, zss_trap_579, zss_trap_580, zss_trap_581, zss_trap_582, zss_trap_583, zss_trap_584, zss_trap_585, zss_trap_586, zss_trap_587, zss_trap_588, zss_trap_589, zss_trap_590, zss_trap_591, zss_trap_592, zss_trap_593, zss_trap_594, zss_trap_595, zss_trap_596, zss_trap_597, zss_trap_598, zss_trap_599, zss_trap_600, zss_trap_601, zss_trap_602, zss_trap_603, zss_trap_604, zss_trap_605, zss_trap_606, zss_trap_607, zss_trap_608, zss_trap_609, zss_trap_610, zss_trap_611, zss_trap_612, zss_trap_613, zss_trap_614, zss_trap_615, zss_trap_616, zss_trap_617, zss_trap_618, zss_trap_619, zss_trap_620, zss_trap_621, zss_trap_622, zss_trap_623, zss_trap_624, zss_trap_625, zss_trap_626, zss_trap_627, zss_trap_628, zss_trap_629, zss_trap_630, zss_trap_631, zss_trap_632, zss_trap_633, zss_trap_634, zss_trap_635, zss_trap_636, zss_trap_637, zss_trap_638, zss_trap_639, zss_trap_640, zss_trap_641, zss_trap_642, zss_trap_643, zss_trap_644, zss_trap_645, zss_trap_646, zss_trap_647, zss_trap_648, zss_trap_649, zss_trap_650, zss_trap_651, zss_trap_652, zss_trap_653, zss_trap_654, zss_trap_655, zss_trap_656, zss_trap_657, zss_trap_658, zss_trap_659, zss_trap_660, zss_trap_661, zss_trap_662, zss_trap_663, zss_trap_664, zss_trap_665, zss_trap_666, zss_trap_667, zss_trap_668, zss_trap_669, zss_trap_670, zss_trap_671, zss_trap_672, zss_trap_673, zss_trap_674, zss_trap_675, zss_trap_676, zss_trap_677, zss_trap_678, zss_trap_679, zss_trap_680, zss_trap_681, zss_trap_682, zss_trap_683, zss_trap_684, zss_trap_685, zss_trap_686, zss_trap_687, zss_trap_688, zss_trap_689, zss_trap_690, zss_trap_691, zss_trap_692, zss_trap_693, zss_trap_694, zss_trap_695, zss_trap_696, zss_trap_697, zss_trap_698, zss_trap_699, zss_trap_700, zss_trap_701, zss_trap_702, zss_trap_703, zss_trap_704, zss_trap_705, zss_trap_706, zss_trap_707, zss_trap_708, zss_trap_709, zss_trap_710, zss_trap_711, zss_trap_712, zss_trap_713, zss_trap_714, zss_trap_715, zss_trap_716, zss_trap_717, zss_trap_718, zss_trap_719, zss_trap_720, zss_trap_721, zss_trap_722, zss_trap_723, zss_trap_724, zss_trap_725, zss_trap_726, zss_trap_727, zss_trap_728, zss_trap_729, zss_trap_730, zss_trap_731, zss_trap_732, zss_trap_733, zss_trap_734, zss_trap_735, zss_trap_736, zss_trap_737, zss_trap_738, zss_trap_739, zss_trap_740, zss_trap_741, zss_trap_742, zss_trap_743, zss_trap_744, zss_trap_745, zss_trap_746, zss_trap_747, zss_trap_748, zss_trap_749, zss_trap_750, zss_trap_751, zss_trap_752, zss_trap_753, zss_trap_754, zss_trap_755, zss_trap_756, zss_trap_757, zss_trap_758, zss_trap_759, zss_trap_760, zss_trap_761, zss_trap_762, zss_trap_763, zss_trap_764, zss_trap_765, zss_trap_766, zss_trap_767 };
+
+static PFN_vkVoidFunction zss_trap_for(const char *name)
+{
+    static int on = -1;
+
+    if (on < 0)
+        on = getenv("ZSS_TRAP") != NULL;
+    if (!on || ntraps >= 768)
+        return NULL;
+    for (int i = 0; i < ntraps; i++)
+        if (!strcmp(trap_names[i], name))
+            return (PFN_vkVoidFunction)trap_fns[i];
+    trap_names[ntraps] = strdup(name);
+    return (PFN_vkVoidFunction)trap_fns[ntraps++];
+}
+
 static const struct zss_entry device_entries[] = {
 #define X(n) { "vk" #n, (PFN_vkVoidFunction)zss_##n },
     ZSS_DEV_FNS(X)
@@ -1390,8 +2235,15 @@ PFN_vkVoidFunction zss_instance_proc(const char *name)
 static VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL zss_GetDeviceProcAddr(VkDevice device,
                                                                       const char *name)
 {
+    PFN_vkVoidFunction fn = zss_device_proc(name);
+
     (void)device;
-    return zss_device_proc(name);
+    /* What an application asked for and did not get: the first thing to look at when one misbehaves. */
+    if (!fn) {
+        zss_dbg("an application asked for %s, which the layer does not provide", name);
+        fn = zss_trap_for(name);
+    }
+    return fn;
 }
 
 #define ZSS_EXPORT __attribute__((visibility("default")))

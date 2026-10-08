@@ -11,7 +11,7 @@ The table below says which.
 
 > **Status (October 2026).** Working on real hardware: a MacBookPro9,1 powers
 > its NVIDIA GT 650M off and on under a running X session in about 0.3 s, with
-> applications moved to the Intel GPU and back, through the `zss` kernel module
+> applications moved to the Intel GPU and back, through ZSS_Interceptor (the `zss` kernel module)
 > or without it. On the same laptop, a card that loses power **without
 > warning while idle** is now brought back, driver included, with no reboot.
 > A card lost **while a program is rendering on it** is not: the desktop
@@ -26,7 +26,7 @@ The table below says which.
 
 | Part | Works with | Tested on |
 | :--- | :--- | :--- |
-| Moving applications between GPUs (the layer) | Any Vulkan driver: NVIDIA, Mesa (Intel, AMD, Nouveau), software | NVIDIA 470, Intel `anv`, llvmpipe |
+| Moving applications between GPUs (ZSS_AirLock) | Any Vulkan driver: NVIDIA, Mesa (Intel, AMD, Nouveau), software | NVIDIA 470, Intel `anv`, llvmpipe |
 | Recovering applications when a GPU vanishes | Any Vulkan driver | QEMU, by pulling a virtual card |
 | Daemon, `zssctl`, rules for who may hold a GPU, freezing, idle timer | Any GPU | Host tests and QEMU |
 | Quiescing the driver before a power cut (kernel module, `quiesce=pm`) | Any driver that survives a laptop suspend: `amdgpu`, `i915`, `xe`, `nouveau`, and others | **QEMU's `bochs` driver only** |
@@ -41,7 +41,7 @@ The table below says which.
 
 What it would take to cover more hardware:
 
-- **`amdgpu`, `i915`/`xe`, `nouveau`**: the kernel module already runs any
+- **`amdgpu`, `i915`/`xe`, `nouveau`**: ZSS_Interceptor already runs any
   driver's own sleep and wake code, which is also what re-runs the card's
   video BIOS after power returns. What is missing is a trial on real hardware
   for each driver, and a rule for the display server on those drivers (they
@@ -55,14 +55,19 @@ What it would take to cover more hardware:
 
 ## What runs where
 
-- **The layer** (`libzss_vk.so`, started with `zss-run`) is a Vulkan driver
-  shim in user space. It sits between an application and the real driver,
-  keeps enough state to rebuild the application on another GPU, and does so
-  when asked or when the GPU is lost.
+Two parts carry names of their own, because they are the two shims the rest
+is built around:
+
+- **ZSS_AirLock** (`libzss_airlock.so`, started with `zss-run`) is the
+  user-space shim for Vulkan and, through Mesa's Zink, OpenGL. To an
+  application it is the Vulkan driver; underneath it loads the real drivers.
+  It keeps enough state to rebuild the application on another GPU, and does so
+  when asked or when the GPU is lost. Its messages begin `[ZSS_AirLock]`.
 - **The daemon** (`zssd`) decides and sequences: who is using the GPU, what to
   move, freeze or stop, then driver suspend and the power cut, and the reverse.
-- **The kernel module** (`zss.ko`, optional) is the part that touches the
-  hardware: it quiesces the driver through the driver's own sleep code, saves
+- **ZSS_Interceptor** (the kernel module `zss.ko`, optional) is the kernel
+  shim, the part that touches the hardware. The module's file, its `/sys`
+  entries and its kernel messages keep the short name `zss`. What it does: it quiesces the driver through the driver's own sleep code, saves
   and restores PCI state, cuts and restores power through a backend, and
   watches for a card that goes silent. Loaded, it does nothing until the
   daemon hands it a device. Without it the daemon does a narrower version of
@@ -76,19 +81,21 @@ What it would take to cover more hardware:
 
 Consequences worth knowing:
 
-- Only applications started under the layer can be moved. Anything else that
+- Only applications started under ZSS_AirLock can be moved. Anything else that
   holds the GPU is frozen while it is off, or blocks a detach.
-- The layer offers Vulkan 1.1 with swapchains and a short list of
+- ZSS_AirLock offers Vulkan 1.1 with swapchains and a short list of
   extensions. Chromium runs under it and can be moved between the NVIDIA and
   Intel GPUs while it draws (see
-  [`docs/applications/chromium.md`](docs/applications/chromium.md)). Programs
-  that need Vulkan 1.2 or more, and OpenGL programs, are not covered yet.
+  [`docs/applications/chromium.md`](docs/applications/chromium.md)). OpenGL
+  programs run under it through Zink (`zss-run --gl`, OpenGL 3.2 on this
+  laptop's pair of GPUs). Programs that need Vulkan 1.2 or more are not
+  covered yet.
 - What a program is offered is what every GPU it may be moved to has, so that
   nothing it enables can hold it on one card. On the reference laptop that
   withholds seven features of the NVIDIA card. `ZSS_PROFILE=native` offers
   each GPU's own instead; a program that uses the difference is then parked
   rather than moved.
-- A card that vanishes without warning is noticed by the kernel module within
+- A card that vanishes without warning is noticed by ZSS_Interceptor within
   about a tenth of a second, marked disconnected, and its driver told through
   the kernel's PCI error-recovery handlers if it has them, or frozen if it is
   the patched NVIDIA driver. What follows depends on whether the card was in
@@ -107,11 +114,11 @@ and why (MMIO shadowing and a DMA isolator of our own are not planned).
 ## Project Structure
 
 * [`SPEC.md`](SPEC.md) - Long-term architecture, multi-vendor design, and failure analysis. Not a description of what exists.
-* [`openspec/changes/`](openspec/changes/) - Proposal, design, specs and tasks for each milestone: `zss-happy-path` (orderly detach and attach), `zss-device-loss` (a GPU that disappears), `zss-system-integration` (service, installer, power-off under a desktop), `zss-kernel-shim` (the kernel module).
+* [`openspec/changes/`](openspec/changes/) - Proposal, design, specs and tasks for each milestone: `zss-happy-path` (orderly detach and attach), `zss-device-loss` (a GPU that disappears), `zss-system-integration` (service, installer, power-off under a desktop), `zss-kernel-shim` (ZSS_Interceptor).
 * [`src/layer/`](src/layer/) - The graphics layer: a Vulkan driver shim that makes applications migratable.
 * [`src/daemon/`](src/daemon/) - `zssd`, which runs detach, attach, off and on, and the power backends.
 * [`src/zssctl/`](src/zssctl/) - Command-line client.
-* [`kmod/`](kmod/) - The `zss` kernel module and its DKMS files.
+* [`kmod/`](kmod/) - ZSS_Interceptor (the `zss` kernel module) and its DKMS files.
 * [`packaging/`](packaging/) - Installer, service units, the NVIDIA patch tool, and an Arch package.
 * [`patches/`](patches/) - The wake-on-touch patch to the NVIDIA driver.
 * [`tests/`](tests/) - Test application, frame comparison, and the host, QEMU and hardware harnesses.
@@ -157,7 +164,7 @@ application migration only.
 ```sh
 zssctl status                 # state, wake support, who is using the GPU
 zssctl off 0000:01:00.0       # move applications away, suspend the driver, cut power
-zssctl on 0000:01:00.0        # power on; add --return to bring the applications back
+zssctl on 0000:01:00.0        # power on and bring the applications back; --stay leaves them where they are
 ```
 
 Each step is printed as it happens:
@@ -212,10 +219,21 @@ another virtual terminal and run `zssctl on` there.
 
 Set `idle_timeout` in `/etc/zss/zssd.conf` to have an unused GPU powered off
 automatically. A GPU that is driving a display is never powered off,
-and the timer never freezes anything: a program outside the layer keeps the GPU on.
+and the timer never freezes anything: a program outside ZSS_AirLock keeps the GPU on.
 
 A monitor plugged in while the GPU is off is not noticed until something asks
 about displays or you run `zssctl on`.
+
+### On battery
+
+`zss-power-event battery` switches the dedicated GPU off and moves its
+applications, showing the progress ("Moving application 2 of 3") in
+`zrn-warning-dialog` when that is installed; `zss-power-event ac` switches it
+back on and returns the applications, if it was the battery event that
+switched it off; a GPU switched off by hand stays off. The performance
+manager (`zrn_perfd`) calls it on every charger change once it is installed
+at `/usr/local/sbin/zss-power-event`. `--dry-run` shows the dialog and
+switches nothing.
 
 ## When a card is lost without warning
 
@@ -249,19 +267,30 @@ hung. Details, timings and logs: [`docs/track-c.md`](docs/track-c.md).
 ```sh
 meson setup build && ninja -C build
 meson test -C build                       # host and QEMU tests; nothing on this machine is powered off,
-                                          # and the kernel module is loaded only inside the QEMU guest
+                                          # and ZSS_Interceptor is loaded only inside the QEMU guest
 
 # Terminal 1: manage the dGPU without touching its power
 build/src/daemon/zssd --socket "$XDG_RUNTIME_DIR/zss.sock" --gpu 0000:01:00.0=dry-run --allow-software
-# Terminal 2: run something under the layer, then move it away and back
+# Terminal 2: run something under ZSS_AirLock, then move it away and back
 export ZSS_SOCKET="$XDG_RUNTIME_DIR/zss.sock"
 build/src/layer/zss-run vkcube &
 build/src/zssctl/zssctl detach 0000:01:00.0
 build/src/zssctl/zssctl attach 0000:01:00.0
 ```
 
-Applications run under the layer see a Vulkan 1.1 device. Programs that need a
+Applications run under ZSS_AirLock see a Vulkan 1.1 device. Programs that need a
 newer Vulkan version do not start under it yet.
+
+An OpenGL program. `--gl` runs it on Mesa's Zink, which draws OpenGL through
+Vulkan, so that it is under ZSS_AirLock like any Vulkan program and can be moved
+(OpenGL 3.2 and OpenGL ES 3.1 on this laptop's pair of GPUs):
+
+```sh
+build/src/layer/zss-run --gl glxgears
+```
+
+Zink needs two things the NVIDIA 470 driver has not got (dynamic rendering and
+`VK_KHR_maintenance5`); on such a driver ZSS_AirLock provides them itself.
 
 A browser, started on the dedicated GPU. `zss-run` recognises a program built
 on Chromium (a browser, an Electron application) and adds the two switches
@@ -275,18 +304,18 @@ build/src/layer/zss-run chromium
 | Variable | Effect |
 | :--- | :--- |
 | `ZSS_SOCKET` | Socket of the daemon to talk to (default `/run/zss/zssd.sock`) |
-| `ZSS_DEBUG` | Makes the layer log what it loads and why a device is not migratable |
+| `ZSS_DEBUG` | Makes ZSS_AirLock log what it loads and why a device is not migratable |
 | `ZSS_ALLOW_SOFTWARE` | Lets a parked application resume on a software renderer |
 | `ZSS_START_ON` | The GPU a program starts on: `dedicated` (what `zss-run` uses by default: the discrete card), a PCI address, part of a GPU's name, or `any`. `zss-run --on GPU` sets it. The other GPUs are not listed to the program but it can still be moved to them |
 | `ZSS_PROFILE` | `portable` (default): each GPU reports what all GPUs the program may be moved to have. `native`: each reports its own |
-| `ZSS_VULKAN` | `1.0` makes the layer present Vulkan 1.0 only, as it did before |
-| `ZSS_REAL_DRIVER_FILES` | Colon-separated driver manifests for the layer to use instead of the system's |
+| `ZSS_VULKAN` | `1.0` makes ZSS_AirLock present Vulkan 1.0 only, as it did before |
+| `ZSS_REAL_DRIVER_FILES` | Colon-separated driver manifests for ZSS_AirLock to use instead of the system's |
 | `ZSS_RETAIN` | Where uploaded textures are kept so they survive a lost GPU: `disk` (default), `ram`, or `off` |
 | `ZSS_RETAIN_LIMIT_MB`, `ZSS_RETAIN_QUEUE_MB` | Size cap of the store (4096) and of data waiting to be written (256) |
 | `ZSS_BIND_PCI` | Test aid: makes the software renderer pose as the PCI device at that address |
-| `ZSS_TEST_LOSE_AT_SUBMIT` | Test aid: the layer behaves as if the GPU died at that submit |
+| `ZSS_TEST_LOSE_AT_SUBMIT` | Test aid: ZSS_AirLock behaves as if the GPU died at that submit |
 | `ZSS_TEST_LOSE_AFTER_SUBMIT` | Test aid: the GPU dies just after that submit was accepted, with its work in flight |
-| `ZSS_TEST_STUCK_MS`, `ZSS_LOSS_GRACE_MS` | Test aids: hold a thread inside the layer during a loss; how long recovery waits for such threads (3000) |
+| `ZSS_TEST_STUCK_MS`, `ZSS_LOSS_GRACE_MS` | Test aids: hold a thread inside ZSS_AirLock during a loss; how long recovery waits for such threads (3000) |
 
 ## Licence
 

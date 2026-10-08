@@ -42,11 +42,14 @@
 
 ## 6. OpenGL through Zink
 
-- [ ] 6.1 `zss-run --gl`: environment for GLX and EGL, with a clear error when Zink is missing
-- [ ] 6.2 `glxgears` under it on each GPU: renders, renderer string, listed by the daemon
-- [ ] 6.3 Reach OpenGL 3.3 and OpenGL ES 3.0: add what Zink reports missing
-- [ ] 6.4 Migration and injected-loss tests with screenshot comparison; `glmark2` scenes
-- [ ] 6.5 Record whether Zink runs on the Intel driver, and what that means for where OpenGL programs can move
+- [x] 6.1 `zss-run --gl`: environment for GLX and EGL, with a clear error when Zink is missing
+- [x] 6.2 `glxgears` under it on each GPU: renders, renderer string, listed by the daemon (60 fps on NVIDIA and on Intel; also with `-samples 4`, `-srgb` and through five window resizes)
+- [ ] 6.3 Reach OpenGL 3.3 and OpenGL ES 3.0: add what Zink reports missing (now: OpenGL 3.2 and ES 3.1 in the shared NVIDIA+Intel profile, 3.3 on NVIDIA alone; the Intel driver has no `VK_EXT_vertex_attribute_divisor` zero divisor or custom border colours, so 3.3 needs those stood in for)
+- [ ] 6.4 Migration and injected-loss tests with screenshot comparison; `glmark2` scenes (done: `glxgears` NVIDIA to Intel and back as a test in track A, with captures in `docs/applications/`. Not done: injected loss, `glmark2`, which is not installed)
+- [x] 6.5 Record whether Zink runs on the Intel driver, and what that means for where OpenGL programs can move (it does, to OpenGL 3.2; on NVIDIA 470 it does not start at all without the layer, which lacks dynamic rendering and maintenance5: the layer now stands in for both, `src/layer/lower.c`)
+
+- [x] 6.6 IFSCL 3.4.2 in its OpenGL mode: runs on NVIDIA, moves to Intel and back, draws as it does natively (`docs/applications/ifscl-opengl-nvidia-intel-nvidia.png`). Two causes, both from how Zink behaves: (a) when a program changes its swap interval Zink replaces the swapchain and, from another thread, still presents a frame to the old one; the NVIDIA 470 driver then hangs or crashes in a later present. The layer now makes replacing and presenting take turns and keeps such a frame back (`swapchain.c`, test with `tests/testapp/zss-glapp.c`). (b) Without `VK_EXT_extended_dynamic_state` Zink draws wrongly (found by bisecting extensions on plain Zink on Intel, no layer involved); the layer now offers it
+- [ ] 6.7 A dynamic render pass that is suspended and resumed, and one with a view mask, are not stood in for; neither has been met yet
 
 ## 7. Applications
 

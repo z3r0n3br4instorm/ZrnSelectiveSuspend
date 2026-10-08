@@ -1,12 +1,12 @@
 [  0.000] ==== check at 2026-10-07 11:53:36, application pid 912832, gmux base 0x700
 [  2.824] check: bus=de10 module=on [0000:01:00.0 nvidia online; 0000:01:00.1 snd_hda_intel online]
-[  2.881] check: daemon: 0000:01:00.0  state=attached  backend=zss-kmod  removal=not supported  wake=yes  iommu=no | pid 1067    Xorg             display-server | pid 697212  nvidia-persiste  non-migratable: not started under the ZSS layer | pid 912832  vkcube           migratable
+[  2.881] check: daemon: 0000:01:00.0  state=attached  backend=zss-kmod  removal=not supported  wake=yes  iommu=no | pid 1067    Xorg             display-server | pid 697212  nvidia-persiste  non-migratable: not started under ZSS_AirLock | pid 912832  vkcube           migratable
 [  2.903] check: application: alive, state S, holds ['/dev/dri/renderD128', '/dev/dri/renderD129', '/dev/nvidia-modeset', '/dev/nvidia0', '/dev/nvidiactl']
 [  2.919] check: X server: answers
 [  3.676] READY: everything is in place
 [  0.000] ==== cut at 2026-10-07 11:53:49, application pid 912832, gmux base 0x700
 [  0.673] before: bus=de10 module=on [0000:01:00.0 nvidia online; 0000:01:00.1 snd_hda_intel online]
-[  0.735] before: daemon: 0000:01:00.0  state=attached  backend=zss-kmod  removal=not supported  wake=yes  iommu=no | pid 1067    Xorg             display-server | pid 697212  nvidia-persiste  non-migratable: not started under the ZSS layer | pid 912832  vkcube           migratable
+[  0.735] before: daemon: 0000:01:00.0  state=attached  backend=zss-kmod  removal=not supported  wake=yes  iommu=no | pid 1067    Xorg             display-server | pid 697212  nvidia-persiste  non-migratable: not started under ZSS_AirLock | pid 912832  vkcube           migratable
 [  0.752] before: application: alive, state S, holds ['/dev/dri/renderD128', '/dev/dri/renderD129', '/dev/nvidia-modeset', '/dev/nvidia0', '/dev/nvidiactl']
 [  0.767] before: X server: answers
 [  1.581] CUTTING the discrete GPU's power rail now, with its driver running and nothing warned

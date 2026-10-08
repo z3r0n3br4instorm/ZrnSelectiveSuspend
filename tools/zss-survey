@@ -11,7 +11,7 @@
 
 The report lists the Vulkan version requested, the extensions and features
 enabled, the structures chained to the create calls, and every command called,
-and marks what the ZSS layer does not offer today.
+and marks what ZSS_AirLock does not offer today.
 """
 import glob
 import os
@@ -28,9 +28,9 @@ from zss_registry import Registry  # noqa: E402
 
 
 def layer_commands(names):
-    """Which of these commands the ZSS layer implements today: the built layer is asked, name by name."""
+    """Which of these commands ZSS_AirLock implements today: the built layer is asked, name by name."""
     import ctypes
-    path = os.path.join(BUILD, "src", "layer", "libzss_vk.so")
+    path = os.path.join(BUILD, "src", "layer", "libzss_airlock.so")
     try:
         lib = ctypes.CDLL(path)
         ask = lib.vk_icdGetInstanceProcAddr
@@ -114,7 +114,7 @@ def main():
                     note = f" (core in {promoted.replace('VK_VERSION_', '').replace('_', '.')})" if promoted else ""
                     offered = e == "VK_KHR_swapchain" or e in ("VK_KHR_surface", "VK_KHR_xcb_surface", "VK_KHR_xlib_surface",
                                                                "VK_KHR_wayland_surface")
-                    lines.append(f"- `{e}`{note}" + ("" if offered else " — **not offered by the ZSS layer**"))
+                    lines.append(f"- `{e}`{note}" + ("" if offered else " — **not offered by ZSS_AirLock**"))
                 lines.append("")
         feats = sorted({f[1] for f in get("feature")})
         if feats:
@@ -123,7 +123,7 @@ def main():
         if structs:
             lines += ["### Structures chained to the create calls", ""] + [f"- `{s}`" for s in structs] + [""]
         missing = [(c, n) for c, n in cmds if c not in have]
-        lines += [f"### Commands called: {len(cmds)} different, {len(missing)} not in the ZSS layer", "",
+        lines += [f"### Commands called: {len(cmds)} different, {len(missing)} not in ZSS_AirLock", "",
                   "| Command | Calls | Since | In the layer |", "| :--- | ---: | :--- | :--- |"]
         for c, n in cmds:
             info = reg.commands.get(c)

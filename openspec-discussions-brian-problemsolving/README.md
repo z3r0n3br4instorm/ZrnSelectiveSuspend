@@ -44,6 +44,14 @@ Status words: **built** (exists and tested somewhere), **built, unproven**
 | 31 | [A second X server on the GPU for its display](ideas.md#31-a-second-x-server-on-the-gpu-for-its-display) | set aside |
 | 32 | [A text screen when the display server goes down](ideas.md#32-a-text-screen-when-the-display-server-goes-down) | open |
 | 33 | [Freeze the driver always, and divert the calls it cannot answer](ideas.md#33-freeze-the-driver-always-and-divert-the-calls-it-cannot-answer) | built, half working |
+| 34 | [Programs go back to the GPU when it returns](ideas.md#34-programs-go-back-to-the-gpu-when-it-returns) | built |
+| 35 | [The performance manager drives ZSS on charger changes](ideas.md#35-the-performance-manager-drives-zss-on-charger-changes) | built |
+| 36 | [Route graphics programs to ZSS however they are started](ideas.md#36-route-graphics-programs-to-zss-however-they-are-started) | built |
+| 37 | [Find out why the system crashed on waking](ideas.md#37-find-out-why-the-system-crashed-on-waking) | built |
+| 38 | [Make IFSCL migrate](ideas.md#38-make-ifscl-migrate) | built |
+| 39 | [Implement OpenGL as well](ideas.md#39-implement-opengl-as-well) | built |
+| 40 | [Names for the two shims](ideas.md#40-names-for-the-two-shims) | built |
+| 41 | [Lend a detached GPU to a virtual machine](ideas.md#41-lend-a-detached-gpu-to-a-virtual-machine) | specified |
 
 Standing constraints the author set along the way, which shaped several of the
 answers: external displays must keep working (so the NVIDIA driver stays loaded

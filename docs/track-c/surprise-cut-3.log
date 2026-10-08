@@ -1,6 +1,6 @@
 [  0.001] ==== cut at 2026-10-07 15:34:03, application pid 0, gmux base 0x700
 [  0.609] before: bus=de10 module=on driver_frozen=0 nvidia=running [0000:01:00.0 nvidia online; 0000:01:00.1 snd_hda_intel online]
-[  0.714] before: daemon: 0000:01:00.0  state=attached  backend=zss-kmod  removal=not supported  wake=yes  iommu=no | pid 1063    Xorg             display-server | pid 122047  nvidia-persiste  non-migratable: not started under the ZSS layer
+[  0.714] before: daemon: 0000:01:00.0  state=attached  backend=zss-kmod  removal=not supported  wake=yes  iommu=no | pid 1063    Xorg             display-server | pid 122047  nvidia-persiste  non-migratable: not started under ZSS_AirLock
 [  0.752] before: application: GONE
 [  0.807] before: X server: answers
 [  0.855] CUTTING the discrete GPU's power rail now, with its driver running and nothing warned

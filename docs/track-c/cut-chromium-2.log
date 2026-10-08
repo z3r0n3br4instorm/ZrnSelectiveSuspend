@@ -1,12 +1,12 @@
 [  0.000] ==== check at 2026-10-08 15:28:00, application pid 18952, gmux base 0x700
 [  0.013] check: bus=de10 module=on driver_frozen=0 nvidia=running [0000:01:00.0 nvidia online; 0000:01:00.1 snd_hda_intel online]
-[  0.044] check: daemon: 0000:01:00.0  state=attached  backend=zss-kmod  removal=not supported  wake=yes  iommu=no | pid 749     nvidia-persiste  non-migratable: not started under the ZSS layer | pid 1419    Xorg             display-server | pid 18952   chromium         migratable
+[  0.044] check: daemon: 0000:01:00.0  state=attached  backend=zss-kmod  removal=not supported  wake=yes  iommu=no | pid 749     nvidia-persiste  non-migratable: not started under ZSS_AirLock | pid 1419    Xorg             display-server | pid 18952   chromium         migratable
 [  0.058] check: application: alive, state S, holds ['/dev/dri/card1', '/dev/dri/renderD128', '/dev/dri/renderD129', '/dev/nvidia-modeset', '/dev/nvidia0', '/dev/nvidiactl']
 [  0.074] check: X server: answers
 [  0.105] READY: everything is in place
 [  0.000] ==== cut at 2026-10-08 15:28:00, application pid 18952, gmux base 0x700
 [  0.018] before: bus=de10 module=on driver_frozen=0 nvidia=running [0000:01:00.0 nvidia online; 0000:01:00.1 snd_hda_intel online]
-[  0.045] before: daemon: 0000:01:00.0  state=attached  backend=zss-kmod  removal=not supported  wake=yes  iommu=no | pid 749     nvidia-persiste  non-migratable: not started under the ZSS layer | pid 1419    Xorg             display-server | pid 18952   chromium         migratable
+[  0.045] before: daemon: 0000:01:00.0  state=attached  backend=zss-kmod  removal=not supported  wake=yes  iommu=no | pid 749     nvidia-persiste  non-migratable: not started under ZSS_AirLock | pid 1419    Xorg             display-server | pid 18952   chromium         migratable
 [  0.058] before: application: alive, state S, holds ['/dev/dri/card1', '/dev/dri/renderD128', '/dev/dri/renderD129', '/dev/nvidia-modeset', '/dev/nvidia0', '/dev/nvidiactl']
 [  0.073] before: X server: answers
 [  0.100] CUTTING the discrete GPU's power rail now, with its driver running and nothing warned

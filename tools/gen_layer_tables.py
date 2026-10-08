@@ -40,7 +40,43 @@ OFFERED_EXTENSIONS = [
     "VK_KHR_image_format_list",
     # Recorded and replayed in cmd.c; what the GPU captures is read back with every other GPU-written buffer.
     "VK_EXT_transform_feedback",
+    # What Mesa's Zink needs to run OpenGL on top of the layer (measured: docs/surveys/README.md).
+    # Without it Zink draws wrongly (found with IFSCL: its fallback for vertex strides is at fault), so it is not optional.
+    "VK_EXT_extended_dynamic_state",  # its state commands are recorded and replayed (cmd.c)
+    "VK_KHR_maintenance1",
+    "VK_KHR_create_renderpass2",    # turned into version-1 render passes (vk11.c)
+    "VK_KHR_descriptor_update_template",  # part of Vulkan 1.1, done in vk11.c; Zink asks for the name
+    "VK_KHR_dynamic_rendering",     # recorded and replayed (cmd.c); lowered to render passes where the driver lacks it
+    "VK_KHR_maintenance5",          # its commands and structures are handled in vk11.c and device.c
+    "VK_EXT_robustness2",
+    "VK_KHR_robustness2",
+    "VK_KHR_timeline_semaphore",    # the counter is carried across a rebuild (device.c)
+    "VK_EXT_conditional_rendering", # recorded and replayed (cmd.c)
+    "VK_EXT_depth_clip_enable",
+    "VK_EXT_vertex_attribute_divisor",
+    "VK_KHR_vertex_attribute_divisor",
+    "VK_EXT_line_rasterization",    # with its stipple command recorded (cmd.c)
+    "VK_KHR_line_rasterization",
+    "VK_EXT_custom_border_color",
+    "VK_EXT_border_color_swizzle",
+    "VK_KHR_swapchain_mutable_format",
+    "VK_EXT_scalar_block_layout",
 ]
+OFFERED["VkPhysicalDeviceDynamicRenderingFeatures"] = ["dynamicRendering"]
+OFFERED["VkPhysicalDeviceExtendedDynamicStateFeaturesEXT"] = ["extendedDynamicState"]
+OFFERED["VkPhysicalDeviceMaintenance5Features"] = ["maintenance5"]
+OFFERED["VkPhysicalDeviceRobustness2FeaturesKHR"] = ["robustBufferAccess2", "robustImageAccess2", "nullDescriptor"]
+OFFERED["VkPhysicalDeviceTimelineSemaphoreFeatures"] = ["timelineSemaphore"]
+OFFERED["VkPhysicalDeviceConditionalRenderingFeaturesEXT"] = ["conditionalRendering"]
+OFFERED["VkPhysicalDeviceDepthClipEnableFeaturesEXT"] = ["depthClipEnable"]
+OFFERED["VkPhysicalDeviceVertexAttributeDivisorFeatures"] = ["vertexAttributeInstanceRateDivisor",
+                                                              "vertexAttributeInstanceRateZeroDivisor"]
+OFFERED["VkPhysicalDeviceLineRasterizationFeatures"] = ["rectangularLines", "bresenhamLines", "smoothLines",
+                                                         "stippledRectangularLines", "stippledBresenhamLines",
+                                                         "stippledSmoothLines"]
+OFFERED["VkPhysicalDeviceCustomBorderColorFeaturesEXT"] = ["customBorderColors", "customBorderColorWithoutFormat"]
+OFFERED["VkPhysicalDeviceBorderColorSwizzleFeaturesEXT"] = ["borderColorSwizzle", "borderColorSwizzleFromImage"]
+OFFERED["VkPhysicalDeviceScalarBlockLayoutFeatures"] = ["scalarBlockLayout"]
 OFFERED["VkPhysicalDeviceTransformFeedbackFeaturesEXT"] = ["transformFeedback", "geometryStreams"]
 OFFERED["VkPhysicalDeviceProvokingVertexFeaturesEXT"] = ["provokingVertexLast"]
 
@@ -55,6 +91,18 @@ OFFERED_CHAIN = [
     "VkPipelineTessellationDomainOriginStateCreateInfo",
     "VkPipelineRasterizationProvokingVertexStateCreateInfoEXT",
     "VkPipelineRasterizationStateStreamCreateInfoEXT",
+    # For Zink.
+    "VkPipelineRenderingCreateInfo",
+    "VkPipelineCreateFlags2CreateInfo",
+    "VkBufferUsageFlags2CreateInfo",
+    "VkSemaphoreTypeCreateInfo",
+    "VkPipelineRasterizationDepthClipStateCreateInfoEXT",
+    "VkPipelineVertexInputDivisorStateCreateInfo",
+    "VkPipelineRasterizationLineStateCreateInfo",
+    "VkSamplerCustomBorderColorCreateInfoEXT",
+    "VkSamplerBorderColorComponentMappingCreateInfoEXT",
+    "VkCommandBufferInheritanceRenderingInfo",
+    "VkCommandBufferInheritanceConditionalRenderingInfoEXT",
 ]
 
 args = sys.argv[1:]
@@ -88,6 +136,14 @@ HANDLES = {t for t in ("VkBuffer", "VkImage", "VkImageView", "VkSampler", "VkDev
                        "VkPipeline", "VkPipelineLayout", "VkDescriptorSet", "VkDescriptorSetLayout", "VkSemaphore", "VkFence",
                        "VkSwapchainKHR", "VkSurfaceKHR", "VkDevice", "VkQueue", "VkCommandBuffer", "VkShaderModule",
                        "VkSamplerYcbcrConversion", "VkBufferView", "VkPipelineCache", "VkQueryPool", "VkEvent")}
+def plain(sname):
+    """A structure of values only (no pointers, no handles, not chained), which a copy reproduces entirely."""
+    st = reg.structs.get(sname)
+    if not st or st["stype"]:
+        return False
+    return all(m[0] not in HANDLES and "*" not in m[2] and (m[0] not in reg.structs or plain(m[0])) for m in st["members"])
+
+
 o += ["/* Structures kept from a creation call's chain: type and size, and where its one list is if it has one. */",
       "static const struct zss_chain_struct { VkStructureType stype; size_t size; const char *name;",
       "                                       size_t list, count, each; } zss_chain_structs[] = {"]
@@ -100,8 +156,9 @@ for name in OFFERED_CHAIN:
         if mname == "pNext":
             continue
         counter = s["lens"].get(mname)
-        if mtype in HANDLES or mtype in reg.structs or text.count("*") > 1 or ("*" in text and not counter):
-            sys.exit(f"gen_layer_tables.py: {name}.{mname} is a handle, a structure or a bare pointer; not flat")
+        if mtype in HANDLES or (mtype in reg.structs and not plain(mtype)) or text.count("*") > 1 or \
+                ("*" in text and not counter):
+            sys.exit(f"gen_layer_tables.py: {name}.{mname} is a handle, a structure that is not plain, or a bare pointer")
         if "*" in text:
             if lst != "0, 0, 0" or counter not in [m[1] for m in s["members"]]:
                 sys.exit(f"gen_layer_tables.py: {name}.{mname}: only one list, counted by a member, is copied")

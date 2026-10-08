@@ -18,6 +18,9 @@ enum zss_op {
     OP_CLEAR_COLOR, OP_CLEAR_DS, OP_CLEAR_ATTACHMENTS, OP_RESOLVE, OP_BARRIER, OP_PUSH_CONSTANTS,
     OP_BEGIN_RP, OP_NEXT_SUBPASS, OP_END_RP,
     OP_BIND_XFB, OP_BEGIN_XFB, OP_END_XFB, OP_DRAW_BYTE_COUNT,
+    OP_EXECUTE,
+    OP_EDS_VALUE, OP_EDS_STENCIL_OP, OP_EDS_VIEWPORTS, OP_EDS_SCISSORS,
+    OP_BIND_VERTEX2, OP_BEGIN_RENDERING, OP_END_RENDERING, OP_BIND_INDEX2, OP_BEGIN_COND, OP_END_COND, OP_LINE_STIPPLE,
 };
 
 /* One uniform node; each op uses the fields it needs. */
@@ -262,6 +265,87 @@ static void exec(struct zss_dev *dev, VkCommandBuffer cb, const struct zss_cmd *
             fn->CmdEndTransformFeedbackEXT(cb, c->u[0], c->n[0], bufs ? real : NULL, c->a[1]);
         break;
     }
+    case OP_EXECUTE: {
+        struct zss_obj **subs = c->a[0];
+        VkCommandBuffer real[64];
+
+        for (uint32_t i = 0; i < c->n[0] && i < 64; i++)
+            real[i] = R(VkCommandBuffer, subs[i]);
+        fn->CmdExecuteCommands(cb, c->n[0] < 64 ? c->n[0] : 64, real);
+        break;
+    }
+    /* VK_EXT_extended_dynamic_state: the driver has it wherever the application was offered it. */
+    case OP_EDS_VALUE:
+        switch (c->u[0]) {
+        case 0: if (fn->CmdSetCullModeEXT) fn->CmdSetCullModeEXT(cb, c->u[1]); break;
+        case 1: if (fn->CmdSetFrontFaceEXT) fn->CmdSetFrontFaceEXT(cb, (VkFrontFace)c->u[1]); break;
+        case 2: if (fn->CmdSetPrimitiveTopologyEXT) fn->CmdSetPrimitiveTopologyEXT(cb, (VkPrimitiveTopology)c->u[1]); break;
+        case 3: if (fn->CmdSetDepthTestEnableEXT) fn->CmdSetDepthTestEnableEXT(cb, c->u[1]); break;
+        case 4: if (fn->CmdSetDepthWriteEnableEXT) fn->CmdSetDepthWriteEnableEXT(cb, c->u[1]); break;
+        case 5: if (fn->CmdSetDepthCompareOpEXT) fn->CmdSetDepthCompareOpEXT(cb, (VkCompareOp)c->u[1]); break;
+        case 6: if (fn->CmdSetDepthBoundsTestEnableEXT) fn->CmdSetDepthBoundsTestEnableEXT(cb, c->u[1]); break;
+        case 7: if (fn->CmdSetStencilTestEnableEXT) fn->CmdSetStencilTestEnableEXT(cb, c->u[1]); break;
+        }
+        break;
+    case OP_EDS_STENCIL_OP:
+        if (fn->CmdSetStencilOpEXT)
+            fn->CmdSetStencilOpEXT(cb, c->u[0], (VkStencilOp)c->u[1], (VkStencilOp)c->u[2], (VkStencilOp)c->u[3],
+                                   (VkCompareOp)c->u[4]);
+        break;
+    case OP_EDS_VIEWPORTS:
+        if (fn->CmdSetViewportWithCountEXT)
+            fn->CmdSetViewportWithCountEXT(cb, c->n[0], c->a[0]);
+        break;
+    case OP_EDS_SCISSORS:
+        if (fn->CmdSetScissorWithCountEXT)
+            fn->CmdSetScissorWithCountEXT(cb, c->n[0], c->a[0]);
+        break;
+    case OP_BIND_VERTEX2: {
+        struct zss_obj **bufs = c->a[0];
+        const VkDeviceSize *offs = c->a[1], *rest = c->a[2]; /* sizes then strides, either may be absent */
+        VkBuffer real[32];
+
+        for (uint32_t i = 0; i < c->n[0] && i < 32; i++)
+            real[i] = R(VkBuffer, bufs[i]);
+        if (fn->CmdBindVertexBuffers2EXT)
+            fn->CmdBindVertexBuffers2EXT(cb, c->u[0], c->n[0], real, offs, c->u[1] ? rest : NULL,
+                                         c->u[2] ? rest + (c->u[1] ? c->n[0] : 0) : NULL);
+        else
+            /* Without the extension a pipeline cannot take its strides from here, so the plain bind is the same. */
+            fn->CmdBindVertexBuffers(cb, c->u[0], c->n[0], real, offs);
+        break;
+    }
+    case OP_BEGIN_RENDERING:
+        zss_cmd_exec_begin_rendering(dev, cb, c->a[0]);
+        break;
+    case OP_END_RENDERING:
+        zss_cmd_exec_end_rendering(dev, cb);
+        break;
+    case OP_BIND_INDEX2:
+        if (fn->CmdBindIndexBuffer2KHR)
+            fn->CmdBindIndexBuffer2KHR(cb, R(VkBuffer, c->h[0]), c->s[0], c->s[1], (VkIndexType)c->u[0]);
+        else
+            /* maintenance5 lacking: the size only bounds the reads, and without it the buffer's end does. */
+            fn->CmdBindIndexBuffer(cb, R(VkBuffer, c->h[0]), c->s[0], (VkIndexType)c->u[0]);
+        break;
+    case OP_BEGIN_COND: {
+        VkConditionalRenderingBeginInfoEXT ci = {
+            .sType = VK_STRUCTURE_TYPE_CONDITIONAL_RENDERING_BEGIN_INFO_EXT,
+            .buffer = R(VkBuffer, c->h[0]), .offset = c->s[0], .flags = c->u[0],
+        };
+
+        if (fn->CmdBeginConditionalRenderingEXT)
+            fn->CmdBeginConditionalRenderingEXT(cb, &ci);
+        break;
+    }
+    case OP_END_COND:
+        if (fn->CmdEndConditionalRenderingEXT)
+            fn->CmdEndConditionalRenderingEXT(cb);
+        break;
+    case OP_LINE_STIPPLE:
+        if (fn->CmdSetLineStippleEXT)
+            fn->CmdSetLineStippleEXT(cb, c->u[0], (uint16_t)c->u[1]);
+        break;
     case OP_DRAW_BYTE_COUNT:
         fn->CmdDrawIndirectByteCountEXT(cb, c->u[0], c->u[1], R(VkBuffer, c->h[0]), c->s[0], c->u[2], c->u[3]);
         break;
@@ -283,6 +367,8 @@ void zss_cmd_replay(struct zss_dev *dev, struct zss_obj *cb)
         .flags = cb->u.cb.usage,
     };
     VkCommandBuffer real = (VkCommandBuffer)(uintptr_t)cb->r.h;
+    VkCommandBufferInheritanceInfo inh;
+    _Alignas(8) char inh_room[256];
 
     if (!real || (cb->u.cb.state != ZC_RECORDING && cb->u.cb.state != ZC_EXECUTABLE))
         return;
@@ -291,11 +377,27 @@ void zss_cmd_replay(struct zss_dev *dev, struct zss_obj *cb)
         cb->u.cb.state = ZC_INVALID;
         return;
     }
+    if (cb->u.cb.level == VK_COMMAND_BUFFER_LEVEL_SECONDARY) {
+        /* A secondary buffer needs its inheritance whether or not the application gave one. */
+        inh = cb->u.cb.has_inh ? cb->u.cb.inh
+                               : (VkCommandBufferInheritanceInfo){ .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_INHERITANCE_INFO };
+        inh.renderPass = R(VkRenderPass, (struct zss_obj *)(uintptr_t)inh.renderPass);
+        inh.framebuffer = R(VkFramebuffer, (struct zss_obj *)(uintptr_t)inh.framebuffer);
+        zss_inheritance_real(dev, &inh, inh_room, sizeof(inh_room));
+        bi.pInheritanceInfo = &inh;
+    }
     dev->fn.BeginCommandBuffer(real, &bi);
     for (const struct zss_cmd *c = cb->u.cb.head; c; c = c->next)
         exec(dev, real, c);
     if (cb->u.cb.state == ZC_EXECUTABLE)
         dev->fn.EndCommandBuffer(real);
+}
+
+static void set_layout(struct zss_obj *img, const VkImageSubresourceRange *r, VkImageLayout layout);
+
+void zss_cmd_set_layout(struct zss_obj *img, const VkImageSubresourceRange *r, VkImageLayout layout)
+{
+    set_layout(img, r, layout);
 }
 
 static void set_layout(struct zss_obj *img, const VkImageSubresourceRange *r, VkImageLayout layout)
@@ -427,9 +529,22 @@ static void retain_buffer_copy(struct zss_obj *src, struct zss_obj *dst, const V
  */
 void zss_cmd_track_submit(struct zss_dev *dev, struct zss_obj *cb)
 {
-    (void)dev;
     for (const struct zss_cmd *c = cb->u.cb.head; c; c = c->next) {
         switch (c->op) {
+        case OP_BEGIN_RENDERING:
+            zss_cmd_track_rendering(c->a[0]);
+            break;
+        case OP_BEGIN_COND:
+            break;
+        case OP_EXECUTE: {
+            /* What the secondary buffers do happens when the primary that runs them is submitted. */
+            struct zss_obj **subs = c->a[0];
+
+            for (uint32_t i = 0; i < c->n[0]; i++)
+                if (subs[i] && subs[i] != cb)
+                    zss_cmd_track_submit_effects(dev, subs[i]);
+            break;
+        }
         case OP_BARRIER: {
             const VkImageMemoryBarrier *ib = c->a[2];
 
@@ -509,8 +624,14 @@ void zss_cmd_track_submit(struct zss_dev *dev, struct zss_obj *cb)
         }
     }
     /* Submitted once and never again: no reason to keep the recording. */
-    if (cb->u.cb.usage & VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT)
+    if (cb->u.cb.level == VK_COMMAND_BUFFER_LEVEL_PRIMARY && (cb->u.cb.usage & VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT))
         cb->u.cb.state = ZC_INVALID;
+}
+
+/* The effects of a secondary buffer run by a submitted primary; it is not itself submitted. */
+void zss_cmd_track_submit_effects(struct zss_dev *dev, struct zss_obj *cb)
+{
+    zss_cmd_track_submit(dev, cb);
 }
 
 /* ---- entry points ----------------------------------------------------------- */
@@ -526,6 +647,7 @@ VKAPI_ATTR VkResult VKAPI_CALL zss_BeginCommandBuffer(VkCommandBuffer cmd,
     CB(cmd);
     VkCommandBufferBeginInfo bi = *info;
     VkCommandBufferInheritanceInfo inh;
+    _Alignas(8) char inh_room[256];
     VkResult r;
 
     zss_cmd_reset(cb);
@@ -533,10 +655,19 @@ VKAPI_ATTR VkResult VKAPI_CALL zss_BeginCommandBuffer(VkCommandBuffer cmd,
     /* Not "recording" until the driver agrees: a rebuild must not begin it a second time. */
     cb->u.cb.state = ZC_INITIAL;
     bi.pNext = NULL;
+    cb->u.cb.has_inh = false;
     if (cb->u.cb.level == VK_COMMAND_BUFFER_LEVEL_SECONDARY && info->pInheritanceInfo) {
-        inh = *info->pInheritanceInfo;
+        /* Kept with the layer's handles, so that a replay on another GPU can translate them again. */
+        cb->u.cb.inh = *info->pInheritanceInfo;
+        /* Rendering formats (dynamic rendering) and conditional rendering come chained. */
+        cb->u.cb.inh.pNext = zss_chain_keep(cb, info->pInheritanceInfo->pNext);
+        cb->u.cb.has_inh = true;
+        use(cb, H(cb->u.cb.inh.renderPass));
+        use(cb, H(cb->u.cb.inh.framebuffer));
+        inh = cb->u.cb.inh;
         inh.renderPass = ZREAL(VkRenderPass, inh.renderPass);
         inh.framebuffer = ZREAL(VkFramebuffer, inh.framebuffer);
+        zss_inheritance_real(dev, &inh, inh_room, sizeof(inh_room));
         bi.pInheritanceInfo = &inh;
     } else {
         bi.pInheritanceInfo = NULL;
@@ -1086,14 +1217,242 @@ VKAPI_ATTR void VKAPI_CALL zss_CmdExecuteCommands(VkCommandBuffer cmd, uint32_t 
                                                   const VkCommandBuffer *bufs)
 {
     CB(cmd);
-    VkCommandBuffer *real = malloc((n + 1) * sizeof(*real));
+    struct zss_cmd *c;
+    struct zss_obj **list;
 
-    zss_dev_untracked(dev, "secondary command buffers");
+    if (n > 64) {
+        /* Not expected of any real application; kept honest rather than truncated. */
+        VkCommandBuffer *real = malloc(n * sizeof(*real));
+
+        zss_dev_untracked(dev, "more than 64 secondary command buffers in one call");
+        for (uint32_t i = 0; i < n; i++)
+            real[i] = (VkCommandBuffer)(uintptr_t)((struct zss_obj *)bufs[i])->r.h;
+        dev->fn.CmdExecuteCommands(REAL_CB, n, real);
+        free(real);
+        zss_leave();
+        return;
+    }
+    c = rec(cb, OP_EXECUTE);
+    list = calloc(n ? n : 1, sizeof(*list));
+    c->n[0] = n;
     for (uint32_t i = 0; i < n; i++)
-        real[i] = (VkCommandBuffer)(uintptr_t)((struct zss_obj *)bufs[i])->r.h;
-    dev->fn.CmdExecuteCommands(REAL_CB, n, real);
-    free(real);
-    zss_leave();
+        list[i] = use(cb, H(bufs[i]));
+    c->a[0] = list;
+    RUN(c);
+}
+
+/* ---- for Zink: dynamic rendering, maintenance5, conditional rendering, line stipple -------------- */
+
+/*
+ * A VkRenderingInfo kept with the layer's handles, in one allocation: the
+ * structure, then its colour attachments, then depth and stencil.
+ */
+struct zss_rendering {
+    VkRenderingInfo info;
+    VkRenderingAttachmentInfo att[8 + 2];
+    bool has_depth, has_stencil;
+    void *real_rp, *real_fb; /* a render pass and framebuffer standing in for it, made on replay (vk11.c) */
+};
+
+static struct zss_rendering *rendering_copy(struct zss_obj *cb, const VkRenderingInfo *ri)
+{
+    struct zss_rendering *k = calloc(1, sizeof(*k));
+    uint32_t n = ri->colorAttachmentCount < 8 ? ri->colorAttachmentCount : 8;
+
+    k->info = *ri;
+    k->info.pNext = NULL;
+    for (uint32_t i = 0; i < n; i++) {
+        k->att[i] = ri->pColorAttachments[i];
+        k->att[i].pNext = NULL;
+        use(cb, H(k->att[i].imageView));
+        use(cb, H(k->att[i].resolveImageView));
+    }
+    k->info.colorAttachmentCount = n;
+    k->info.pColorAttachments = k->att;
+    if (ri->pDepthAttachment) {
+        k->att[8] = *ri->pDepthAttachment;
+        k->att[8].pNext = NULL;
+        k->has_depth = true;
+        use(cb, H(k->att[8].imageView));
+        use(cb, H(k->att[8].resolveImageView));
+        k->info.pDepthAttachment = &k->att[8];
+    }
+    if (ri->pStencilAttachment) {
+        k->att[9] = *ri->pStencilAttachment;
+        k->att[9].pNext = NULL;
+        k->has_stencil = true;
+        use(cb, H(k->att[9].imageView));
+        use(cb, H(k->att[9].resolveImageView));
+        k->info.pStencilAttachment = &k->att[9];
+    }
+    return k;
+}
+
+/* What a dynamic render pass does to the images it draws into, when it is submitted. */
+void zss_cmd_track_rendering(const void *p)
+{
+    const struct zss_rendering *k = p;
+
+    for (uint32_t i = 0; i < 10; i++) {
+        const VkRenderingAttachmentInfo *a = &k->att[i];
+        struct zss_obj *view = (struct zss_obj *)(uintptr_t)a->imageView, *res = (struct zss_obj *)(uintptr_t)a->resolveImageView;
+
+        if ((i >= k->info.colorAttachmentCount && i < 8) || (i == 8 && !k->has_depth) || (i == 9 && !k->has_stencil))
+            continue;
+        if (view && view->kind == ZK_VIEW) {
+            struct zss_obj *img = ZOBJ(view->u.view.ci.image);
+
+            zss_cmd_set_layout(img, &view->u.view.ci.subresourceRange, a->imageLayout);
+            zss_image_dirty(img, a->loadOp == VK_ATTACHMENT_LOAD_OP_LOAD);
+        }
+        if (res && res->kind == ZK_VIEW) {
+            struct zss_obj *img = ZOBJ(res->u.view.ci.image);
+
+            zss_cmd_set_layout(img, &res->u.view.ci.subresourceRange, a->resolveImageLayout);
+            zss_image_dirty(img, false);
+        }
+    }
+}
+
+VKAPI_ATTR void VKAPI_CALL zss_CmdBeginRenderingKHR(VkCommandBuffer cmd, const VkRenderingInfo *ri)
+{
+    CB(cmd);
+    struct zss_cmd *c = rec(cb, OP_BEGIN_RENDERING);
+
+    c->a[0] = rendering_copy(cb, ri);
+    RUN(c);
+}
+
+/* ---- VK_EXT_extended_dynamic_state ----------------------------------------------------- */
+
+static void eds_value(VkCommandBuffer cmd, uint32_t which, uint32_t value)
+{
+    CB(cmd);
+    struct zss_cmd *c = rec(cb, OP_EDS_VALUE);
+
+    c->u[0] = which;
+    c->u[1] = value;
+    RUN(c);
+}
+
+VKAPI_ATTR void VKAPI_CALL zss_CmdSetCullModeEXT(VkCommandBuffer cmd, VkCullModeFlags v) { eds_value(cmd, 0, v); }
+VKAPI_ATTR void VKAPI_CALL zss_CmdSetFrontFaceEXT(VkCommandBuffer cmd, VkFrontFace v) { eds_value(cmd, 1, v); }
+VKAPI_ATTR void VKAPI_CALL zss_CmdSetPrimitiveTopologyEXT(VkCommandBuffer cmd, VkPrimitiveTopology v) { eds_value(cmd, 2, v); }
+VKAPI_ATTR void VKAPI_CALL zss_CmdSetDepthTestEnableEXT(VkCommandBuffer cmd, VkBool32 v) { eds_value(cmd, 3, v); }
+VKAPI_ATTR void VKAPI_CALL zss_CmdSetDepthWriteEnableEXT(VkCommandBuffer cmd, VkBool32 v) { eds_value(cmd, 4, v); }
+VKAPI_ATTR void VKAPI_CALL zss_CmdSetDepthCompareOpEXT(VkCommandBuffer cmd, VkCompareOp v) { eds_value(cmd, 5, v); }
+VKAPI_ATTR void VKAPI_CALL zss_CmdSetDepthBoundsTestEnableEXT(VkCommandBuffer cmd, VkBool32 v) { eds_value(cmd, 6, v); }
+VKAPI_ATTR void VKAPI_CALL zss_CmdSetStencilTestEnableEXT(VkCommandBuffer cmd, VkBool32 v) { eds_value(cmd, 7, v); }
+
+VKAPI_ATTR void VKAPI_CALL zss_CmdSetStencilOpEXT(VkCommandBuffer cmd, VkStencilFaceFlags faces, VkStencilOp fail, VkStencilOp pass,
+                                                 VkStencilOp depth_fail, VkCompareOp compare)
+{
+    CB(cmd);
+    struct zss_cmd *c = rec(cb, OP_EDS_STENCIL_OP);
+
+    c->u[0] = faces;
+    c->u[1] = fail;
+    c->u[2] = pass;
+    c->u[3] = depth_fail;
+    c->u[4] = compare;
+    RUN(c);
+}
+
+VKAPI_ATTR void VKAPI_CALL zss_CmdSetViewportWithCountEXT(VkCommandBuffer cmd, uint32_t n, const VkViewport *v)
+{
+    CB(cmd);
+    struct zss_cmd *c = rec(cb, OP_EDS_VIEWPORTS);
+
+    c->n[0] = n;
+    c->a[0] = dup(v, n * sizeof(*v));
+    RUN(c);
+}
+
+VKAPI_ATTR void VKAPI_CALL zss_CmdSetScissorWithCountEXT(VkCommandBuffer cmd, uint32_t n, const VkRect2D *v)
+{
+    CB(cmd);
+    struct zss_cmd *c = rec(cb, OP_EDS_SCISSORS);
+
+    c->n[0] = n;
+    c->a[0] = dup(v, n * sizeof(*v));
+    RUN(c);
+}
+
+/* Part of the same extension; Zink calls it whether or not the extension was offered. */
+VKAPI_ATTR void VKAPI_CALL zss_CmdBindVertexBuffers2EXT(VkCommandBuffer cmd, uint32_t first, uint32_t n, const VkBuffer *bufs,
+                                                       const VkDeviceSize *offs, const VkDeviceSize *sizes,
+                                                       const VkDeviceSize *strides)
+{
+    CB(cmd);
+    struct zss_cmd *c = rec(cb, OP_BIND_VERTEX2);
+    struct zss_obj **list = calloc(n ? n : 1, sizeof(*list));
+    VkDeviceSize *rest = calloc(2 * (size_t)n + 1, sizeof(*rest));
+    uint32_t k = 0;
+
+    c->u[0] = first;
+    c->n[0] = n;
+    for (uint32_t i = 0; i < n; i++)
+        list[i] = use(cb, H(bufs[i]));
+    c->a[0] = list;
+    c->a[1] = dup(offs, n * sizeof(*offs));
+    c->u[1] = sizes != NULL;
+    c->u[2] = strides != NULL;
+    for (uint32_t i = 0; sizes && i < n; i++)
+        rest[k++] = sizes[i];
+    for (uint32_t i = 0; strides && i < n; i++)
+        rest[k++] = strides[i];
+    c->a[2] = rest;
+    RUN(c);
+}
+
+VKAPI_ATTR void VKAPI_CALL zss_CmdEndRenderingKHR(VkCommandBuffer cmd)
+{
+    CB(cmd);
+    struct zss_cmd *c = rec(cb, OP_END_RENDERING);
+
+    RUN(c);
+}
+
+VKAPI_ATTR void VKAPI_CALL zss_CmdBindIndexBuffer2KHR(VkCommandBuffer cmd, VkBuffer buffer, VkDeviceSize offset,
+                                                      VkDeviceSize size, VkIndexType type)
+{
+    CB(cmd);
+    struct zss_cmd *c = rec(cb, OP_BIND_INDEX2);
+
+    c->h[0] = use(cb, H(buffer));
+    c->s[0] = offset;
+    c->s[1] = size;
+    c->u[0] = type;
+    RUN(c);
+}
+
+VKAPI_ATTR void VKAPI_CALL zss_CmdBeginConditionalRenderingEXT(VkCommandBuffer cmd, const VkConditionalRenderingBeginInfoEXT *ci)
+{
+    CB(cmd);
+    struct zss_cmd *c = rec(cb, OP_BEGIN_COND);
+
+    c->h[0] = use(cb, H(ci->buffer));
+    c->s[0] = ci->offset;
+    c->u[0] = ci->flags;
+    RUN(c);
+}
+
+VKAPI_ATTR void VKAPI_CALL zss_CmdEndConditionalRenderingEXT(VkCommandBuffer cmd)
+{
+    CB(cmd);
+    struct zss_cmd *c = rec(cb, OP_END_COND);
+
+    RUN(c);
+}
+
+VKAPI_ATTR void VKAPI_CALL zss_CmdSetLineStippleEXT(VkCommandBuffer cmd, uint32_t factor, uint16_t pattern)
+{
+    CB(cmd);
+    struct zss_cmd *c = rec(cb, OP_LINE_STIPPLE);
+
+    c->u[0] = factor;
+    c->u[1] = pattern;
+    RUN(c);
 }
 
 /* ---- VK_EXT_transform_feedback ------------------------------------------------------- */

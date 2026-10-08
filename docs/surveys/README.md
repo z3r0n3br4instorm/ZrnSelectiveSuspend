@@ -4,7 +4,7 @@ Surveys made on the reference laptop (NVIDIA GT 650M on driver 470.256.02,
 Intel HD 4000 on Mesa 26.2 `hasvk`, llvmpipe) on 7 October 2026 with
 `tools/zss-survey`, which runs a program on the real drivers under a layer
 that only watches. Each report lists the version requested, the extensions
-and features enabled, and every command called, and marks what the ZSS layer
+and features enabled, and every command called, and marks what ZSS_AirLock
 does not offer today.
 
 | Program | How it was run | GPU it chose | Asked for | Commands used | Missing from the layer |

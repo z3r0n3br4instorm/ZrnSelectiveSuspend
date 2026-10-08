@@ -39,13 +39,14 @@
 #include <linux/pm.h>
 #include <linux/pm_domain.h>
 #include <linux/pm_runtime.h>
+#include <linux/suspend.h>
 #include <linux/pnp.h>
 #include <linux/slab.h>
 #include <linux/string.h>
 #include <linux/sysfs.h>
 #include <linux/workqueue.h>
 
-#define ZSS_VERSION "0.2.0"
+#define ZSS_VERSION "0.2.1"
 #define ZSS_MAX_FUNCS 8
 #define ZSS_GUARD_MS 100
 #define ZSS_ANSWER_MS 3000
@@ -114,6 +115,15 @@ module_param(freeze_any, bool, 0644);
 static struct kset *zss_kset;
 static LIST_HEAD(zss_devs);
 static DEFINE_MUTEX(zss_lock);
+
+/*
+ * While the whole machine sleeps, devices are powered down and do not answer.
+ * That is not a loss, and telling a driver it was makes it give the device up
+ * for good (the reference laptop's first wake with the module loaded ended so).
+ * So the guard stops at the start of a system sleep and starts again after it,
+ * with the settling time a device just handed back is given.
+ */
+static bool zss_sleeping;
 
 static const char *const state_names[] = { "on", "off", "lost", "failed" };
 static const char *const quiesce_names[] = { "none", "pm", "external" };
@@ -684,7 +694,7 @@ static void zss_guard(struct work_struct *work)
 	mutex_unlock(&zd->lock);
 again:
 	/* One silent look is confirmed at once rather than a whole interval later. */
-	if (!zd->dying)
+	if (!zd->dying && !READ_ONCE(zss_sleeping))
 		schedule_delayed_work(&zd->guard, msecs_to_jiffies(zd->state == ZSS_ON && zd->silent ? 10 : ZSS_GUARD_MS));
 }
 
@@ -1083,6 +1093,41 @@ static struct kobj_attribute manage_attr = __ATTR_WO(manage);
 static struct kobj_attribute unmanage_attr = __ATTR_WO(unmanage);
 static struct kobj_attribute version_attr = __ATTR_RO(version);
 
+static int zss_pm_event(struct notifier_block *nb, unsigned long action, void *data)
+{
+	struct zss_dev *zd;
+
+	switch (action) {
+	case PM_SUSPEND_PREPARE:
+	case PM_HIBERNATION_PREPARE:
+	case PM_RESTORE_PREPARE:
+		WRITE_ONCE(zss_sleeping, true);
+		mutex_lock(&zss_lock);
+		list_for_each_entry(zd, &zss_devs, node)
+			cancel_delayed_work_sync(&zd->guard);
+		mutex_unlock(&zss_lock);
+		break;
+	case PM_POST_SUSPEND:
+	case PM_POST_HIBERNATION:
+	case PM_POST_RESTORE:
+		WRITE_ONCE(zss_sleeping, false);
+		mutex_lock(&zss_lock);
+		list_for_each_entry(zd, &zss_devs, node) {
+			mutex_lock(&zd->lock);
+			zd->silent = 0;
+			zd->settle_until = jiffies + msecs_to_jiffies(ZSS_SETTLE_MS);
+			mutex_unlock(&zd->lock);
+			if (!zd->dying)
+				schedule_delayed_work(&zd->guard, msecs_to_jiffies(ZSS_GUARD_MS));
+		}
+		mutex_unlock(&zss_lock);
+		break;
+	}
+	return NOTIFY_DONE;
+}
+
+static struct notifier_block zss_pm_nb = { .notifier_call = zss_pm_event };
+
 static struct attribute *zss_root_attrs[] = { &manage_attr.attr, &unmanage_attr.attr, &version_attr.attr, NULL };
 static const struct attribute_group zss_root_group = { .attrs = zss_root_attrs };
 
@@ -1099,6 +1144,7 @@ static int __init zss_init(void)
 		return ret;
 	}
 	bus_register_notifier(&pci_bus_type, &zss_bus_nb);
+	register_pm_notifier(&zss_pm_nb);
 	pr_info("loaded, version " ZSS_VERSION "; no device is managed\n");
 	return 0;
 }
@@ -1107,6 +1153,7 @@ static void __exit zss_exit(void)
 {
 	struct zss_dev *zd, *next;
 
+	unregister_pm_notifier(&zss_pm_nb);
 	bus_unregister_notifier(&pci_bus_type, &zss_bus_nb);
 	/* Nothing may be left without power once the code that can restore it is gone. */
 	mutex_lock(&zss_lock);
@@ -1122,5 +1169,5 @@ module_exit(zss_exit);
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Zerone Laboratories");
-MODULE_DESCRIPTION("ZrnSelectiveSuspend: quiesce, power-off and restore of a PCI GPU");
+MODULE_DESCRIPTION("ZSS_Interceptor (ZrnSelectiveSuspend): quiesce, power-off and restore of a PCI GPU");
 MODULE_VERSION(ZSS_VERSION);

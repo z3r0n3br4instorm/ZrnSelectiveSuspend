@@ -281,7 +281,7 @@ int main(int argc, char **argv)
 {
     const char *gpu = getenv("ZSS_TESTAPP_GPU"), *out = ".";
     int frames = 40, delay_ms = 0, forget_at = -1;
-    bool all_features = false, untracked = false, list = false;
+    bool all_features = false, untracked = false, list = false, secondary = false;
     VkApplicationInfo app = { .sType = VK_STRUCTURE_TYPE_APPLICATION_INFO, .pApplicationName = "zss-testapp",
                               .apiVersion = VK_API_VERSION_1_0 };
     VkInstanceCreateInfo ici = { .sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO, .pApplicationInfo = &app };
@@ -299,10 +299,11 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--forget-history-at") && i + 1 < argc) forget_at = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--enable-all-features")) all_features = true;
         else if (!strcmp(argv[i], "--use-untracked")) untracked = true;
+        else if (!strcmp(argv[i], "--secondary")) secondary = true;
         else if (!strcmp(argv[i], "--list")) list = true;
         else {
             fputs("usage: zss-testapp [--gpu NAME] [--out DIR] [--frames N] [--delay-ms N]\n"
-                  "                   [--enable-all-features] [--use-untracked] [--list]\n"
+                  "                   [--enable-all-features] [--use-untracked] [--secondary] [--list]\n"
                   "                   [--forget-history-at N]\n", stderr);
             return 2;
         }
@@ -362,6 +363,15 @@ int main(int argc, char **argv)
                                         .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY, .commandBufferCount = 2 };
     CHECK(vkAllocateCommandBuffers(dev, &cai, cbs));
     VkCommandBuffer setup = cbs[0], frame_cb = cbs[1];
+    /* With --secondary the final pass's draws are recorded in a secondary buffer the frame runs. */
+    VkCommandBuffer sec = VK_NULL_HANDLE;
+    if (secondary) {
+        VkCommandBufferAllocateInfo sai = cai;
+
+        sai.level = VK_COMMAND_BUFFER_LEVEL_SECONDARY;
+        sai.commandBufferCount = 1;
+        CHECK(vkAllocateCommandBuffers(dev, &sai, &sec));
+    }
     VkCommandBufferBeginInfo once = { .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
                                       .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT };
     VkCommandBufferBeginInfo reuse = { .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
@@ -539,16 +549,34 @@ int main(int argc, char **argv)
             rbi.framebuffer = final_fb;
             rbi.clearValueCount = 2;
             rbi.pClearValues = clears;
-            vkCmdBeginRenderPass(frame_cb, &rbi, VK_SUBPASS_CONTENTS_INLINE);
-            vkCmdBindPipeline(frame_cb, VK_PIPELINE_BIND_POINT_GRAPHICS, final_pipe);
-            vkCmdBindDescriptorSets(frame_cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pl, 0, 1, &sets[1], 0, NULL);
+            VkCommandBuffer draw_cb = frame_cb;
+            if (secondary) {
+                VkCommandBufferInheritanceInfo inh = { .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_INHERITANCE_INFO,
+                                                       .renderPass = final_pass, .subpass = 0, .framebuffer = final_fb };
+                VkCommandBufferBeginInfo sbi = { .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+                                                 .flags = VK_COMMAND_BUFFER_USAGE_RENDER_PASS_CONTINUE_BIT,
+                                                 .pInheritanceInfo = &inh };
+
+                CHECK(vkResetCommandBuffer(sec, 0));
+                CHECK(vkBeginCommandBuffer(sec, &sbi));
+                vkCmdBindVertexBuffers(sec, 0, 1, &vb, &zero);
+                draw_cb = sec;
+            }
+            vkCmdBeginRenderPass(frame_cb, &rbi, secondary ? VK_SUBPASS_CONTENTS_SECONDARY_COMMAND_BUFFERS
+                                                           : VK_SUBPASS_CONTENTS_INLINE);
+            vkCmdBindPipeline(draw_cb, VK_PIPELINE_BIND_POINT_GRAPHICS, final_pipe);
+            vkCmdBindDescriptorSets(draw_cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pl, 0, 1, &sets[1], 0, NULL);
             mode = 1;
-            vkCmdPushConstants(frame_cb, pl, pcr.stageFlags, 0, sizeof(mode), &mode);
-            vkCmdDraw(frame_cb, 6, 1, 0, 0);
-            vkCmdBindDescriptorSets(frame_cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pl, 0, 1, &sets[0], 0, NULL);
+            vkCmdPushConstants(draw_cb, pl, pcr.stageFlags, 0, sizeof(mode), &mode);
+            vkCmdDraw(draw_cb, 6, 1, 0, 0);
+            vkCmdBindDescriptorSets(draw_cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pl, 0, 1, &sets[0], 0, NULL);
             mode = 2;
-            vkCmdPushConstants(frame_cb, pl, pcr.stageFlags, 0, sizeof(mode), &mode);
-            vkCmdDraw(frame_cb, 6, 1, 0, 0);
+            vkCmdPushConstants(draw_cb, pl, pcr.stageFlags, 0, sizeof(mode), &mode);
+            vkCmdDraw(draw_cb, 6, 1, 0, 0);
+            if (secondary) {
+                CHECK(vkEndCommandBuffer(sec));
+                vkCmdExecuteCommands(frame_cb, 1, &sec);
+            }
             vkCmdEndRenderPass(frame_cb);
 
             vkCmdCopyImageToBuffer(frame_cb, final, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, readback, 1, &down);

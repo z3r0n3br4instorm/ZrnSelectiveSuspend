@@ -95,6 +95,24 @@ def gone_evacuates_to_software():
     exact(reference("llvmpipe"), out)
 
 
+def secondary_buffers_survive_a_loss():
+    """An application drawing through secondary command buffers is rebuilt like any other, with exact frames."""
+    if not SOFTWARE:
+        return "no software renderer installed"
+
+    def during(d, app):
+        app.wait_frame(LOSE_FRAME + 6)
+        rc, text = d.ctl("attach", FAKE_PCI)
+        check(rc == 0, "attach of the returned device failed: " + text)
+
+    log, err, out = run_lossy("secondary", SOFT_DAEMON, f"[ZSS {FAKE_PCI}]", {**BOUND, **LOSE}, ["--secondary"],
+                              during=during)
+    check("non-migratable" not in log and "secondary command buffers" not in err,
+          "secondary command buffers made the application non-migratable: " + err[-300:])
+    check(f"recovered after submit {LOSE_FRAME + 1} " in err, "the layer did not log the recovery: " + err[-300:])
+    exact(reference("llvmpipe"), out)
+
+
 def work_in_flight_is_run_again():
     """
     The device dies after a frame was submitted and before the application waited
@@ -260,6 +278,7 @@ if __name__ == "__main__":
         rc = run_scenarios([
             ("GPU gone: evacuated to software, exact frames, returns home", gone_evacuates_to_software),
             ("work in flight when the device dies is run again", work_in_flight_is_run_again),
+            ("secondary command buffers: rebuilt after a loss, exact frames", secondary_buffers_survive_a_loss),
             ("GPU still present: rebuilt in place", reset_rebuilds_in_place),
             ("a reset under one application leaves its neighbour alone", healthy_neighbour_is_left_alone),
             ("nowhere to go: parked, then resumed when the GPU returns", nowhere_to_go_parks_then_resumes),

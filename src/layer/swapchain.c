@@ -15,11 +15,23 @@
  */
 #include "zss_layer.h"
 
+#include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
 
 #define SLICE_NS 20000000ull
+
+/*
+ * One at a time: replacing a window's swapchain, and presenting. Vulkan lets
+ * a frame still be presented to a swapchain after its replacement has been
+ * made, and Mesa's Zink does it, from another thread, when a program changes
+ * its swap interval. The NVIDIA 470 driver does not survive that frame: a
+ * later present to the window waits for ever. With this lock a present is
+ * wholly before the replacement or wholly after it, and after it the frame is
+ * not handed to the driver: the window belongs to the new swapchain by then.
+ */
+static pthread_mutex_t window_turn = PTHREAD_MUTEX_INITIALIZER;
 
 static uint64_t now_ns(void)
 {
@@ -36,6 +48,7 @@ VKAPI_ATTR VkResult VKAPI_CALL zss_CreateSwapchainKHR(VkDevice device,
 {
     struct zss_dev *dev = (struct zss_dev *)device;
     VkSwapchainCreateInfoKHR real = *ci;
+    VkImageFormatListCreateInfo fmtlist;
     uint32_t qfi[ZSS_MAX_FAMILIES], n = 0;
     struct zss_obj *o;
     VkSwapchainKHR sc;
@@ -44,7 +57,14 @@ VKAPI_ATTR VkResult VKAPI_CALL zss_CreateSwapchainKHR(VkDevice device,
 
     (void)alloc;
     zss_enter();
+    /* A mutable-format swapchain lists its formats in the chain; only plain values, so passed on as given. */
     real.pNext = NULL;
+    for (const VkBaseInStructure *x = ci->pNext; x; x = x->pNext)
+        if (x->sType == VK_STRUCTURE_TYPE_IMAGE_FORMAT_LIST_CREATE_INFO) {
+            fmtlist = *(const VkImageFormatListCreateInfo *)x;
+            fmtlist.pNext = NULL;
+            real.pNext = &fmtlist;
+        }
     r = zss_surface_real(dev->gpu->drv, ci->surface, &real.surface);
     if (r != VK_SUCCESS) {
         zss_leave();
@@ -52,6 +72,9 @@ VKAPI_ATTR VkResult VKAPI_CALL zss_CreateSwapchainKHR(VkDevice device,
     }
     /* A retired swapchain has no real counterpart to hand over. */
     real.oldSwapchain = ZREAL(VkSwapchainKHR, ci->oldSwapchain);
+    pthread_mutex_lock(&window_turn);
+    if (ci->oldSwapchain)
+        ZOBJ(ci->oldSwapchain)->u.sc.superseded = true;
     if (ci->imageSharingMode == VK_SHARING_MODE_CONCURRENT) {
         for (uint32_t i = 0; i < ci->queueFamilyIndexCount && i < ZSS_MAX_FAMILIES; i++)
             qfi[i] = dev->fam_map[ci->pQueueFamilyIndices[i]] == UINT32_MAX
@@ -59,6 +82,9 @@ VKAPI_ATTR VkResult VKAPI_CALL zss_CreateSwapchainKHR(VkDevice device,
         real.pQueueFamilyIndices = qfi;
     }
     r = dev->fn.CreateSwapchainKHR(dev->real, &real, NULL, &sc);
+    if (r != VK_SUCCESS && ci->oldSwapchain)
+        ZOBJ(ci->oldSwapchain)->u.sc.superseded = false; /* by the rules the old one is then still the window's */
+    pthread_mutex_unlock(&window_turn);
     if (r != VK_SUCCESS) {
         zss_leave();
         return r;
@@ -67,7 +93,7 @@ VKAPI_ATTR VkResult VKAPI_CALL zss_CreateSwapchainKHR(VkDevice device,
     o = zss_obj_new(dev, ZK_SWAPCHAIN);
     o->r.h = (uint64_t)(uintptr_t)sc;
     o->u.sc.ci = *ci;
-    o->u.sc.ci.pNext = NULL;
+    o->u.sc.ci.pNext = zss_chain_keep(o, ci->pNext);
     o->u.sc.ci.pQueueFamilyIndices = NULL;
     o->u.sc.ci.queueFamilyIndexCount = 0;
     o->u.sc.ci.oldSwapchain = VK_NULL_HANDLE;
@@ -252,7 +278,7 @@ VKAPI_ATTR VkResult VKAPI_CALL zss_AcquireNextImageKHR(VkDevice device, VkSwapch
             r = acquire_wait(dev, ZREAL(VkSwapchainKHR, swapchain), slice, &real);
         else
             r = dev->fn.AcquireNextImageKHR(dev->real, ZREAL(VkSwapchainKHR, swapchain), slice,
-                                            ZREAL(VkSemaphore, semaphore), ZREAL(VkFence, fence), &real);
+                                                ZREAL(VkSemaphore, semaphore), ZREAL(VkFence, fence), &real);
         if (zss_lost(dev, r)) {
             /*
              * The device was lost and has been rebuilt while this thread
@@ -299,9 +325,11 @@ VKAPI_ATTR VkResult VKAPI_CALL zss_QueuePresentKHR(VkQueue queue, const VkPresen
     VkSwapchainKHR *chains;
     uint32_t *indices;
     bool retired = false;
-    VkResult r;
+    uint32_t replaced = 0;
+    VkResult r, nothing = VK_ERROR_OUT_OF_DATE_KHR;
 
     zss_enter();
+    pthread_mutex_lock(&window_turn);
     waits = malloc((info->waitSemaphoreCount + 1) * sizeof(*waits));
     chains = malloc((info->swapchainCount + 1) * sizeof(*chains));
     for (uint32_t i = 0; i < info->waitSemaphoreCount; i++) {
@@ -319,6 +347,18 @@ VKAPI_ATTR VkResult VKAPI_CALL zss_QueuePresentKHR(VkQueue queue, const VkPresen
             sc->u.sc.acquired &= ~(1ull << a);
         if (sc->u.sc.retired)
             retired = true;
+        if (sc->u.sc.superseded)
+            replaced++;
+    }
+    /*
+     * A frame for a swapchain the application has since replaced: not handed
+     * to the driver (see window_turn). It is not shown, and that is no
+     * error: the newer swapchain's frames are what the window shows now.
+     */
+    if (!retired && replaced && replaced == info->swapchainCount) {
+        zss_dbg("a frame for a swapchain that has been replaced is not presented");
+        retired = true;
+        nothing = VK_SUCCESS;
     }
 
     if (retired) {
@@ -336,9 +376,9 @@ VKAPI_ATTR VkResult VKAPI_CALL zss_QueuePresentKHR(VkQueue queue, const VkPresen
         if (info->waitSemaphoreCount)
             dev->fn.QueueSubmit(q->real, 1, &si, VK_NULL_HANDLE);
         for (uint32_t i = 0; info->pResults && i < info->swapchainCount; i++)
-            info->pResults[i] = VK_ERROR_OUT_OF_DATE_KHR;
+            info->pResults[i] = nothing;
         free(stages);
-        r = VK_ERROR_OUT_OF_DATE_KHR;
+        r = nothing;
     } else {
         real.pNext = NULL;
         real.pWaitSemaphores = waits;
@@ -362,6 +402,7 @@ VKAPI_ATTR VkResult VKAPI_CALL zss_QueuePresentKHR(VkQueue queue, const VkPresen
             }
         }
     }
+    pthread_mutex_unlock(&window_turn);
     free(waits);
     free(chains);
     free(indices);

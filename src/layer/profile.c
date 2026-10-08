@@ -164,6 +164,9 @@ static bool gpu_has_ext(const struct zss_gpu *g, const char *name)
 
 bool zss_profile_has_ext(const struct zss_gpu *self, const char *name)
 {
+    /* The layer provides these itself where a driver lacks them. */
+    if (zss_ext_emulated(name))
+        return true;
     for (int i = 0; i < zss_ngpus; i++)
         if (zss_profile_member(self, zss_gpus[i]) && !gpu_has_ext(zss_gpus[i], name))
             return false;

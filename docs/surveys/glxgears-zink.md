@@ -11,67 +11,67 @@ Run on Zink with `glxgears`, stopped after 6 s. 1 process(es) used Vulkan.
 
 ### Extensions enabled (instance)
 
-- `VK_EXT_debug_utils` — **not offered by the ZSS layer**
-- `VK_EXT_headless_surface` — **not offered by the ZSS layer**
-- `VK_EXT_layer_settings` — **not offered by the ZSS layer**
-- `VK_EXT_swapchain_colorspace` — **not offered by the ZSS layer**
-- `VK_KHR_external_memory_capabilities` (core in 1.1) — **not offered by the ZSS layer**
-- `VK_KHR_external_semaphore_capabilities` (core in 1.1) — **not offered by the ZSS layer**
-- `VK_KHR_get_physical_device_properties2` (core in 1.1) — **not offered by the ZSS layer**
+- `VK_EXT_debug_utils` — **not offered by ZSS_AirLock**
+- `VK_EXT_headless_surface` — **not offered by ZSS_AirLock**
+- `VK_EXT_layer_settings` — **not offered by ZSS_AirLock**
+- `VK_EXT_swapchain_colorspace` — **not offered by ZSS_AirLock**
+- `VK_KHR_external_memory_capabilities` (core in 1.1) — **not offered by ZSS_AirLock**
+- `VK_KHR_external_semaphore_capabilities` (core in 1.1) — **not offered by ZSS_AirLock**
+- `VK_KHR_get_physical_device_properties2` (core in 1.1) — **not offered by ZSS_AirLock**
 - `VK_KHR_surface`
 - `VK_KHR_wayland_surface`
 - `VK_KHR_xcb_surface`
 
 ### Extensions enabled (device)
 
-- `VK_EXT_4444_formats` (core in 1.3) — **not offered by the ZSS layer**
-- `VK_EXT_color_write_enable` — **not offered by the ZSS layer**
-- `VK_EXT_depth_clamp_zero_one` (core in VK.KHR.depth.clamp.zero.one) — **not offered by the ZSS layer**
-- `VK_EXT_depth_clip_control` — **not offered by the ZSS layer**
-- `VK_EXT_depth_clip_enable` — **not offered by the ZSS layer**
-- `VK_EXT_extended_dynamic_state` (core in 1.3) — **not offered by the ZSS layer**
-- `VK_EXT_extended_dynamic_state2` (core in 1.3) — **not offered by the ZSS layer**
-- `VK_EXT_external_memory_dma_buf` — **not offered by the ZSS layer**
-- `VK_EXT_external_memory_host` — **not offered by the ZSS layer**
-- `VK_EXT_image_2d_view_of_3d` — **not offered by the ZSS layer**
-- `VK_EXT_image_drm_format_modifier` — **not offered by the ZSS layer**
-- `VK_EXT_image_robustness` (core in 1.3) — **not offered by the ZSS layer**
-- `VK_EXT_index_type_uint8` (core in VK.KHR.index.type.uint8) — **not offered by the ZSS layer**
-- `VK_EXT_line_rasterization` (core in VK.KHR.line.rasterization) — **not offered by the ZSS layer**
-- `VK_EXT_memory_budget` — **not offered by the ZSS layer**
-- `VK_EXT_multi_draw` — **not offered by the ZSS layer**
-- `VK_EXT_non_seamless_cube_map` — **not offered by the ZSS layer**
-- `VK_EXT_pci_bus_info` — **not offered by the ZSS layer**
-- `VK_EXT_pipeline_creation_cache_control` (core in 1.3) — **not offered by the ZSS layer**
-- `VK_EXT_primitive_topology_list_restart` — **not offered by the ZSS layer**
-- `VK_EXT_primitives_generated_query` — **not offered by the ZSS layer**
-- `VK_EXT_provoking_vertex` — **not offered by the ZSS layer**
-- `VK_EXT_queue_family_foreign` — **not offered by the ZSS layer**
-- `VK_EXT_sample_locations` — **not offered by the ZSS layer**
-- `VK_EXT_shader_atomic_float` — **not offered by the ZSS layer**
-- `VK_EXT_shader_demote_to_helper_invocation` (core in 1.3) — **not offered by the ZSS layer**
-- `VK_EXT_shader_subgroup_ballot` — **not offered by the ZSS layer**
-- `VK_EXT_shader_subgroup_vote` — **not offered by the ZSS layer**
-- `VK_EXT_transform_feedback` — **not offered by the ZSS layer**
-- `VK_EXT_vertex_attribute_divisor` (core in VK.KHR.vertex.attribute.divisor) — **not offered by the ZSS layer**
-- `VK_KHR_calibrated_timestamps` — **not offered by the ZSS layer**
-- `VK_KHR_dynamic_rendering` (core in 1.3) — **not offered by the ZSS layer**
-- `VK_KHR_external_memory_fd` — **not offered by the ZSS layer**
-- `VK_KHR_external_semaphore_fd` — **not offered by the ZSS layer**
-- `VK_KHR_format_feature_flags2` (core in 1.3) — **not offered by the ZSS layer**
-- `VK_KHR_incremental_present` — **not offered by the ZSS layer**
-- `VK_KHR_maintenance4` (core in 1.3) — **not offered by the ZSS layer**
-- `VK_KHR_maintenance5` (core in 1.4) — **not offered by the ZSS layer**
-- `VK_KHR_maintenance6` (core in 1.4) — **not offered by the ZSS layer**
-- `VK_KHR_pipeline_executable_properties` — **not offered by the ZSS layer**
-- `VK_KHR_push_descriptor` (core in 1.4) — **not offered by the ZSS layer**
-- `VK_KHR_robustness2` — **not offered by the ZSS layer**
-- `VK_KHR_shader_clock` — **not offered by the ZSS layer**
+- `VK_EXT_4444_formats` (core in 1.3) — **not offered by ZSS_AirLock**
+- `VK_EXT_color_write_enable` — **not offered by ZSS_AirLock**
+- `VK_EXT_depth_clamp_zero_one` (core in VK.KHR.depth.clamp.zero.one) — **not offered by ZSS_AirLock**
+- `VK_EXT_depth_clip_control` — **not offered by ZSS_AirLock**
+- `VK_EXT_depth_clip_enable` — **not offered by ZSS_AirLock**
+- `VK_EXT_extended_dynamic_state` (core in 1.3) — **not offered by ZSS_AirLock**
+- `VK_EXT_extended_dynamic_state2` (core in 1.3) — **not offered by ZSS_AirLock**
+- `VK_EXT_external_memory_dma_buf` — **not offered by ZSS_AirLock**
+- `VK_EXT_external_memory_host` — **not offered by ZSS_AirLock**
+- `VK_EXT_image_2d_view_of_3d` — **not offered by ZSS_AirLock**
+- `VK_EXT_image_drm_format_modifier` — **not offered by ZSS_AirLock**
+- `VK_EXT_image_robustness` (core in 1.3) — **not offered by ZSS_AirLock**
+- `VK_EXT_index_type_uint8` (core in VK.KHR.index.type.uint8) — **not offered by ZSS_AirLock**
+- `VK_EXT_line_rasterization` (core in VK.KHR.line.rasterization) — **not offered by ZSS_AirLock**
+- `VK_EXT_memory_budget` — **not offered by ZSS_AirLock**
+- `VK_EXT_multi_draw` — **not offered by ZSS_AirLock**
+- `VK_EXT_non_seamless_cube_map` — **not offered by ZSS_AirLock**
+- `VK_EXT_pci_bus_info` — **not offered by ZSS_AirLock**
+- `VK_EXT_pipeline_creation_cache_control` (core in 1.3) — **not offered by ZSS_AirLock**
+- `VK_EXT_primitive_topology_list_restart` — **not offered by ZSS_AirLock**
+- `VK_EXT_primitives_generated_query` — **not offered by ZSS_AirLock**
+- `VK_EXT_provoking_vertex` — **not offered by ZSS_AirLock**
+- `VK_EXT_queue_family_foreign` — **not offered by ZSS_AirLock**
+- `VK_EXT_sample_locations` — **not offered by ZSS_AirLock**
+- `VK_EXT_shader_atomic_float` — **not offered by ZSS_AirLock**
+- `VK_EXT_shader_demote_to_helper_invocation` (core in 1.3) — **not offered by ZSS_AirLock**
+- `VK_EXT_shader_subgroup_ballot` — **not offered by ZSS_AirLock**
+- `VK_EXT_shader_subgroup_vote` — **not offered by ZSS_AirLock**
+- `VK_EXT_transform_feedback` — **not offered by ZSS_AirLock**
+- `VK_EXT_vertex_attribute_divisor` (core in VK.KHR.vertex.attribute.divisor) — **not offered by ZSS_AirLock**
+- `VK_KHR_calibrated_timestamps` — **not offered by ZSS_AirLock**
+- `VK_KHR_dynamic_rendering` (core in 1.3) — **not offered by ZSS_AirLock**
+- `VK_KHR_external_memory_fd` — **not offered by ZSS_AirLock**
+- `VK_KHR_external_semaphore_fd` — **not offered by ZSS_AirLock**
+- `VK_KHR_format_feature_flags2` (core in 1.3) — **not offered by ZSS_AirLock**
+- `VK_KHR_incremental_present` — **not offered by ZSS_AirLock**
+- `VK_KHR_maintenance4` (core in 1.3) — **not offered by ZSS_AirLock**
+- `VK_KHR_maintenance5` (core in 1.4) — **not offered by ZSS_AirLock**
+- `VK_KHR_maintenance6` (core in 1.4) — **not offered by ZSS_AirLock**
+- `VK_KHR_pipeline_executable_properties` — **not offered by ZSS_AirLock**
+- `VK_KHR_push_descriptor` (core in 1.4) — **not offered by ZSS_AirLock**
+- `VK_KHR_robustness2` — **not offered by ZSS_AirLock**
+- `VK_KHR_shader_clock` — **not offered by ZSS_AirLock**
 - `VK_KHR_swapchain`
-- `VK_KHR_swapchain_mutable_format` — **not offered by the ZSS layer**
-- `VK_KHR_synchronization2` (core in 1.3) — **not offered by the ZSS layer**
-- `VK_KHR_workgroup_memory_explicit_layout` — **not offered by the ZSS layer**
-- `VK_NV_compute_shader_derivatives` (core in VK.KHR.compute.shader.derivatives) — **not offered by the ZSS layer**
+- `VK_KHR_swapchain_mutable_format` — **not offered by ZSS_AirLock**
+- `VK_KHR_synchronization2` (core in 1.3) — **not offered by ZSS_AirLock**
+- `VK_KHR_workgroup_memory_explicit_layout` — **not offered by ZSS_AirLock**
+- `VK_NV_compute_shader_derivatives` (core in VK.KHR.compute.shader.derivatives) — **not offered by ZSS_AirLock**
 
 ### Features enabled
 
@@ -217,7 +217,7 @@ Run on Zink with `glxgears`, stopped after 6 s. 1 process(es) used Vulkan.
 - `VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES`
 - `VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_WORKGROUP_MEMORY_EXPLICIT_LAYOUT_FEATURES_KHR`
 
-### Commands called: 82 different, 32 not in the ZSS layer
+### Commands called: 82 different, 32 not in ZSS_AirLock
 
 | Command | Calls | Since | In the layer |
 | :--- | ---: | :--- | :--- |

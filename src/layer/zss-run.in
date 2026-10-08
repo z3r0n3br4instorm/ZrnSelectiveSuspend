@@ -3,12 +3,15 @@
 # Runs a program with the ZSS graphics layer as its only Vulkan driver, which
 # is what makes the program migratable.
 #
-# Usage: zss-run [--on GPU] [--plain] [--print] <program> [args...]
+# Usage: zss-run [--on GPU] [--gl] [--plain] [--print] <program> [args...]
 #
 # The program starts on the dedicated GPU (the NVIDIA or Radeon card of a
 # machine that also has an integrated one). --on names another: a PCI address
 # (0000:01:00.0), part of a GPU's name (intel), or "any" to let the program
 # choose among all of them. Wherever it starts, it can be moved.
+#
+# --gl runs an OpenGL program on Mesa's Zink, which draws OpenGL through
+# Vulkan, so that it too is under the layer and can be moved.
 #
 # A program built on Chromium (a browser, an Electron application) draws
 # through OpenGL unless told otherwise, and the layer is a Vulkan driver: it
@@ -21,11 +24,12 @@
 manifest="${ZSS_MANIFEST:-@MANIFEST@}"
 
 usage() {
-    echo "usage: zss-run [--on GPU] [--plain] [--print] <program> [args...]" >&2
+    echo "usage: zss-run [--on GPU] [--gl] [--plain] [--print] <program> [args...]" >&2
     echo "  Starts the program on the dedicated GPU, or on the one --on names" >&2
     echo "  (a PCI address, part of a GPU's name, or \"any\")." >&2
     echo "  A Chromium-based program is given the switches that make it draw" >&2
     echo "  through Vulkan; --plain leaves its arguments alone." >&2
+    echo "  --gl runs an OpenGL program through Zink, so that it can be moved too." >&2
     echo "  --print shows what would be run, and runs nothing." >&2
     echo "  zss-run is for GPUs: other PCI cards are not managed yet." >&2
     exit 2
@@ -34,11 +38,13 @@ usage() {
 on="${ZSS_START_ON:-dedicated}"
 plain=""
 print=""
+gl=""
 while :; do
     case "$1" in
     --on) [ $# -ge 2 ] || usage; on="$2"; shift 2 ;;
     --plain) plain=1; shift ;;
     --print) print=1; shift ;;
+    --gl) gl=1; shift ;;
     *) break ;;
     esac
 done
@@ -127,6 +133,17 @@ if [ -n "$print" ]; then
 fi
 [ -n "$ZSS_QUIET" ] || echo "zss-run: starting $(basename "$1") on $where (GPUs only for now)$note" >&2
 
+if [ -n "$gl" ]; then
+    # Zink in place of the GPU's own OpenGL, for GLX and EGL alike. LIBGL_KOPPER_DRI2: Zink's
+    # GLX otherwise insists on DRI3, which not every X screen offers.
+    if ! ls /usr/lib*/dri/zink_dri.so /usr/lib*/libgallium-*.so >/dev/null 2>&1; then
+        echo "zss-run: --gl needs Mesa's Zink driver, which is not installed" >&2
+        exit 2
+    fi
+    export MESA_LOADER_DRIVER_OVERRIDE=zink GALLIUM_DRIVER=zink __GLX_VENDOR_LIBRARY_NAME=mesa
+    export __EGL_VENDOR_LIBRARY_FILENAMES=/usr/share/glvnd/egl_vendor.d/50_mesa.json LIBGL_KOPPER_DRI2=1
+    note="$note; its OpenGL goes through Zink"
+fi
 export ZSS_START_ON="$on"
 export VK_DRIVER_FILES="$manifest"
 export VK_ICD_FILENAMES="$manifest"

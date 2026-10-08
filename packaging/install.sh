@@ -118,13 +118,13 @@ report() {
     say "  Driver in initial ramdisk   $IN_INITRD"
     [ "$IN_FALLBACK" = yes ] && say "  Driver in fallback image    yes: booting the fallback entry loads that older copy, without the patch"
     if [ -d /sys/kernel/zss ]; then
-        say "  ZSS kernel module           loaded (version $(cat /sys/kernel/zss/version 2>/dev/null))"
+        say "  ZSS_Interceptor (kernel)    loaded (version $(cat /sys/kernel/zss/version 2>/dev/null))"
     elif [ -d "/usr/src/zss-$KMOD_VERSION" ]; then
-        say "  ZSS kernel module           installed, not loaded"
+        say "  ZSS_Interceptor (kernel)    installed, not loaded"
     elif [ -f "/usr/lib/modules/$(uname -r)/build/Makefile" ] && command -v dkms >/dev/null 2>&1; then
-        say "  ZSS kernel module           not installed (can be built: kernel headers and DKMS are present)"
+        say "  ZSS_Interceptor (kernel)    not installed (can be built: kernel headers and DKMS are present)"
     else
-        say "  ZSS kernel module           not installed (needs kernel headers and DKMS to build)"
+        say "  ZSS_Interceptor (kernel)    not installed (needs kernel headers and DKMS to build)"
     fi
     if [ -n "$GPU" ] && [ -e "/sys/bus/pci/devices/$GPU/iommu_group" ]; then
         say "  IOMMU                       on: the GPU's memory access is confined by the kernel"
@@ -158,8 +158,11 @@ install -d "$D$PREFIX/bin" "$D$PREFIX/sbin" "$D$PREFIX/lib/zss" "$D$PREFIX/share
            "$D$PREFIX/share/doc/zss" "$D/etc/zss" "$D/etc/systemd/system" "$D/etc/pacman.d/hooks" || die "cannot create directories"
 install -m 755 "$BUILD/src/daemon/zssd" "$D$PREFIX/sbin/zssd"
 install -m 755 "$BUILD/src/zssctl/zssctl" "$D$PREFIX/bin/zssctl"
-install -m 755 "$BUILD/src/layer/libzss_vk.so" "$D$PREFIX/lib/zss/libzss_vk.so"
+install -m 755 "$BUILD/src/layer/libzss_airlock.so" "$D$PREFIX/lib/zss/libzss_airlock.so"
+# Its name before it was called ZSS_AirLock; programs already running keep the file they opened.
+rm -f "$D$PREFIX/lib/zss/libzss_vk.so"
 install -m 755 "$HERE/zss-nvidia-patch" "$D$PREFIX/sbin/zss-nvidia-patch"
+install -m 755 "$HERE/zss-power-event" "$D$PREFIX/sbin/zss-power-event"
 install -m 644 "$REPO"/patches/* "$D$PREFIX/share/zss/patches/"
 install -m 644 "$REPO/README.md" "$D$PREFIX/share/doc/zss/README.md"
 install -m 644 "$HERE/zssd.service" "$HERE/zss-nvidia-check.service" "$D/etc/systemd/system/"
@@ -170,7 +173,7 @@ cat > "$D$PREFIX/share/zss/zss_icd.json" <<JSON
 {
     "file_format_version": "1.0.1",
     "ICD": {
-        "library_path": "$PREFIX/lib/zss/libzss_vk.so",
+        "library_path": "$PREFIX/lib/zss/libzss_airlock.so",
         "api_version": "1.0.0"
     }
 }
@@ -243,7 +246,7 @@ if [ "$KMOD" = ask ]; then
         KMOD=no
     else
         say ""
-        say "The zss kernel module does the power sequence inside the kernel, for any GPU driver."
+        say "ZSS_Interceptor, the zss kernel module, does the power sequence inside the kernel, for any GPU driver."
         say "  - It is built through DKMS and rebuilt for each new kernel."
         say "  - It is loaded when the zssd service starts, never from the initial ramdisk."
         say "  - Loaded, it does nothing until the daemon hands it a device."

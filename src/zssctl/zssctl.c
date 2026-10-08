@@ -13,7 +13,7 @@ static int usage(void)
           "       zssctl detach PCI [--to PCI|software]\n"
           "       zssctl attach PCI\n"
           "       zssctl off PCI [--to PCI|software] [--console]\n"
-          "       zssctl on PCI [--return]\n"
+          "       zssctl on PCI [--stay]\n"
           "       zssctl resume PID\n"
           "       zssctl monitor\n",
           stderr);
@@ -142,8 +142,8 @@ int main(int argc, char **argv)
     if (!strcmp(argv[1], "on") && argc >= 3) {
         zj_begin(&o, "on");
         zj_add_str(&o, "gpu", argv[2]);
-        if (argc > 3 && !strcmp(argv[3], "--return"))
-            zj_add_bool(&o, "return", true);
+        /* Programs come back to the device unless asked to stay where they are. */
+        zj_add_bool(&o, "return", !(argc > 3 && !strcmp(argv[3], "--stay")));
         zss_send(fd, &o);
         return show_result(&rd);
     }

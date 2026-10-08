@@ -65,7 +65,14 @@
     X(AcquireNextImageKHR) X(QueuePresentKHR) \
     /* VK_EXT_transform_feedback: NULL on a device that was not created with it. */ \
     X(CmdBindTransformFeedbackBuffersEXT) X(CmdBeginTransformFeedbackEXT) X(CmdEndTransformFeedbackEXT) \
-    X(CmdBeginQueryIndexedEXT) X(CmdEndQueryIndexedEXT) X(CmdDrawIndirectByteCountEXT)
+    X(CmdBeginQueryIndexedEXT) X(CmdEndQueryIndexedEXT) X(CmdDrawIndirectByteCountEXT) \
+    /* For Zink. Also NULL where the device lacks them; see vk11.c for what stands in. */ \
+    X(CmdBeginRenderingKHR) X(CmdEndRenderingKHR) X(CmdBindIndexBuffer2KHR) X(CmdBindVertexBuffers2EXT) \
+    X(CmdSetCullModeEXT) X(CmdSetFrontFaceEXT) X(CmdSetPrimitiveTopologyEXT) X(CmdSetViewportWithCountEXT) X(CmdSetScissorWithCountEXT) X(CmdSetDepthTestEnableEXT) \
+    X(CmdSetDepthWriteEnableEXT) X(CmdSetDepthCompareOpEXT) X(CmdSetDepthBoundsTestEnableEXT) X(CmdSetStencilTestEnableEXT) X(CmdSetStencilOpEXT) \
+    X(CmdBeginConditionalRenderingEXT) X(CmdEndConditionalRenderingEXT) X(CmdSetLineStippleEXT) \
+    X(WaitSemaphoresKHR) X(SignalSemaphoreKHR) X(GetSemaphoreCounterValueKHR) \
+    X(GetRenderingAreaGranularityKHR) X(GetImageSubresourceLayout2KHR) X(GetDeviceImageSubresourceLayoutKHR)
 
 struct zss_dev_fns {
 #define X(n) PFN_vk##n n;
@@ -250,14 +257,22 @@ struct zss_obj {
             struct zss_obj **refs;
             uint32_t nrefs, caprefs;
             uint32_t version; /* bumped whenever the recorded commands are thrown away */
+            /* A secondary buffer's inheritance, kept for replay; the render pass and framebuffer are in refs. */
+            bool has_inh;
+            VkCommandBufferInheritanceInfo inh;
         } cb;
         struct { bool signaled, pending; } fence;
-        struct { bool signaled; } sem;
+        struct {
+            bool signaled;
+            bool timeline;   /* VK_KHR_timeline_semaphore: a counter instead of a flag */
+            uint64_t value;  /* the counter as last known: read from the device, or the highest signalled */
+        } sem;
         struct {
             VkSwapchainCreateInfoKHR ci;
             struct zss_obj **images;
             uint32_t nimages;
             bool retired;
+            bool superseded; /* the application made a newer swapchain from this one (oldSwapchain) */
             /* Kept across a rebuild on another GPU (swapchain.c). Bit and index are the application's. */
             uint32_t *real_of, *undo_real_of; /* application's image index -> the driver's */
             uint64_t acquired;                /* acquired and not yet presented */
@@ -319,7 +334,10 @@ struct zss_dev {
     uint32_t generation; /* bumped every time the real device is replaced */
     int lost_contents;   /* objects zero-filled by the last recovery */
     void *feat_chain;    /* feature structures enabled at creation, kept for every rebuild (vk11.c) */
-    const char *exts[16]; /* offered extensions the application enabled */
+    /* Whether the current real device has these itself; if not, the layer stands in (lower.c, vk11.c). */
+    bool native_dynrender, native_maint5;
+    void *lower;         /* render passes and framebuffers standing in for dynamic rendering (lower.c) */
+    const char *exts[64]; /* offered extensions the application enabled */
     uint32_t nexts;
     struct zss_inflight inflight[ZSS_MAX_INFLIGHT]; /* oldest first */
     uint32_t ninflight;
@@ -370,6 +388,8 @@ bool zss_profile_format_usable(const struct zss_gpu *self, VkFormat format, VkIm
 uint32_t zss_profile_families(const struct zss_gpu *self, VkQueueFamilyProperties *out);
 void zss_profile_describe(const struct zss_gpu *self);
 bool zss_control_software_allowed(void);
+bool zss_start_wanted(const struct zss_gpu *gpu);
+void zss_load_skipped(void);
 const char *zss_feature_name(size_t k);
 PFN_vkVoidFunction zss_vk11_instance_proc(const char *name);
 PFN_vkVoidFunction zss_vk11_device_proc(const char *name);
@@ -428,6 +448,7 @@ void zss_dset_apply(struct zss_dev *dev, struct zss_obj *set);
 void zss_sync_to_device(struct zss_dev *dev, struct zss_obj *only_mem);
 void zss_sync_from_device(struct zss_dev *dev, struct zss_obj *only_mem);
 void zss_surface_repaint(struct zss_driver *drv, VkSurfaceKHR outer);
+void zss_cmd_track_submit_effects(struct zss_dev *dev, struct zss_obj *cb);
 bool zss_swapchain_rebuild(struct zss_dev *dev, struct zss_obj *sc);
 void zss_swapchain_rollback(struct zss_obj *sc);
 VkResult zss_image_bring_up(struct zss_dev *dev, struct zss_obj *img, const uint8_t *bytes, VkDeviceSize size);
@@ -441,6 +462,21 @@ void zss_cmd_reset(struct zss_obj *cb);
 void zss_cmd_replay(struct zss_dev *dev, struct zss_obj *cb);
 void zss_cmd_track_submit(struct zss_dev *dev, struct zss_obj *cb);
 void zss_image_dirty(struct zss_obj *img, bool carried);
+void zss_cmd_set_layout(struct zss_obj *img, const VkImageSubresourceRange *r, VkImageLayout layout);
+void zss_cmd_track_rendering(const void *rendering);
+void zss_cmd_exec_begin_rendering(struct zss_dev *dev, VkCommandBuffer cb, void *rendering);
+void zss_cmd_exec_end_rendering(struct zss_dev *dev, VkCommandBuffer cb);
+void zss_lower_begin_rendering(struct zss_dev *dev, VkCommandBuffer cb, const VkRenderingInfo *ri);
+VkRenderPass zss_lower_compatible(struct zss_dev *dev, uint32_t ncolor, const VkFormat *colors, VkFormat depth,
+                                  VkFormat stencil, VkSampleCountFlagBits samples);
+void zss_lower_forget_view(struct zss_dev *dev, VkImageView view);
+void zss_lower_drop(struct zss_dev *dev);
+void zss_lower_abandon(struct zss_dev *dev);
+bool zss_ext_emulated(const char *name);
+bool zss_gpu_has_ext(const struct zss_gpu *gpu, const char *name);
+void *zss_chain_without(const void *chain, VkStructureType drop1, VkStructureType drop2, void *scratch, size_t room);
+void *zss_feats_for_gpu(const struct zss_gpu *gpu, const void *chain);
+bool zss_inheritance_real(struct zss_dev *dev, VkCommandBufferInheritanceInfo *inh, void *scratch, size_t room);
 
 /* swapchain.c */
 void zss_swapchain_retire(struct zss_dev *dev, struct zss_obj *sc);

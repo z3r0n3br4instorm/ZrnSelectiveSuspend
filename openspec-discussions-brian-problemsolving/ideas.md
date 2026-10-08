@@ -674,3 +674,196 @@ thawed where a plain one could the day before is not known yet.
 **Status: built, half working.** Refusal does what was wanted while the card
 is away. The thaw after it fails, cause unknown; the daemon's setting stays at
 `leave`.
+
+## 34. Programs go back to the GPU when it returns
+
+**As proposed.** "there's a small bug in our zssrun code, if the GPU device
+comes back, it should move the context back to that GPU from the fallback,
+but it doesnt happen i have to restart the application".
+
+**What came of it.** Fixed the same day. There were three causes. `zssctl on`
+left programs on the fallback GPU unless given `--return`, a choice made
+earlier on purpose; it now brings them back, and `--stay` keeps the old
+behaviour. A program started while the card was off never moved to it,
+because the layer only returned programs to the GPU they began on; one that
+asked for the card (`zss-run`'s default) is now moved there when it returns,
+if the card suits it. And for such a program the layer had not loaded the
+card's driver at all, so the card's return meant nothing to it; the driver is
+now loaded when the card comes back. A new test covers the second and third.
+
+**Status: built.** Installed on the laptop; tested with the dry-run daemon,
+not yet with a real `zssctl off` and `on`.
+
+## 35. The performance manager drives ZSS on charger changes
+
+**As proposed.** "there's a project called ZeronePerformanceManagement ... it
+has a root level deamon as well called zrnperfd ... it should intercept
+application launch calls and if the application is a chromium based one or 3D
+acceleration required application, it should always use the zss shim to
+launch it, and also when zrnperfd detects the charger disconnection it should
+power down the GPU until if the user power it back up with the zss command",
+with a shorter charger dialog followed by "moved <number> applications to
+<GPU>", a GPU or chip icon, and the same on connecting. Then, revised: "show
+both dialogs at onces in the same, by switching the icons momenteraly, Title
+should be Zerone Performance Management and content should be something like
+this Charger disconnected, De-initializing dedicated Graphics Accelerator.
+Moving application x of x also show a progressbar".
+
+**What came of it.** The charger part was built the same day across three
+projects. ZSS gained `zss-power-event`, which switches the GPU off on battery
+and feeds a dialog from `zssctl off`'s progress; the daemon now reports each
+application as it is moved. The dialog (`zrn-warning-dialog`) gained a GPU
+chip icon (first drawn from SVG; redrawn in the battery icon's own style
+after the author's "GPU icon doesnt match the style"), an icon that switches back and forth with another,
+a battery level separate from the progress bar, and commands on its standard
+input to change the message and start its countdown. `zrn_perfd` hands charger
+changes to the script and keeps its own dialog, at 3 s instead of 5, for
+machines without ZSS. On the charger's return the GPU first stayed off; on the author's "no it
+should auto power back on when charger connected again" it now comes back
+by itself, with its applications, if it was the battery event that switched
+it off (a GPU switched off by hand stays off).
+
+The launch interception was not started: it needs a choice of how (see the
+reply of 8 October 2026).
+
+**Status: partly built.** Charger handling installed and shown in a dry run;
+not yet seen with the charger really pulled.
+
+## 36. Route graphics programs to ZSS however they are started
+
+**As proposed.** "next lets implement application launch interception", then,
+on seeing it done by rewriting menu entries: "is there a clearner way ?
+because usually i open them up with the TDE runner but i use mutliple ways to
+open them and i cant guess, so also this is out of scope for this project for
+this create a new project".
+
+**What came of it.** A new project, `ZrnLaunchRouter`, beside this one. Every
+way of starting a program ends in the C library's exec or spawn calls; a small
+library preloaded into the desktop session wraps them and, as each program
+starts, gives a Chromium-based one the ZSS environment and its Vulkan
+switches, and a Vulkan one the ZSS environment. Launcher scripts need nothing
+special, since the program they start is judged when they start it. Steam,
+Wine, Proton and Lutris are left out, because games through them need more
+Vulkan than ZSS offers. Its tests start stand-in programs from a shell,
+`execvp`, Python and `posix_spawn`; a real `chromium` was routed through its
+launcher with its helper processes left alone. It is switched on through
+`~/.trinity/env/`, which the TDE session runs at login.
+
+**Status: built.** On from the author's next login; not yet used in a real
+session.
+
+## 37. Find out why the system crashed on waking
+
+**As proposed.** "find out why the system crashed on wake up last time".
+
+**What came of it.** Found in the journal and fixed. While the laptop was
+suspended the kernel module kept checking the NVIDIA card; a card powered
+down for the machine's sleep does not answer, so the module declared it lost
+and told the driver, which gave the card up for good ("GPU has fallen off the
+bus"). After waking, the X server hung on display detection, the daemon tried
+to take the card back every second, and the power key could not shut down
+because a resume script was stuck behind the X server. The module now stops
+its checks for the length of any system sleep and allows the card five
+seconds to settle afterwards (version 0.2.1, with a test in the virtual
+machine), and the daemon says "reappeared" once rather than every second.
+
+**Status: built.** Not yet seen through a real suspend and wake.
+
+## 38. Make IFSCL migrate
+
+**As proposed.** "test this game, it doesnt migrate and it glitches out when
+comes back, nex thing is we are making this compatible to run with this game"
+(IFSCL 3.4.2, a Unity 5.6 game).
+
+**What came of it.** The game draws through OpenGL by default, which never
+passes through ZSS: it was frozen when the card went off and its picture was
+gone when it came back. Unity 5.6 also has a Vulkan renderer (`-force-vulkan`);
+with it the game ran under the layer, but was refused as "non-migratable"
+because Unity records its drawing in secondary command buffers, which the
+layer did not track. The layer now records and replays them (inheritance
+kept, rebuilt before the buffers that run them, their effects counted when
+those are submitted), with three new tests including NVIDIA to Intel and back
+with exact frames after a loss. The game was then moved NVIDIA to Intel and
+back through a real `zssctl off` and `on`, at its settings screen and at its
+animated title screen, drawing correctly throughout. The launch router now
+recognises Unity games with Vulkan in them and adds `-force-vulkan`.
+
+On the way, the tests moved the author's VS Code too, which the router had
+started under ZSS, and its window broke; the author had to restart it. Five
+moves of a separate VS Code window with the test daemon did not break it, so
+the cause is in the real switch-off and is not found yet. VS Code was taken
+out of the router until it is. A router bug showed up as well: programs it
+started passed its settings on to everything they started, which it then
+skipped; it now marks its settings and judges every program afresh.
+
+**Status: built.** Gameplay itself was not reached in the tests.
+
+## 39. Implement OpenGL as well
+
+**As proposed.** "why dont we implement opengl as well ?", then "start both
+steps together, first build the 1 then 2, dont wait for my confirmation, do a
+beep beep alarm if you accidentally crashed the xserver".
+
+**What came of it.** Built, by way of Mesa's Zink, which turns OpenGL into
+Vulkan: `zss-run --gl program` puts an OpenGL program under the layer. Step 1
+(Intel) needed the layer to offer what Zink asks for: sixteen more extensions,
+timeline semaphores whose counter is carried across a move, null descriptors,
+shaders handed over inside a pipeline, and several commands Zink calls
+without asking. Step 2 (NVIDIA) needed the layer to do itself what the 470
+driver cannot: dynamic rendering is turned into ordinary render passes and
+framebuffers, made on first use and kept, and the maintenance5 pieces are
+mapped onto their older forms. `glxgears` runs at 60 frames a second on the
+NVIDIA card and was moved to Intel and back with correct pictures; that is now
+a test. The alarm is `~/.local/bin/zss-x-watchdog`; it never had to sound.
+
+IFSCL in its OpenGL mode at first got no picture on NVIDIA. The author asked
+for it next ("lets do IFSCL"), and it took two fixes. The hang: when a game
+changes its vertical-sync setting, Zink replaces the window's swapchain and
+then, from another thread, still presents one frame to the old one; the
+NVIDIA 470 driver never recovers from that frame. Five other explanations
+were tried and disproved first (a hidden window, the order of destruction,
+overlapping calls, frames still queued, stale "frame shown" notices). The
+layer now lets replacing and presenting take turns and keeps that frame back.
+The wrong picture (logo and text smeared): Zink itself draws wrongly when
+`VK_EXT_extended_dynamic_state` is missing, shown by running Zink without the
+layer and hiding extensions one half at a time; the layer now offers it. The
+game then drew as it does natively, on NVIDIA, on Intel after a move, and on
+NVIDIA again.
+
+Still limited: OpenGL stops at 3.2 on this pair of GPUs (3.3 on NVIDIA alone).
+
+**Status: built.** Open: OpenGL 3.3, a loss test, a real switch-off.
+
+## 40. Names for the two shims
+
+**As proposed.** "we should give a name for this shim", then "Userspace Vulkan
+and OpenGL shim will be named ZSS_AirLock, and the Kernel shim is
+ZSS_Interceptor".
+
+**What came of it.** Done. The user-space library is now `libzss_airlock.so`
+and its messages begin `[ZSS_AirLock]`; the daemon's and installer's messages
+and the README and SPEC use both names. The kernel module's file, `/sys`
+entries and kernel messages keep the short name `zss`, because renaming those
+means reloading the module under a running desktop; its description names it
+ZSS_Interceptor. The source directories (`src/layer/`, `kmod/`) and the other
+documents under `docs/` still use the old words.
+
+**Status: built.** The installed daemon still prints the old wording until
+the next full install.
+
+## 41. Lend a detached GPU to a virtual machine
+
+**As proposed.** "i want to be able to detach the GPU and then be able to pass
+through it to a VM", then "create a spec for that, next we are doing that".
+
+**What came of it.** Specified as the change `zss-vm-passthrough`: a third
+state, "lent", with `zssctl lend`, `reclaim` and a read-only `lend --check`.
+Checked on the laptop first: the pieces for a VM are installed and the
+firmware offers an IOMMU, but it is not enabled (a kernel boot parameter,
+which the author's rule about the bootloader leaves to the author), the X
+server holds the card, and ZSS never unbinds a driver today. How X comes off
+the card is left as an open question for the author; the task list measures
+before it builds.
+
+**Status: specified.** Nothing built.
+

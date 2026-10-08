@@ -55,6 +55,8 @@ struct ctx {
     VkCommandPool util_pool;
     VkCommandBuffer util_cmd;
     VkQueue *queues;
+    bool native_dynrender, native_maint5;
+    void *lower; /* stand-ins made on this device (lower.c) */
 };
 
 static void ctx_save(struct zss_dev *dev, struct ctx *c)
@@ -66,6 +68,9 @@ static void ctx_save(struct zss_dev *dev, struct ctx *c)
     c->util_queue = dev->util_queue;
     c->util_pool = dev->util_pool;
     c->util_cmd = dev->util_cmd;
+    c->native_dynrender = dev->native_dynrender;
+    c->native_maint5 = dev->native_maint5;
+    c->lower = dev->lower;
     c->queues = calloc(dev->nqueues ? dev->nqueues : 1, sizeof(*c->queues));
     for (uint32_t i = 0; i < dev->nqueues; i++)
         c->queues[i] = dev->queues[i].real;
@@ -80,6 +85,9 @@ static void ctx_load(struct zss_dev *dev, struct ctx *c)
     dev->util_queue = c->util_queue;
     dev->util_pool = c->util_pool;
     dev->util_cmd = c->util_cmd;
+    dev->native_dynrender = c->native_dynrender;
+    dev->native_maint5 = c->native_maint5;
+    dev->lower = c->lower;
     for (uint32_t i = 0; i < dev->nqueues; i++)
         dev->queues[i].real = c->queues[i];
     free(c->queues);
@@ -93,6 +101,7 @@ static void ctx_clear(struct zss_dev *dev)
     dev->util_queue = VK_NULL_HANDLE;
     dev->util_pool = VK_NULL_HANDLE;
     dev->util_cmd = VK_NULL_HANDLE;
+    dev->lower = NULL;
 }
 
 /* ---- staging and image copies --------------------------------------------------- */
@@ -319,6 +328,13 @@ static VkResult capture(struct zss_dev *dev)
             r = capture_image(dev, o);
         else if (o->kind == ZK_FENCE)
             o->u.fence.signaled = dev->fn.GetFenceStatus(dev->real, (VkFence)(uintptr_t)o->r.h) == VK_SUCCESS;
+        else if (o->kind == ZK_SEMAPHORE && o->u.sem.timeline && dev->fn.GetSemaphoreCounterValueKHR) {
+            /* Where the counter really is, so that the new semaphore starts there. */
+            uint64_t v = 0;
+
+            if (dev->fn.GetSemaphoreCounterValueKHR(dev->real, (VkSemaphore)(uintptr_t)o->r.h, &v) == VK_SUCCESS)
+                o->u.sem.value = v;
+        }
     }
     return r;
 }
@@ -486,7 +502,8 @@ static VkResult build(struct zss_dev *dev, struct zss_gpu *target)
             continue;
         if (o->kind == ZK_SWAPCHAIN) {
             /* Rebuilt in place where the target allows it; otherwise the application is told to make a new one. */
-            if (!zss_swapchain_rebuild(dev, o))
+            /* One the application has replaced shares its window with the newer one, which is the one to rebuild. */
+            if (o->u.sc.superseded || !zss_swapchain_rebuild(dev, o))
                 zss_swapchain_retire(dev, o);
             continue;
         }
@@ -498,7 +515,8 @@ static VkResult build(struct zss_dev *dev, struct zss_gpu *target)
             r = restore_buffer(dev, o);
         if (r == VK_SUCCESS && o->kind == ZK_IMAGE)
             r = restore_image(dev, o);
-        if (r == VK_SUCCESS && o->kind == ZK_SEMAPHORE && o->u.sem.signaled)
+        /* A timeline semaphore was made at its value; only a binary one has to be signalled again. */
+        if (r == VK_SUCCESS && o->kind == ZK_SEMAPHORE && o->u.sem.signaled && !o->u.sem.timeline)
             r = signal_semaphore(dev, o);
         if (r != VK_SUCCESS) {
             zss_log("recreating object kind %d on %s failed (VkResult %d)", o->kind,
@@ -510,8 +528,12 @@ static VkResult build(struct zss_dev *dev, struct zss_gpu *target)
     for (struct zss_obj *o = dev->head; o; o = o->next)
         if (o->kind == ZK_DSET && !o->dead && o->r.h)
             zss_dset_apply(dev, o);
+    /* Secondary buffers first: a primary can only record running one that is already recorded. */
     for (struct zss_obj *o = dev->head; o; o = o->next)
-        if (o->kind == ZK_CMDBUF && !o->dead && o->r.h)
+        if (o->kind == ZK_CMDBUF && !o->dead && o->r.h && o->u.cb.level == VK_COMMAND_BUFFER_LEVEL_SECONDARY)
+            zss_cmd_replay(dev, o);
+    for (struct zss_obj *o = dev->head; o; o = o->next)
+        if (o->kind == ZK_CMDBUF && !o->dead && o->r.h && o->u.cb.level != VK_COMMAND_BUFFER_LEVEL_SECONDARY)
             zss_cmd_replay(dev, o);
     for (struct zss_obj *o = dev->head; o; o = o->next)
         if (o->dead && o->r.h)
@@ -560,7 +582,7 @@ bool zss_compatible(struct zss_dev *dev, struct zss_gpu *target, char *reason, s
     if (!zss_feats_supported(target, dev->feat_chain, reason, rlen))
         return false;
     for (uint32_t k = 0; k < dev->nexts; k++) {
-        bool has = false;
+        bool has = zss_ext_emulated(dev->exts[k]); /* the layer stands in where the driver lacks it */
 
         for (uint32_t i = 0; i < target->next; i++)
             has = has || !strcmp(target->ext[i].extensionName, dev->exts[k]);
@@ -943,6 +965,7 @@ static enum zss_outcome relocate(struct zss_dev *dev, struct zss_gpu *target, bo
         zss_log("abandoning the lost device on %s: a thread is still inside its driver",
                 dev->gpu->props.deviceName);
         zss_driver_break_links(dev->gpu->drv);
+        zss_lower_abandon(dev); /* its stand-ins go with the device; the driver is not called */
     } else {
         i = n;
         for (struct zss_obj *o = dev->tail; o; o = o->prev) {

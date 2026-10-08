@@ -239,7 +239,7 @@ def process_outside_the_layer_blocks():
         wait_for(has_it, "the holder to open the card", 10)
         rc, text = d.ctl("detach", CARD)
         check(rc != 0 and "ZSSDetachBlocked" in text, "detach was not blocked: " + text)
-        check(f"pid {holder.pid}" in text and "not started under the ZSS layer" in text,
+        check(f"pid {holder.pid}" in text and "not started under ZSS_AirLock" in text,
               "the blocking process is not named: " + text)
         check(state_of(d)[0] == "attached", "a blocked detach changed the state")
         check(find_card() and driver_of(CARD), "a blocked detach touched the device")

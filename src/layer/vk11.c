@@ -46,6 +46,8 @@ static const struct zss_feat_struct *feat_struct(VkStructureType t)
     return NULL;
 }
 
+static const char *emulated_struct(VkStructureType t);
+
 static bool feat_offered(const struct zss_feat_struct *fs, uint32_t i)
 {
     return (fs->offered[i / 64] >> (i % 64)) & 1;
@@ -74,6 +76,11 @@ void zss_feats_cache(struct zss_gpu *gpu, VkPhysicalDevice pd)
 
         if (!fs->offered[0] && !fs->offered[1])
             continue;
+        if (emulated_struct(fs->stype)) {
+            gpu->featbits[i * 2] = fs->offered[0];
+            gpu->featbits[i * 2 + 1] = fs->offered[1];
+            continue;
+        }
         get(pd, &f2);
         for (uint32_t k = 0; k < fs->n; k++)
             if (q.b[k])
@@ -214,7 +221,7 @@ bool zss_feats_supported(struct zss_gpu *gpu, const void *chain, char *reason, s
         VkPhysicalDeviceFeatures2 f2 = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2 };
         VkBaseOutStructure *probe;
 
-        if (!fs)
+        if (!fs || emulated_struct(s->sType))
             continue;
         probe = calloc(1, size);
         probe->sType = s->sType;
@@ -356,6 +363,12 @@ static VKAPI_ATTR void VKAPI_CALL zss_GetPhysicalDeviceFeatures2(VkPhysicalDevic
             gpu->drv->fn.GetPhysicalDeviceFeatures2KHR(real, out);
         zss_leave();
         feats_filter(out->pNext);
+        /* Stood in for by the layer where the driver lacks it: on whatever the driver says. */
+        for (VkBaseOutStructure *x = out->pNext; x; x = x->pNext)
+            if (x->sType == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DYNAMIC_RENDERING_FEATURES)
+                ((VkPhysicalDeviceDynamicRenderingFeatures *)x)->dynamicRendering = VK_TRUE;
+            else if (x->sType == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_5_FEATURES)
+                ((VkPhysicalDeviceMaintenance5Features *)x)->maintenance5 = VK_TRUE;
         feats_common(gpu, out->pNext);
     }
     zss_GetPhysicalDeviceFeatures(pd, &out->features);
@@ -762,6 +775,406 @@ static VKAPI_ATTR VkResult VKAPI_CALL zss_AcquireNextImage2KHR(VkDevice device, 
 #define E(n) { "vk" #n, (PFN_vkVoidFunction)zss_##n }
 #define K(n) { "vk" #n "KHR", (PFN_vkVoidFunction)zss_##n }
 
+/* ---- for Zink: dynamic rendering and the rest ----------------------------------------- */
+
+
+/* The layer's VkRenderingInfo, as kept by cmd.c: the structure first. */
+struct zss_rendering_head {
+    VkRenderingInfo info;
+    VkRenderingAttachmentInfo att[8 + 2];
+    bool has_depth, has_stencil;
+};
+
+static VkImageView real_view(const VkImageView v)
+{
+    return v ? (VkImageView)(uintptr_t)ZOBJ(v)->r.h : VK_NULL_HANDLE;
+}
+
+void zss_cmd_exec_begin_rendering(struct zss_dev *dev, VkCommandBuffer cb, void *p)
+{
+    const struct zss_rendering_head *k = p;
+    VkRenderingInfo ri = k->info;
+    VkRenderingAttachmentInfo att[10];
+
+    for (uint32_t i = 0; i < 10; i++) {
+        att[i] = k->att[i];
+        att[i].imageView = real_view(att[i].imageView);
+        att[i].resolveImageView = real_view(att[i].resolveImageView);
+    }
+    ri.pColorAttachments = att;
+    ri.pDepthAttachment = k->has_depth ? &att[8] : NULL;
+    ri.pStencilAttachment = k->has_stencil ? &att[9] : NULL;
+    if (dev->native_dynrender && dev->fn.CmdBeginRenderingKHR)
+        dev->fn.CmdBeginRenderingKHR(cb, &ri);
+    else
+        zss_lower_begin_rendering(dev, cb, &k->info); /* with the layer's handles: it looks up formats itself */
+}
+
+void zss_cmd_exec_end_rendering(struct zss_dev *dev, VkCommandBuffer cb)
+{
+    if (dev->native_dynrender && dev->fn.CmdEndRenderingKHR)
+        dev->fn.CmdEndRenderingKHR(cb);
+    else
+        dev->fn.CmdEndRenderPass(cb);
+}
+
+/*
+ * Extensions the layer provides itself where a driver lacks them. They are
+ * offered on every GPU and passed to a real device only if its driver has
+ * them.
+ */
+bool zss_ext_emulated(const char *name)
+{
+    return !strcmp(name, VK_KHR_DYNAMIC_RENDERING_EXTENSION_NAME) || !strcmp(name, VK_KHR_MAINTENANCE_5_EXTENSION_NAME) ||
+           !strcmp(name, VK_KHR_CREATE_RENDERPASS_2_EXTENSION_NAME) ||
+           !strcmp(name, VK_KHR_DESCRIPTOR_UPDATE_TEMPLATE_EXTENSION_NAME);
+}
+
+/* Whether a GPU's driver has an extension of its own. ZSS_EMULATE=VK_a,VK_b pretends it lacks those (a test aid). */
+bool zss_gpu_has_ext(const struct zss_gpu *gpu, const char *name)
+{
+    const char *pretend = getenv("ZSS_EMULATE");
+
+    if (pretend && strstr(pretend, name))
+        return false;
+    for (uint32_t i = 0; i < gpu->next; i++)
+        if (!strcmp(gpu->ext[i].extensionName, name))
+            return true;
+    return false;
+}
+
+/* The feature structures that belong to an emulated extension, and the extension. */
+static const char *emulated_struct(VkStructureType t)
+{
+    if (t == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DYNAMIC_RENDERING_FEATURES)
+        return VK_KHR_DYNAMIC_RENDERING_EXTENSION_NAME;
+    if (t == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_5_FEATURES)
+        return VK_KHR_MAINTENANCE_5_EXTENSION_NAME;
+    return NULL;
+}
+
+/* A kept feature chain as a given GPU's driver may be shown it: without what it lacks and the layer stands in for. */
+void *zss_feats_for_gpu(const struct zss_gpu *gpu, const void *chain)
+{
+    VkBaseOutStructure *head = NULL, **tail = &head;
+
+    for (const VkBaseOutStructure *s = chain; s; s = s->pNext) {
+        const struct zss_feat_struct *fs = feat_struct(s->sType);
+        const char *ext = emulated_struct(s->sType);
+        size_t size = sizeof(*s) + (fs ? fs->n : 0) * sizeof(VkBool32);
+        VkBaseOutStructure *copy;
+
+        if (ext && !zss_gpu_has_ext(gpu, ext))
+            continue;
+        copy = malloc(size);
+        memcpy(copy, s, size);
+        copy->pNext = NULL;
+        *tail = copy;
+        tail = &copy->pNext;
+    }
+    return head;
+}
+
+/*
+ * A kept creation chain without up to two kinds of structure, for a driver
+ * that has not got what they belong to. The kept structures are copied into
+ * `scratch` (sizes from the chain table) and linked anew; the kept chain is
+ * not touched.
+ */
+void *zss_chain_without(const void *chain, VkStructureType drop1, VkStructureType drop2, void *scratch, size_t room)
+{
+    VkBaseOutStructure *head = NULL, **tail = &head;
+    char *at = scratch;
+
+    for (const VkBaseOutStructure *s = chain; s; s = s->pNext) {
+        size_t size = 0;
+
+        if (s->sType == drop1 || s->sType == drop2)
+            continue;
+        for (size_t i = 0; i < sizeof(zss_chain_structs) / sizeof(zss_chain_structs[0]); i++)
+            if (zss_chain_structs[i].stype == s->sType)
+                size = zss_chain_structs[i].size;
+        if (s->sType == VK_STRUCTURE_TYPE_SAMPLER_YCBCR_CONVERSION_INFO)
+            size = sizeof(VkSamplerYcbcrConversionInfo);
+        size = (size + 7) & ~(size_t)7;
+        if (!size || at + size > (char *)scratch + room)
+            continue;
+        memcpy(at, s, size);
+        ((VkBaseOutStructure *)at)->pNext = NULL;
+        *tail = (VkBaseOutStructure *)at;
+        tail = &((VkBaseOutStructure *)at)->pNext;
+        at += size;
+    }
+    return head;
+}
+
+/*
+ * A secondary buffer's inheritance for the real driver. Under dynamic
+ * rendering it names formats instead of a render pass; a driver without
+ * dynamic rendering gets a render pass compatible with them instead.
+ */
+bool zss_inheritance_real(struct zss_dev *dev, VkCommandBufferInheritanceInfo *inh, void *scratch, size_t room)
+{
+    const VkCommandBufferInheritanceRenderingInfo *ri = NULL;
+
+    for (const VkBaseInStructure *s = inh->pNext; s; s = s->pNext)
+        if (s->sType == VK_STRUCTURE_TYPE_COMMAND_BUFFER_INHERITANCE_RENDERING_INFO)
+            ri = (const VkCommandBufferInheritanceRenderingInfo *)s;
+    if (dev->native_dynrender || !ri || inh->renderPass)
+        return false;
+    inh->renderPass = zss_lower_compatible(dev, ri->colorAttachmentCount, ri->pColorAttachmentFormats,
+                                           ri->depthAttachmentFormat, ri->stencilAttachmentFormat,
+                                           ri->rasterizationSamples ? ri->rasterizationSamples : VK_SAMPLE_COUNT_1_BIT);
+    inh->subpass = 0;
+    inh->framebuffer = VK_NULL_HANDLE;
+    inh->pNext = zss_chain_without(inh->pNext, VK_STRUCTURE_TYPE_COMMAND_BUFFER_INHERITANCE_RENDERING_INFO, 0, scratch, room);
+    return true;
+}
+
+/* Timeline semaphores. The counter is followed, so that a rebuild can start the new semaphore where the old one was. */
+VKAPI_ATTR VkResult VKAPI_CALL zss_WaitSemaphoresKHR(VkDevice device, const VkSemaphoreWaitInfo *info, uint64_t timeout)
+{
+    struct zss_dev *dev = (struct zss_dev *)device;
+    VkSemaphoreWaitInfo wi = *info;
+    VkSemaphore real[64];
+    VkResult r;
+
+    if (info->semaphoreCount > 64)
+        return VK_ERROR_OUT_OF_HOST_MEMORY;
+    zss_enter();
+    for (uint32_t i = 0; i < info->semaphoreCount; i++)
+        real[i] = ZREAL(VkSemaphore, info->pSemaphores[i]);
+    wi.pNext = NULL;
+    wi.pSemaphores = real;
+    r = dev->fn.WaitSemaphoresKHR ? dev->fn.WaitSemaphoresKHR(dev->real, &wi, timeout) : VK_ERROR_FEATURE_NOT_PRESENT;
+    if (r == VK_SUCCESS && !(info->flags & VK_SEMAPHORE_WAIT_ANY_BIT))
+        for (uint32_t i = 0; i < info->semaphoreCount; i++)
+            if (ZOBJ(info->pSemaphores[i])->u.sem.value < info->pValues[i])
+                ZOBJ(info->pSemaphores[i])->u.sem.value = info->pValues[i];
+    /* As after a fence: what the GPU wrote into buffers the application has mapped is fetched. */
+    if (r == VK_SUCCESS)
+        zss_sync_from_device(dev, NULL);
+    if (zss_lost(dev, r))
+        r = VK_SUCCESS; /* the rebuilt semaphores start at the values the work was meant to reach */
+    zss_leave();
+    return r;
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL zss_SignalSemaphoreKHR(VkDevice device, const VkSemaphoreSignalInfo *info)
+{
+    struct zss_dev *dev = (struct zss_dev *)device;
+    VkSemaphoreSignalInfo si = *info;
+    struct zss_obj *o = ZOBJ(info->semaphore);
+    VkResult r;
+
+    zss_enter();
+    si.pNext = NULL;
+    si.semaphore = ZREAL(VkSemaphore, info->semaphore);
+    r = dev->fn.SignalSemaphoreKHR ? dev->fn.SignalSemaphoreKHR(dev->real, &si) : VK_ERROR_FEATURE_NOT_PRESENT;
+    if (r == VK_SUCCESS || zss_lost(dev, r)) {
+        if (o->u.sem.value < info->value)
+            o->u.sem.value = info->value;
+        r = VK_SUCCESS;
+    }
+    zss_leave();
+    return r;
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL zss_GetSemaphoreCounterValueKHR(VkDevice device, VkSemaphore semaphore, uint64_t *value)
+{
+    struct zss_dev *dev = (struct zss_dev *)device;
+    struct zss_obj *o = ZOBJ(semaphore);
+    VkResult r;
+
+    zss_enter();
+    r = dev->fn.GetSemaphoreCounterValueKHR ? dev->fn.GetSemaphoreCounterValueKHR(dev->real, ZREAL(VkSemaphore, semaphore), value)
+                                            : VK_ERROR_FEATURE_NOT_PRESENT;
+    if (r == VK_SUCCESS) {
+        if (o->u.sem.value < *value)
+            o->u.sem.value = *value;
+    } else if (zss_lost(dev, r)) {
+        *value = o->u.sem.value;
+        r = VK_SUCCESS;
+    }
+    zss_leave();
+    return r;
+}
+
+/* maintenance5's queries. Nothing in them is an object the layer keeps. */
+VKAPI_ATTR void VKAPI_CALL zss_GetRenderingAreaGranularityKHR(VkDevice device, const VkRenderingAreaInfo *info, VkExtent2D *out)
+{
+    struct zss_dev *dev = (struct zss_dev *)device;
+
+    zss_enter();
+    if (dev->fn.GetRenderingAreaGranularityKHR)
+        dev->fn.GetRenderingAreaGranularityKHR(dev->real, info, out);
+    else
+        *out = (VkExtent2D){ 1, 1 };
+    zss_leave();
+}
+
+VKAPI_ATTR void VKAPI_CALL zss_GetImageSubresourceLayout2KHR(VkDevice device, VkImage image, const VkImageSubresource2 *sub,
+                                                                   VkSubresourceLayout2 *out)
+{
+    struct zss_dev *dev = (struct zss_dev *)device;
+
+    zss_enter();
+    if (dev->fn.GetImageSubresourceLayout2KHR) {
+        dev->fn.GetImageSubresourceLayout2KHR(dev->real, ZREAL(VkImage, image), sub, out);
+    } else {
+        /* The old query answers the same question for the parts every driver has. */
+        dev->fn.GetImageSubresourceLayout(dev->real, ZREAL(VkImage, image), &sub->imageSubresource, &out->subresourceLayout);
+    }
+    zss_leave();
+}
+
+VKAPI_ATTR void VKAPI_CALL zss_GetDeviceImageSubresourceLayoutKHR(VkDevice device, const VkDeviceImageSubresourceInfo *info,
+                                                                        VkSubresourceLayout2 *out)
+{
+    struct zss_dev *dev = (struct zss_dev *)device;
+
+    zss_enter();
+    if (dev->fn.GetDeviceImageSubresourceLayoutKHR)
+        dev->fn.GetDeviceImageSubresourceLayoutKHR(dev->real, info, out);
+    else
+        memset(&out->subresourceLayout, 0, sizeof(out->subresourceLayout));
+    zss_leave();
+}
+
+/*
+ * VK_EXT_debug_utils is the Vulkan loader's own extension, so an application
+ * may turn it on whatever the driver is; its object names and labels then
+ * reach the device. They only help debugging tools, and naming would need
+ * every handle translated, so the layer takes them and does nothing.
+ */
+static VKAPI_ATTR VkResult VKAPI_CALL zss_SetDebugUtilsObjectNameEXT(VkDevice d, const VkDebugUtilsObjectNameInfoEXT *i)
+{
+    (void)d; (void)i;
+    return VK_SUCCESS;
+}
+
+static VKAPI_ATTR VkResult VKAPI_CALL zss_SetDebugUtilsObjectTagEXT(VkDevice d, const VkDebugUtilsObjectTagInfoEXT *i)
+{
+    (void)d; (void)i;
+    return VK_SUCCESS;
+}
+
+static VKAPI_ATTR void VKAPI_CALL zss_QueueLabelEXT(VkQueue q, const VkDebugUtilsLabelEXT *l)
+{
+    (void)q; (void)l;
+}
+
+static VKAPI_ATTR void VKAPI_CALL zss_QueueEndLabelEXT(VkQueue q)
+{
+    (void)q;
+}
+
+static VKAPI_ATTR void VKAPI_CALL zss_CmdLabelEXT(VkCommandBuffer c, const VkDebugUtilsLabelEXT *l)
+{
+    (void)c; (void)l;
+}
+
+static VKAPI_ATTR void VKAPI_CALL zss_CmdEndLabelEXT(VkCommandBuffer c)
+{
+    (void)c;
+}
+
+/*
+ * VK_KHR_create_renderpass2, which Zink requires of a Vulkan 1.1 device even
+ * though it draws with dynamic rendering. A version-2 render pass that says
+ * nothing version 1 cannot is made as a version-1 one, which the layer
+ * already keeps and rebuilds; one that does (multiview, depth resolve) is
+ * refused, so the application takes another way.
+ */
+VKAPI_ATTR VkResult VKAPI_CALL zss_CreateRenderPass2KHR(VkDevice device, const VkRenderPassCreateInfo2 *ci,
+                                                       const VkAllocationCallbacks *alloc, VkRenderPass *out)
+{
+    VkAttachmentDescription att[32];
+    VkSubpassDescription sub[16];
+    VkSubpassDependency dep[32];
+    VkAttachmentReference refs[16][4 * 16 + 1];
+    uint32_t pres[16][32];
+    VkRenderPassCreateInfo v1 = { .sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO, .flags = ci->flags };
+
+    *out = VK_NULL_HANDLE;
+    if (ci->attachmentCount > 32 || ci->subpassCount > 16 || ci->dependencyCount > 32 || ci->correlatedViewMaskCount)
+        return VK_ERROR_FEATURE_NOT_PRESENT;
+    for (uint32_t i = 0; i < ci->attachmentCount; i++) {
+        const VkAttachmentDescription2 *a = &ci->pAttachments[i];
+
+        if (a->pNext)
+            return VK_ERROR_FEATURE_NOT_PRESENT; /* separate stencil layouts: not in version 1 */
+        att[i] = (VkAttachmentDescription){ a->flags, a->format, a->samples, a->loadOp, a->storeOp, a->stencilLoadOp,
+                                            a->stencilStoreOp, a->initialLayout, a->finalLayout };
+    }
+    for (uint32_t i = 0; i < ci->subpassCount; i++) {
+        const VkSubpassDescription2 *s = &ci->pSubpasses[i];
+        VkAttachmentReference *r = refs[i];
+        uint32_t k = 0;
+
+        if (s->pNext || s->viewMask || s->inputAttachmentCount > 16 || s->colorAttachmentCount > 16 ||
+            s->preserveAttachmentCount > 32)
+            return VK_ERROR_FEATURE_NOT_PRESENT;
+        sub[i] = (VkSubpassDescription){ .flags = s->flags, .pipelineBindPoint = s->pipelineBindPoint,
+                                         .inputAttachmentCount = s->inputAttachmentCount,
+                                         .colorAttachmentCount = s->colorAttachmentCount,
+                                         .preserveAttachmentCount = s->preserveAttachmentCount };
+#define REF(src) (VkAttachmentReference){ (src).attachment, (src).layout }
+        sub[i].pInputAttachments = &r[k];
+        for (uint32_t j = 0; j < s->inputAttachmentCount; j++)
+            r[k++] = REF(s->pInputAttachments[j]);
+        sub[i].pColorAttachments = &r[k];
+        for (uint32_t j = 0; j < s->colorAttachmentCount; j++)
+            r[k++] = REF(s->pColorAttachments[j]);
+        if (s->pResolveAttachments) {
+            sub[i].pResolveAttachments = &r[k];
+            for (uint32_t j = 0; j < s->colorAttachmentCount; j++)
+                r[k++] = REF(s->pResolveAttachments[j]);
+        }
+        if (s->pDepthStencilAttachment) {
+            sub[i].pDepthStencilAttachment = &r[k];
+            r[k++] = REF(*s->pDepthStencilAttachment);
+        }
+#undef REF
+        memcpy(pres[i], s->pPreserveAttachments, s->preserveAttachmentCount * sizeof(uint32_t));
+        sub[i].pPreserveAttachments = pres[i];
+    }
+    for (uint32_t i = 0; i < ci->dependencyCount; i++) {
+        const VkSubpassDependency2 *d = &ci->pDependencies[i];
+
+        /* A chained memory barrier (synchronization2) is wider than the masks; without it the masks are the barrier. */
+        if (d->viewOffset)
+            return VK_ERROR_FEATURE_NOT_PRESENT;
+        dep[i] = (VkSubpassDependency){ d->srcSubpass, d->dstSubpass, d->srcStageMask, d->dstStageMask, d->srcAccessMask,
+                                        d->dstAccessMask, d->dependencyFlags };
+    }
+    v1.attachmentCount = ci->attachmentCount;
+    v1.pAttachments = att;
+    v1.subpassCount = ci->subpassCount;
+    v1.pSubpasses = sub;
+    v1.dependencyCount = ci->dependencyCount;
+    v1.pDependencies = dep;
+    return zss_CreateRenderPass(device, &v1, alloc, out);
+}
+
+VKAPI_ATTR void VKAPI_CALL zss_CmdBeginRenderPass2KHR(VkCommandBuffer cmd, const VkRenderPassBeginInfo *info,
+                                                     const VkSubpassBeginInfo *sub)
+{
+    zss_CmdBeginRenderPass(cmd, info, sub->contents);
+}
+
+VKAPI_ATTR void VKAPI_CALL zss_CmdNextSubpass2KHR(VkCommandBuffer cmd, const VkSubpassBeginInfo *begin, const VkSubpassEndInfo *end)
+{
+    (void)end;
+    zss_CmdNextSubpass(cmd, begin->contents);
+}
+
+VKAPI_ATTR void VKAPI_CALL zss_CmdEndRenderPass2KHR(VkCommandBuffer cmd, const VkSubpassEndInfo *end)
+{
+    (void)end;
+    zss_CmdEndRenderPass(cmd);
+}
+
 static const struct zss_entry instance_entries[] = {
     E(EnumerateInstanceVersion), E(EnumeratePhysicalDeviceGroups), K(EnumeratePhysicalDeviceGroups),
     E(GetPhysicalDeviceFeatures2), K(GetPhysicalDeviceFeatures2), E(GetPhysicalDeviceProperties2), K(GetPhysicalDeviceProperties2),
@@ -787,6 +1200,36 @@ static const struct zss_entry device_entries[] = {
     E(DestroyDescriptorUpdateTemplate), K(DestroyDescriptorUpdateTemplate), E(UpdateDescriptorSetWithTemplate),
     K(UpdateDescriptorSetWithTemplate), E(CmdSetDeviceMask), K(CmdSetDeviceMask), E(CmdDispatchBase), K(CmdDispatchBase),
     E(GetDeviceGroupPresentCapabilitiesKHR), E(GetDeviceGroupSurfacePresentModesKHR), E(AcquireNextImage2KHR),
+    /* For Zink: the KHR name and the core one for each. */
+#define B(n) { "vk" #n, (PFN_vkVoidFunction)zss_##n##KHR }, { "vk" #n "KHR", (PFN_vkVoidFunction)zss_##n##KHR }
+    B(CreateRenderPass2), B(CmdBeginRenderPass2), B(CmdNextSubpass2), B(CmdEndRenderPass2),
+    B(CmdBeginRendering), B(CmdEndRendering), B(CmdBindIndexBuffer2), B(WaitSemaphores), B(SignalSemaphore),
+    B(GetSemaphoreCounterValue), B(GetRenderingAreaGranularity), B(GetImageSubresourceLayout2),
+    B(GetDeviceImageSubresourceLayout),
+#undef B
+    { "vkSetDebugUtilsObjectNameEXT", (PFN_vkVoidFunction)zss_SetDebugUtilsObjectNameEXT },
+    { "vkSetDebugUtilsObjectTagEXT", (PFN_vkVoidFunction)zss_SetDebugUtilsObjectTagEXT },
+    { "vkQueueBeginDebugUtilsLabelEXT", (PFN_vkVoidFunction)zss_QueueLabelEXT },
+    { "vkQueueInsertDebugUtilsLabelEXT", (PFN_vkVoidFunction)zss_QueueLabelEXT },
+    { "vkQueueEndDebugUtilsLabelEXT", (PFN_vkVoidFunction)zss_QueueEndLabelEXT },
+    { "vkCmdBeginDebugUtilsLabelEXT", (PFN_vkVoidFunction)zss_CmdLabelEXT },
+    { "vkCmdInsertDebugUtilsLabelEXT", (PFN_vkVoidFunction)zss_CmdLabelEXT },
+    { "vkCmdEndDebugUtilsLabelEXT", (PFN_vkVoidFunction)zss_CmdEndLabelEXT },
+    { "vkCmdBindVertexBuffers2", (PFN_vkVoidFunction)zss_CmdBindVertexBuffers2EXT },
+    { "vkCmdSetCullMode", (PFN_vkVoidFunction)zss_CmdSetCullModeEXT },
+    { "vkCmdSetFrontFace", (PFN_vkVoidFunction)zss_CmdSetFrontFaceEXT },
+    { "vkCmdSetPrimitiveTopology", (PFN_vkVoidFunction)zss_CmdSetPrimitiveTopologyEXT },
+    { "vkCmdSetViewportWithCount", (PFN_vkVoidFunction)zss_CmdSetViewportWithCountEXT },
+    { "vkCmdSetScissorWithCount", (PFN_vkVoidFunction)zss_CmdSetScissorWithCountEXT },
+    { "vkCmdSetDepthTestEnable", (PFN_vkVoidFunction)zss_CmdSetDepthTestEnableEXT },
+    { "vkCmdSetDepthWriteEnable", (PFN_vkVoidFunction)zss_CmdSetDepthWriteEnableEXT },
+    { "vkCmdSetDepthCompareOp", (PFN_vkVoidFunction)zss_CmdSetDepthCompareOpEXT },
+    { "vkCmdSetDepthBoundsTestEnable", (PFN_vkVoidFunction)zss_CmdSetDepthBoundsTestEnableEXT },
+    { "vkCmdSetStencilTestEnable", (PFN_vkVoidFunction)zss_CmdSetStencilTestEnableEXT },
+    { "vkCmdSetStencilOp", (PFN_vkVoidFunction)zss_CmdSetStencilOpEXT },
+    { "vkCmdSetLineStippleEXT", (PFN_vkVoidFunction)zss_CmdSetLineStippleEXT },
+    { "vkCmdSetLineStippleKHR", (PFN_vkVoidFunction)zss_CmdSetLineStippleEXT },
+    { "vkCmdSetLineStipple", (PFN_vkVoidFunction)zss_CmdSetLineStippleEXT },
 };
 
 static PFN_vkVoidFunction find(const struct zss_entry *table, size_t n, const char *name)

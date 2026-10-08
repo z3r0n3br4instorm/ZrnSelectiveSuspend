@@ -446,7 +446,7 @@ static int kmod_manage(struct gpu *g, char *err)
 static int kmod_probe(struct gpu *g, char *err)
 {
     if (!path_exists(KMOD_ROOT "/manage")) {
-        snprintf(err, ZSSD_ERR, "the zss kernel module is not loaded");
+        snprintf(err, ZSSD_ERR, "ZSS_Interceptor (the zss kernel module) is not loaded");
         return -1;
     }
     if (!pci_present(g->pci)) {

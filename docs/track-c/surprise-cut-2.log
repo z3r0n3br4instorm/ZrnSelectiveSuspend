@@ -1,12 +1,12 @@
 [  0.000] ==== check at 2026-10-07 13:55:31, application pid 61295, gmux base 0x700
 [  0.032] check: bus=de10 module=on driver_frozen=0 nvidia=running [0000:01:00.0 nvidia online; 0000:01:00.1 snd_hda_intel online]
-[  0.075] check: daemon: 0000:01:00.0  state=attached  backend=zss-kmod  removal=not supported  wake=yes  iommu=no | pid 27967   Xorg             display-server | pid 54348   nvidia-persiste  non-migratable: not started under the ZSS layer | pid 61295   vkcube           migratable
+[  0.075] check: daemon: 0000:01:00.0  state=attached  backend=zss-kmod  removal=not supported  wake=yes  iommu=no | pid 27967   Xorg             display-server | pid 54348   nvidia-persiste  non-migratable: not started under ZSS_AirLock | pid 61295   vkcube           migratable
 [  0.104] check: application: alive, state R, holds ['/dev/dri/renderD128', '/dev/dri/renderD129', '/dev/nvidia-modeset', '/dev/nvidia0', '/dev/nvidiactl']
 [  0.118] check: X server: answers
 [  0.150] READY: everything is in place
 [  0.000] ==== cut at 2026-10-07 13:55:41, application pid 61295, gmux base 0x700
 [  0.041] before: bus=de10 module=on driver_frozen=0 nvidia=running [0000:01:00.0 nvidia online; 0000:01:00.1 snd_hda_intel online]
-[  0.483] before: daemon: 0000:01:00.0  state=attached  backend=zss-kmod  removal=not supported  wake=yes  iommu=no | pid 27967   Xorg             display-server | pid 54348   nvidia-persiste  non-migratable: not started under the ZSS layer | pid 61295   vkcube           migratable
+[  0.483] before: daemon: 0000:01:00.0  state=attached  backend=zss-kmod  removal=not supported  wake=yes  iommu=no | pid 27967   Xorg             display-server | pid 54348   nvidia-persiste  non-migratable: not started under ZSS_AirLock | pid 61295   vkcube           migratable
 [  0.511] before: application: alive, state R, holds ['/dev/dri/renderD128', '/dev/dri/renderD129', '/dev/nvidia-modeset', '/dev/nvidia0', '/dev/nvidiactl']
 [  0.525] before: X server: answers
 [  0.536] CUTTING the discrete GPU's power rail now, with its driver running and nothing warned

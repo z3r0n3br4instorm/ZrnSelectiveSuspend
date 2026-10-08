@@ -81,11 +81,25 @@ Register shadowing would not have changed any of these outcomes. What would
 help the busy case is a driver that can be detached and attached again while
 the desktop runs, which the open drivers offer and this one does not.
 
+### Names
+
+The two shims the system is built around have names:
+
+| Name | What it is | Where |
+| :--- | :--- | :--- |
+| **ZSS_AirLock** | The user-space shim for Vulkan and (through Mesa's Zink) OpenGL. Applications see it as their Vulkan driver; it loads the real drivers underneath and can rebuild an application on another GPU. | `src/layer/`, installed as `libzss_airlock.so` |
+| **ZSS_Interceptor** | The kernel shim: quiesces the GPU's driver, saves and restores PCI state, switches power through a backend, and notices a card that has gone. | `kmod/`, the module `zss.ko` (its file, `/sys` entries and kernel messages keep the short name `zss`) |
+
+The daemon (`zssd`), the control tool (`zssctl`) and the launcher (`zss-run`)
+keep their plain names. The subsystem names in section 5 (`zrn_pcie_shield`
+and the rest) are the original design's and are kept there as history; what
+was built of them lives inside ZSS_Interceptor.
+
 ### What "universal" means today
 
 Vendor-neutral by construction, proven on one machine: see the table in
-`README.md`. The pieces written for any GPU are the layer, the daemon, and
-the module's sequence and guard. The pieces tied to hardware are the power
+`README.md`. The pieces written for any GPU are ZSS_AirLock, the daemon, and
+ZSS_Interceptor's sequence and guard. The pieces tied to hardware are the power
 backends and the NVIDIA patch.
 
 ---
@@ -366,8 +380,10 @@ When re-energizing a GPU from a 0W cold state or reconnecting an eGPU:
 1. **Unannounced loss of a card in use.** Decide what a frozen driver does with callers other than the display server (sleeping keeps an application from being moved), then try closing the stuck programs before the driver is resumed.
 2. **Try the module on an open driver on real hardware** (`amdgpu`, `i915`/`xe` or `nouveau`), and settle how the display server is handled there.
 3. **Try the `acpi` backend** on a hybrid laptop that has firmware power resources.
-4. **A wider Vulkan surface in the layer**, and an OpenGL path, so that more applications can be moved rather than frozen. Vulkan 1.1, the portable profile and in-place swapchain rebuild are done, and Chromium moves between the two GPUs of the reference laptop (`zss-vulkan-12-and-opengl`, in progress). Vulkan 1.2, OpenGL through Zink, and a browser through a real power-off are next.
+4. **A wider Vulkan surface in ZSS_AirLock**, and an OpenGL path, so that more applications can be moved rather than frozen. Vulkan 1.1, the portable profile and in-place swapchain rebuild are done, and Chromium moves between the two GPUs of the reference laptop (`zss-vulkan-12-and-opengl`, in progress). OpenGL programs now run under it through Zink, with dynamic rendering and `VK_KHR_maintenance5` provided by ZSS_AirLock where a driver lacks them (the NVIDIA 470 driver). Vulkan 1.2, OpenGL 3.3, and a browser through a real power-off are next.
 5. **Notice a monitor plugged in while the card is off** (the gmux hot-plug interrupt on the reference laptop).
+
+5. **Handing a detached GPU to a virtual machine** (`zss-vm-passthrough`, specified, not started): a third state beside "on" and "off", in which the host's driver lets go of the card and a VM takes it, and the way back.
 
 ### Open, with no test bed yet
 

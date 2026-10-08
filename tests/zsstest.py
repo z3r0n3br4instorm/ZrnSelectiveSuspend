@@ -90,10 +90,10 @@ class Daemon:
 class App:
     """zss-testapp (or any program) running under the layer."""
 
-    def __init__(self, daemon, args, extra_env=None, program=None, layered=True):
+    def __init__(self, daemon, args, extra_env=None, program=None, layered=True, run_args=()):
         cmd = [program or TESTAPP, *map(str, args)]
         if layered:
-            cmd = [ZSS_RUN] + cmd
+            cmd = [ZSS_RUN, *run_args] + cmd
         env = daemon.env(extra_env) if daemon else quiet_env(extra_env)
         self.proc = subprocess.Popen(cmd, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         self.lines = []
@@ -113,6 +113,18 @@ class App:
             if line.strip() == wanted:
                 return
         raise Failure(f"timed out waiting for '{wanted}'")
+
+    def wait_containing(self, part, timeout=60):
+        """Reads output until a line containing `part` appears."""
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            line = self.proc.stdout.readline()
+            if not line:
+                raise Failure(f"application exited before printing '{part}': {self.proc.stderr.read()[-600:]}")
+            self.lines.append(line.strip())
+            if part in line:
+                return
+        raise Failure(f"timed out waiting for '{part}'")
 
     def wait_frame(self, n, timeout=60):
         self.wait_line(f"frame {n}", timeout)

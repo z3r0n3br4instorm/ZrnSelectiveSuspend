@@ -25,10 +25,18 @@ bench_retain = executable('bench_retain', 'bench_retain.c', '../src/layer/retain
   include_directories: include_directories('../src/layer'), dependencies: [common_dep, threads])
 
 python = find_program('python3')
+# A small OpenGL program for the OpenGL-through-Zink tests; built only where OpenGL and Xlib are to be had.
+gl_dep = dependency('gl', required: false)
+x11_dep = dependency('x11', required: false)
+gl_apps = []
+if gl_dep.found() and x11_dep.found()
+  gl_apps += executable('zss-glapp', 'testapp/zss-glapp.c', dependencies: [gl_dep, x11_dep])
+endif
+
 env = environment()
 env.set('ZSS_BUILD', meson.project_build_root())
 test('protocol', python, args: [files('test_protocol.py')], env: env, timeout: 60)
-test('track-a', python, args: [files('track_a.py')], env: env, timeout: 600, is_parallel: false)
+test('track-a', python, args: [files('track_a.py')], env: env, timeout: 900, is_parallel: false, depends: gl_apps)
 test_rules = executable('test_rules', 'test_rules.c', '../src/daemon/power.c', '../src/daemon/sysfs.c',
   include_directories: include_directories('../src/daemon'), dependencies: [common_dep])
 test('rules', test_rules)

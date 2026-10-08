@@ -195,6 +195,8 @@ static void set_state(struct gpu *g, enum gpu_state s)
     if (old == s)
         return;
     g->state = s;
+    if (s == GS_LOST)
+        g->reappear_said = false;
     logmsg("%s: %s -> %s", g->pci, state_name(old), state_name(s));
     for (int i = 0; i < MAX_CLIENTS; i++) {
         struct zj_out o;
@@ -451,6 +453,11 @@ static bool process_can_answer(pid_t pid)
     return ok;
 }
 
+/* While applications are being moved for a request: whom to tell as each one is done (see do_release). */
+static struct client *moving_req;
+static int moving_total, moving_done;
+static int moving_gi = -1; /* when bringing back: only applications that started on this GPU count */
+
 static void wait_outcomes(void)
 {
     long long deadline = now_ms() + OUTCOME_TIMEOUT_MS;
@@ -553,7 +560,7 @@ static int report_blockers(struct client *req, int gi, const pid_t *holders, int
                          "a display server is using this GPU");
         else
             send_blocker(req, holders[i], comm, dry ? "non-migratable, ignored in dry run" : "non-migratable",
-                         "not started under the ZSS layer");
+                         "not started under ZSS_AirLock");
         if (!dry)
             n++;
     }
@@ -631,7 +638,7 @@ static int off_blockers(struct client *req, struct gpu *g, const pid_t *holders,
             }
             if (g->nfrozen < 32) {
                 g->frozen[g->nfrozen++] = holders[i];
-                SEEN("%s%s (not under the ZSS layer, will be frozen)", seen[0] ? ", " : "", comm);
+                SEEN("%s%s (not under ZSS_AirLock, will be frozen)", seen[0] ? ", " : "", comm);
                 break;
             }
             why = "too many processes to freeze";
@@ -751,6 +758,7 @@ static bool do_release(struct client *req, struct gpu *g, const char *to, bool o
 
     set_state(g, GS_DETACHING);
     choose_target(g, to, target, sizeof(target));
+    moving_total = moving_done = 0;
     for (int i = 0; i < MAX_CLIENTS; i++) {
         struct client *c = &clients[i];
         struct zj_out o;
@@ -762,8 +770,15 @@ static bool do_release(struct client *req, struct gpu *g, const char *to, bool o
         zj_add_str(&o, "from", g->pci);
         zj_add_str(&o, "to", target);
         ask(c, &o);
+        moving_total++;
+    }
+    if (off && moving_total > 0) {
+        progress(req, "  moving applications: 0 of %d", moving_total);
+        moving_req = req;
     }
     wait_outcomes();
+    moving_req = NULL;
+    moving_gi = -1;
 
     for (int i = 0; i < MAX_CLIENTS; i++) {
         struct client *c = &clients[i];
@@ -976,9 +991,12 @@ static bool do_release(struct client *req, struct gpu *g, const char *to, bool o
 
 /* ---- attach ------------------------------------------------------------------------ */
 
-static void restore_clients(struct gpu *g, char *failed, size_t n)
+static void restore_clients(struct gpu *g, char *failed, size_t n, struct client *req)
 {
+    int gi = (int)(g - gpus);
+
     failed[0] = '\0';
+    moving_total = moving_done = 0;
     for (int i = 0; i < MAX_CLIENTS; i++) {
         struct client *c = &clients[i];
         struct zj_out o;
@@ -993,8 +1011,18 @@ static void restore_clients(struct gpu *g, char *failed, size_t n)
         zj_begin(&o, "restore");
         zj_add_str(&o, "gpu", g->pci);
         ask(c, &o);
+        /* Counted as moving only if it has a device that started on this GPU; the others just answer. */
+        if (c->view[gi].origin > 0)
+            moving_total++;
+    }
+    if (req && moving_total > 0) {
+        progress(req, "  moving applications: 0 of %d", moving_total);
+        moving_req = req;
+        moving_gi = gi;
     }
     wait_outcomes();
+    moving_req = NULL;
+    moving_gi = -1;
     for (int i = 0; i < MAX_CLIENTS; i++) {
         struct client *c = &clients[i];
 
@@ -1015,7 +1043,7 @@ static void do_attach(struct client *req, struct gpu *g, bool restore, const cha
 
     if (g->dry_detached) {
         g->dry_detached = false;
-        restore_clients(g, failed, sizeof(failed));
+        restore_clients(g, failed, sizeof(failed), req);
         send_result(req, !failed[0], "", failed[0] ? failed : "dry run: applications were moved back", g);
         return;
     }
@@ -1180,7 +1208,7 @@ static void do_attach(struct client *req, struct gpu *g, bool restore, const cha
     }
 
     if (restore)
-        restore_clients(g, failed, sizeof(failed));
+        restore_clients(g, failed, sizeof(failed), req);
     if (was_off)
         progress(req, "  [4/4] Applications: %s", restore ? (failed[0] ? failed : "returned to the device")
                                                          : "left where they are (zssctl attach brings them back)");
@@ -1217,7 +1245,10 @@ static void check_reappeared(void)
         }
         if (!gpu_returned(g))
             continue;
-        logmsg("%s reappeared; attaching", g->pci);
+        /* Tried every second while it answers; said once, not every time (the attempt says why it failed, once). */
+        if (!g->reappear_said)
+            logmsg("%s reappeared; attaching", g->pci);
+        g->reappear_said = true;
         busy = true;
         do_attach(NULL, g, true, "the device reappeared");
         busy = false;
@@ -1603,7 +1634,7 @@ static void do_status(struct client *req, const char *only)
                 zj_add_str(&o, "reason", "holds a handle to a device that is gone");
             } else {
                 zj_add_str(&o, "class", is_display_server(holders[i], comm) ? "display-server" : "non-migratable");
-                zj_add_str(&o, "reason", is_display_server(holders[i], comm) ? "" : "not started under the ZSS layer");
+                zj_add_str(&o, "reason", is_display_server(holders[i], comm) ? "" : "not started under ZSS_AirLock");
             }
             zss_send(req->fd, &o);
         }
@@ -1683,6 +1714,10 @@ static void handle(struct client *c, struct zj_msg *m)
         snprintf(c->outcome_error, sizeof(c->outcome_error), "%s", zj_str(m, "error", ""));
         snprintf(c->outcome_reason, sizeof(c->outcome_reason), "%s", zj_str(m, "reason", ""));
         c->lost_contents = (int)zj_int(m, "lost_contents", 0);
+        if (moving_req && moving_total > 0 && moving_done < moving_total &&
+            (moving_gi < 0 || c->view[moving_gi].origin > 0))
+            progress(moving_req, "  moving applications: %d of %d (%s, %s)", ++moving_done, moving_total, c->name,
+                     c->outcome == OC_MIGRATED ? "moved" : c->outcome == OC_PARKED ? "parked" : "failed");
     } else if (zj_is(m, "lost")) {
         /* Served from the main loop; a second report during an evacuation is the same loss. */
         g = gpu_find(zj_str(m, "gpu", ""));

@@ -1,0 +1,197 @@
+#!/bin/bash
+# SPDX-License-Identifier: GPL-2.0-only
+#
+# zss-power-event: what ZSS does when the charger is pulled or plugged in.
+# Called by the performance manager (zrn_perfd) as root.
+#
+#   zss-power-event battery    on battery: switch the dedicated GPU off, moving
+#                              its applications, and show it happening
+#   zss-power-event ac         on the charger: if it was this script that switched
+#                              the GPU off, switch it on again and bring the
+#                              applications back, and show it happening. A GPU
+#                              switched off by hand stays off.
+#
+# Progress is shown in zrn-warning-dialog, fed through its standard input
+# (see its --stream-progress). Without the dialog this still does the work.
+#
+# Options: --gpu PCI       the dedicated GPU (default: the first in /etc/zss/zssd.conf)
+#          --user NAME     whose desktop shows the dialog (default: the owner of the X display)
+#          --dialog PATH   the dialog program (default: ~USER/.local/bin/zrn-warning-dialog)
+#          --dry-run       show the dialog and what would be done; switch nothing
+set -u
+
+event="${1:-}"; shift || true
+GPU="" USER_NAME="" DIALOG="" DRY=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --gpu) GPU="$2"; shift 2 ;;
+        --user) USER_NAME="$2"; shift 2 ;;
+        --dialog) DIALOG="$2"; shift 2 ;;
+        --dry-run) DRY=1; shift ;;
+        *) echo "zss-power-event: unknown option $1" >&2; exit 2 ;;
+    esac
+done
+case "$event" in battery|ac) ;; *) echo "usage: zss-power-event battery|ac [options]" >&2; exit 2 ;; esac
+
+TITLE="Zerone Performance Management"
+[ -n "$GPU" ] || GPU="$(sed -n 's/^[[:space:]]*gpu[[:space:]]*=[[:space:]]*\([0-9a-fA-F:.]*\).*/\1/p' /etc/zss/zssd.conf 2>/dev/null | head -1)"
+[ -n "$GPU" ] || { echo "zss-power-event: no GPU configured" >&2; exit 1; }
+[ -n "$USER_NAME" ] || USER_NAME="$(stat -c %U /tmp/.X11-unix/X0 2>/dev/null)"
+[ -n "$USER_NAME" ] && [ "$USER_NAME" != root ] || USER_NAME="$(loginctl list-sessions --no-legend 2>/dev/null | awk '$3 != "root" {print $3; exit}')"
+uid="$(id -u "$USER_NAME" 2>/dev/null)"
+home="$(getent passwd "$USER_NAME" | cut -d: -f6)"
+[ -n "$DIALOG" ] || DIALOG="$home/.local/bin/zrn-warning-dialog"
+
+# The step number of a progress line such as "[ZrnSelectiveSuspend]   [2/7] Applications: ...".
+step_of() { echo "$1" | sed -n 's/.*\[\([0-9]\)\/[0-9]\] .*/\1/p'; }
+battery() { cat /sys/class/power_supply/BAT*/capacity 2>/dev/null | head -1; }
+# A short name for a GPU: "Intel HD Graphics 4000" from lspci's long one.
+gpu_name() {
+    local line vendor model
+    line="$(lspci -s "${1#0000:}" 2>/dev/null)"
+    [ -n "$line" ] || return
+    line="${line#*: }"; line="${line% (rev *}"
+    vendor="${line%% *}"
+    case "$line" in
+        *"["*"]"*) model="${line##*[}"; model="${model%%]*}"; model="${model#*/}" ;;
+        *) model="${line#* }"; model="${model#Corporation }" ;;
+    esac
+    case "$model" in "$vendor"*) echo "$model" ;; *) echo "$vendor $model" ;; esac
+}
+state() { zssctl status "$GPU" 2>/dev/null | awk 'NR == 1 { for (i = 1; i <= NF; i++) if ($i ~ /^state=/) { sub("state=", "", $i); print $i } }'; }
+
+# The dialog runs as the desktop's user, on the desktop's display, reading commands from our output.
+dialog() {
+    if [ -x "$DIALOG" ] && [ "$(id -u)" != 0 ]; then
+        "$DIALOG" -t "$TITLE" --stream-progress "$@" >/dev/null 2>&1
+    elif [ -x "$DIALOG" ] && [ -n "$uid" ]; then
+        auth="$(ls /run/user/"$uid"/*xauth* 2>/dev/null | head -1)"
+        [ -n "$auth" ] || auth="$home/.Xauthority"
+        runuser -u "$USER_NAME" -- env DISPLAY="${DISPLAY:-:0}" XAUTHORITY="$auth" XDG_RUNTIME_DIR="/run/user/$uid" \
+            "$DIALOG" -t "$TITLE" --stream-progress "$@" >/dev/null 2>&1
+    else
+        cat >/dev/null
+    fi
+}
+
+cap="$(battery)"; cap="${cap:-0}"
+was="$(state)"
+
+# Set when this script switches the GPU off, so that the charger brings back only what it took away.
+MARK=/run/zss/off-on-battery
+
+if [ "$event" = ac ]; then
+    if [ "$was" = powered-off ] && { [ -e "$MARK" ] || [ -n "$DRY" ]; }; then
+        (
+            echo "message: Charger connected. Initializing the dedicated graphics accelerator."
+            echo "progress: 0"
+            if [ -n "$DRY" ]; then
+                for i in 1 2; do sleep 0.6; echo "message: Charger connected. Initializing the dedicated graphics accelerator. Moving application $i of 2 back"; echo "progress: $((40 + i * 25))"; done
+                sleep 0.6; echo "message: (dry run) Moved 2 applications back to $(gpu_name "$GPU"). Nothing was switched on."; echo "progress: 100"; echo "done: 4"
+                exit 0
+            fi
+            total=0 failed=""
+            while IFS= read -r line; do
+                case "$line" in
+                    *"moving applications: "*)
+                        set -- ${line##*moving applications: }
+                        k="$1" total="$3"
+                        [ "$k" = 0 ] && k=1
+                        echo "message: Charger connected. Initializing the dedicated graphics accelerator. Moving application $k of $total back"
+                        [ "$total" -gt 0 ] && echo "progress: $((60 + 35 * ${1} / total))"
+                        ;;
+                    *"["[1-4]"/4] "*)
+                        s="$(step_of "$line")"
+                        echo "progress: $((s * 15))"
+                        ;;
+                    error:*|*FAILED*|*"could not return"*)
+                        failed="${line#error: }"
+                        ;;
+                esac
+            done < <(zssctl on "$GPU" 2>&1)
+            rm -f "$MARK"
+            if [ "$(state)" != attached ]; then
+                echo "icon: warning"
+                echo "message: Charger connected. The dedicated graphics accelerator could not be switched on: ${failed:-see zssctl status}"
+                echo "done: 10"
+            elif [ -n "$failed" ]; then
+                echo "message: Charger connected. Dedicated graphics accelerator on; $failed"
+                echo "progress: 100"
+                echo "done: 8"
+            elif [ "$total" -gt 0 ]; then
+                echo "message: Charger connected. Dedicated graphics accelerator on; moved $total applications back to $(gpu_name "$GPU")."
+                echo "progress: 100"
+                echo "done: 4"
+            else
+                echo "message: Charger connected, battery charging at $cap%. Dedicated graphics accelerator on."
+                echo "progress: 100"
+                echo "done: 3"
+            fi
+        ) | dialog -m "Charger connected. Initializing the dedicated graphics accelerator." \
+                --icon battery-green --alternate-icon gpu --icon-level "$cap" --no-blink --show-progress 0 &
+    else
+        { echo "progress: $cap"; echo "done: 3"; } | dialog -m "Charger connected, battery charging at $cap%." \
+            --icon battery-green --icon-level "$cap" --no-blink &
+    fi
+    exit 0
+fi
+
+# On battery.
+if [ "$was" != attached ]; then
+    { echo "progress: $cap"; echo "done: 3"; } | dialog -m "Charger disconnected, running on battery ($cap% remaining)." \
+        --icon battery-yellow --icon-level "$cap" -w --no-blink &
+    exit 0
+fi
+
+(
+    echo "message: Charger disconnected. De-initializing the dedicated graphics accelerator."
+    echo "progress: 0"
+    if [ -n "$DRY" ]; then
+        for i in 1 2 3; do sleep 0.6; echo "message: Charger disconnected. De-initializing the dedicated graphics accelerator. Moving application $i of 3"; echo "progress: $((i * 25))"; done
+        sleep 0.6; echo "message: (dry run) Moved 3 applications to $(gpu_name 0000:00:02.0). Nothing was switched off."; echo "progress: 100"; echo "done: 4"
+        exit 0
+    fi
+    total=0 moved=0 target="" failed=""
+    while IFS= read -r line; do
+        case "$line" in
+            *"moving applications: "*)
+                # "moving applications: K of N (name, moved)"
+                set -- ${line##*moving applications: }
+                k="$1" total="$3"
+                case "$line" in *", moved)") moved=$((moved + 1)) ;; esac
+                [ "$k" = 0 ] && k=1
+                echo "message: Charger disconnected. De-initializing the dedicated graphics accelerator. Moving application $k of $total"
+                [ "$total" -gt 0 ] && echo "progress: $((10 + 50 * ${1} / total))"
+                ;;
+            *"] Applications: "*" moved to "*)
+                target="${line##* moved to }"; target="${target%%,*}"
+                ;;
+            *"["[1-7]"/7] "*)
+                s="$(step_of "$line")"
+                echo "progress: $((60 + 40 * s / 7))"
+                ;;
+            error:*|*FAILED*)
+                failed="${line#error: }"
+                ;;
+        esac
+    done < <(zssctl off "$GPU" 2>&1)
+    if [ -n "$failed" ] || [ "$(state)" != powered-off ]; then
+        echo "icon: warning"
+        echo "alternate: gpu"
+        echo "message: Charger disconnected. The dedicated graphics accelerator could not be switched off: ${failed:-see zssctl status}"
+        echo "done: 10"
+        exit 0
+    fi
+    mkdir -p "${MARK%/*}" && : > "$MARK"
+    where="$(gpu_name "$target")"
+    [ -n "$where" ] || where="${target:-the other GPU}"
+    [ "$target" = software ] && where="the software renderer"
+    if [ "$total" -gt 0 ]; then
+        echo "message: Charger disconnected. Dedicated graphics accelerator off; moved $moved of $total applications to $where."
+    else
+        echo "message: Charger disconnected. Dedicated graphics accelerator off; no applications were using it."
+    fi
+    echo "progress: 100"
+    echo "done: 4"
+) | dialog -m "Charger disconnected. De-initializing the dedicated graphics accelerator." \
+        --icon battery-yellow --alternate-icon gpu --icon-level "$cap" -w --no-blink --show-progress 0

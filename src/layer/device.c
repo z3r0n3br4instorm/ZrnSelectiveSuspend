@@ -222,7 +222,8 @@ bool zss_families_fit(const struct zss_dev *dev, const struct zss_gpu *gpu)
 VkResult zss_dev_create_real(struct zss_dev *dev, struct zss_gpu *gpu)
 {
     static const float prio[16] = { 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1 };
-    const char *exts[17];
+    void *feats;
+    const char *exts[65];
     uint32_t nexts = 0;
     VkDeviceQueueCreateInfo qci[ZSS_MAX_FAMILIES];
     VkDeviceCreateInfo ci = { .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO };
@@ -258,20 +259,52 @@ VkResult zss_dev_create_real(struct zss_dev *dev, struct zss_gpu *gpu)
     ci.queueCreateInfoCount = dev->nreq;
     ci.pQueueCreateInfos = qci;
     ci.pEnabledFeatures = &dev->features;
-    ci.pNext = dev->feat_chain;
+    /* What the layer stands in for is not asked of a driver that has not got it (vk11.c). */
+    feats = zss_feats_for_gpu(gpu, dev->feat_chain);
+    ci.pNext = feats;
     if (dev->want_swapchain)
         exts[nexts++] = VK_KHR_SWAPCHAIN_EXTENSION_NAME;
-    for (uint32_t i = 0; i < dev->nexts; i++)
+    dev->native_dynrender = dev->native_maint5 = false;
+    for (uint32_t i = 0; i < dev->nexts; i++) {
+        if (zss_ext_emulated(dev->exts[i]) && !zss_gpu_has_ext(gpu, dev->exts[i]))
+            continue;
+        if (!strcmp(dev->exts[i], VK_KHR_DYNAMIC_RENDERING_EXTENSION_NAME))
+            dev->native_dynrender = true;
+        if (!strcmp(dev->exts[i], VK_KHR_MAINTENANCE_5_EXTENSION_NAME))
+            dev->native_maint5 = true;
         exts[nexts++] = dev->exts[i];
+    }
     ci.enabledExtensionCount = nexts;
     ci.ppEnabledExtensionNames = exts;
 
     r = gpu->drv->fn.CreateDevice(pd, &ci, NULL, &dev->real);
+    zss_feats_free(feats);
     if (r != VK_SUCCESS)
         return r;
 #define X(n) dev->fn.n = (PFN_vk##n)gpu->drv->fn.GetDeviceProcAddr(dev->real, "vk" #n);
     ZSS_DEV_FNS(X)
 #undef X
+    /* On a driver where these became core, the extension's names may be missing: the core ones are the same. */
+#define CORE(n, core) if (!dev->fn.n) dev->fn.n = (PFN_vk##n)gpu->drv->fn.GetDeviceProcAddr(dev->real, "vk" core);
+    CORE(WaitSemaphoresKHR, "WaitSemaphores") CORE(SignalSemaphoreKHR, "SignalSemaphore")
+    CORE(GetSemaphoreCounterValueKHR, "GetSemaphoreCounterValue") CORE(CmdBeginRenderingKHR, "CmdBeginRendering")
+    CORE(CmdEndRenderingKHR, "CmdEndRendering") CORE(CmdBindIndexBuffer2KHR, "CmdBindIndexBuffer2")
+    CORE(GetRenderingAreaGranularityKHR, "GetRenderingAreaGranularity")
+    CORE(GetImageSubresourceLayout2KHR, "GetImageSubresourceLayout2")
+    CORE(GetDeviceImageSubresourceLayoutKHR, "GetDeviceImageSubresourceLayout")
+    CORE(CmdSetLineStippleEXT, "CmdSetLineStippleKHR") CORE(CmdBindVertexBuffers2EXT, "CmdBindVertexBuffers2")
+    CORE(CmdSetCullModeEXT, "CmdSetCullMode")
+    CORE(CmdSetFrontFaceEXT, "CmdSetFrontFace")
+    CORE(CmdSetPrimitiveTopologyEXT, "CmdSetPrimitiveTopology")
+    CORE(CmdSetViewportWithCountEXT, "CmdSetViewportWithCount")
+    CORE(CmdSetScissorWithCountEXT, "CmdSetScissorWithCount")
+    CORE(CmdSetDepthTestEnableEXT, "CmdSetDepthTestEnable")
+    CORE(CmdSetDepthWriteEnableEXT, "CmdSetDepthWriteEnable")
+    CORE(CmdSetDepthCompareOpEXT, "CmdSetDepthCompareOp")
+    CORE(CmdSetDepthBoundsTestEnableEXT, "CmdSetDepthBoundsTestEnable")
+    CORE(CmdSetStencilTestEnableEXT, "CmdSetStencilTestEnable")
+    CORE(CmdSetStencilOpEXT, "CmdSetStencilOp")
+#undef CORE
     dev->gpu = gpu;
     gpu->drv->ndevices++;
 
@@ -314,6 +347,7 @@ void zss_dev_destroy_real(struct zss_dev *dev)
         return;
     if (dev->util_pool)
         dev->fn.DestroyCommandPool(dev->real, dev->util_pool, NULL);
+    zss_lower_drop(dev);
     dev->fn.DestroyDevice(dev->real, NULL);
     dev->gpu->drv->ndevices--;
     dev->real = VK_NULL_HANDLE;
@@ -405,7 +439,7 @@ VKAPI_ATTR VkResult VKAPI_CALL zss_CreateDevice(VkPhysicalDevice pd, const VkDev
 
         if (!strcmp(ci->ppEnabledExtensionNames[i], VK_KHR_SWAPCHAIN_EXTENSION_NAME))
             dev->want_swapchain = true;
-        else if (offered && dev->nexts < 16)
+        else if (offered && dev->nexts < 64)
             dev->exts[dev->nexts++] = offered;
     }
     for (uint32_t i = 0; i < ci->queueCreateInfoCount && i < ZSS_MAX_FAMILIES; i++) {
@@ -497,35 +531,55 @@ VkResult zss_backing_alloc(struct zss_dev *dev, const VkMemoryRequirements *req,
         .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
         .allocationSize = req->size,
     };
-    int best = -1, best_score = -1;
-    VkResult r;
+    int score[VK_MAX_MEMORY_TYPES];
+    uint32_t tried = 0;
+    VkResult r = VK_ERROR_OUT_OF_DEVICE_MEMORY;
 
     for (uint32_t i = 0; i < mp->memoryTypeCount; i++) {
         VkMemoryPropertyFlags f = mp->memoryTypes[i].propertyFlags;
-        int score = 0;
 
+        score[i] = -1;
         if (!(req->memoryTypeBits & (1u << i)))
             continue;
         if (host) {
             if (!(f & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT))
                 continue;
-            score = 1 + ((f & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT) ? 4 : 0) +
-                    ((f & VK_MEMORY_PROPERTY_HOST_CACHED_BIT) ? 2 : 0);
+            score[i] = 1 + ((f & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT) ? 4 : 0) +
+                       ((f & VK_MEMORY_PROPERTY_HOST_CACHED_BIT) ? 2 : 0);
         } else {
-            score = 1 + ((f & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) ? 4 : 0) +
-                    ((f & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) ? 0 : 2);
-        }
-        if (score > best_score) {
-            best_score = score;
-            best = (int)i;
+            score[i] = 1 + ((f & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) ? 4 : 0) +
+                       ((f & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) ? 0 : 2);
         }
     }
-    if (best < 0)
-        return VK_ERROR_OUT_OF_DEVICE_MEMORY;
-    ai.memoryTypeIndex = (uint32_t)best;
-    r = dev->fn.AllocateMemory(dev->real, &ai, NULL, mem);
-    if (r != VK_SUCCESS)
+    /*
+     * The best kind of memory first, then every other kind the object
+     * accepts: when the card's own memory is full, a driver that also offers
+     * system memory for the object can still hold it, slower.
+     */
+    for (;;) {
+        int best = -1;
+
+        for (uint32_t i = 0; i < mp->memoryTypeCount; i++)
+            if (score[i] >= 0 && (best < 0 || score[i] > score[best]))
+                best = (int)i;
+        if (best < 0)
+            break;
+        score[best] = -1;
+        tried++;
+        ai.memoryTypeIndex = (uint32_t)best;
+        r = dev->fn.AllocateMemory(dev->real, &ai, NULL, mem);
+        if (r != VK_ERROR_OUT_OF_DEVICE_MEMORY && r != VK_ERROR_OUT_OF_HOST_MEMORY)
+            break;
+    }
+    if (r != VK_SUCCESS) {
+        static uint32_t said;
+
+        /* Said a few times, not for every object of a program that carries on regardless. */
+        if (said++ < 3)
+            zss_log("%s has no memory left for an object of %llu KiB (tried %u kind(s) of memory, VkResult %d)",
+                    dev->gpu->props.deviceName, (unsigned long long)(req->size >> 10), tried, (int)r);
         return r;
+    }
     if (map) {
         *map = NULL;
         if (host) {
@@ -703,12 +757,28 @@ static uint32_t all_origin_types(const struct zss_dev *dev)
 static VkResult real_buffer(struct zss_dev *dev, struct zss_obj *o)
 {
     VkBufferCreateInfo ci = o->u.buf.ci;
+    VkBufferUsageFlags2CreateInfo usage2;
+    _Alignas(8) char chain_room[512];
     uint32_t qfi[ZSS_MAX_FAMILIES];
     VkMemoryRequirements req;
     VkBuffer b;
     VkResult r;
 
     ci.usage |= TRANSFER_BOTH;
+    for (const VkBaseInStructure *x = ci.pNext; x; x = x->pNext)
+        if (x->sType == VK_STRUCTURE_TYPE_BUFFER_USAGE_FLAGS_2_CREATE_INFO) {
+            /* maintenance5's wide usage replaces the old field: the layer's copies need to be in it too. */
+            usage2 = *(const VkBufferUsageFlags2CreateInfo *)x;
+            usage2.usage |= TRANSFER_BOTH;
+            ci.usage = (VkBufferUsageFlags)usage2.usage;
+            ci.pNext = zss_chain_without(ci.pNext, VK_STRUCTURE_TYPE_BUFFER_USAGE_FLAGS_2_CREATE_INFO, 0, chain_room,
+                                         sizeof(chain_room));
+            if (dev->native_maint5) {
+                usage2.pNext = ci.pNext;
+                ci.pNext = &usage2;
+            }
+            break;
+        }
     if (ci.sharingMode == VK_SHARING_MODE_CONCURRENT) {
         for (uint32_t i = 0; i < ci.queueFamilyIndexCount && i < ZSS_MAX_FAMILIES; i++)
             qfi[i] = fam(dev, ci.pQueueFamilyIndices[i]);
@@ -770,6 +840,7 @@ static VkResult real_image(struct zss_dev *dev, struct zss_obj *o)
 static VkResult real_pipeline(struct zss_dev *dev, struct zss_obj *o)
 {
     VkGraphicsPipelineCreateInfo ci = o->u.pipe.ci;
+    _Alignas(8) char chain_room[1024];
     VkPipelineShaderStageCreateInfo *stages = malloc(ci.stageCount * sizeof(*stages));
     VkPipeline p;
     VkResult r;
@@ -782,6 +853,32 @@ static VkResult real_pipeline(struct zss_dev *dev, struct zss_obj *o)
     ci.layout = ZREAL(VkPipelineLayout, ci.layout);
     ci.renderPass = ZREAL(VkRenderPass, ci.renderPass);
     ci.basePipelineHandle = ZREAL(VkPipeline, ci.basePipelineHandle);
+    if (!dev->native_dynrender || !dev->native_maint5) {
+        const VkPipelineRenderingCreateInfo *pr = NULL;
+        const VkPipelineCreateFlags2CreateInfo *f2 = NULL;
+
+        for (const VkBaseInStructure *x = ci.pNext; x; x = x->pNext) {
+            if (x->sType == VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO)
+                pr = (const VkPipelineRenderingCreateInfo *)x;
+            if (x->sType == VK_STRUCTURE_TYPE_PIPELINE_CREATE_FLAGS_2_CREATE_INFO)
+                f2 = (const VkPipelineCreateFlags2CreateInfo *)x;
+        }
+        /* No dynamic rendering: a render pass compatible with the formats the pipeline draws into (lower.c). */
+        if (!dev->native_dynrender && pr && !ci.renderPass) {
+            VkSampleCountFlagBits samples = ci.pMultisampleState ? ci.pMultisampleState->rasterizationSamples
+                                                                 : VK_SAMPLE_COUNT_1_BIT;
+
+            ci.renderPass = zss_lower_compatible(dev, pr->colorAttachmentCount, pr->pColorAttachmentFormats,
+                                                 pr->depthAttachmentFormat, pr->stencilAttachmentFormat, samples);
+            ci.subpass = 0;
+        }
+        /* No maintenance5: the wide flags, as far as they go, in the old field. */
+        if (!dev->native_maint5 && f2)
+            ci.flags = (VkPipelineCreateFlags)f2->flags;
+        ci.pNext = zss_chain_without(ci.pNext, dev->native_dynrender ? 0 : VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO,
+                                     dev->native_maint5 ? 0 : VK_STRUCTURE_TYPE_PIPELINE_CREATE_FLAGS_2_CREATE_INFO,
+                                     chain_room, sizeof(chain_room));
+    }
     r = dev->fn.CreateGraphicsPipelines(dev->real, VK_NULL_HANDLE, 1, &ci, NULL, &p);
     free(stages);
     if (r == VK_SUCCESS)
@@ -931,7 +1028,14 @@ VkResult zss_real_create(struct zss_dev *dev, struct zss_obj *o)
         break;
     }
     case ZK_SEMAPHORE: {
-        VkSemaphoreCreateInfo ci = { .sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO };
+        /* A timeline semaphore starts at the value it had reached. */
+        VkSemaphoreTypeCreateInfo type = {
+            .sType = VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO,
+            .semaphoreType = VK_SEMAPHORE_TYPE_TIMELINE,
+            .initialValue = o->u.sem.value,
+        };
+        VkSemaphoreCreateInfo ci = { .sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO,
+                                     .pNext = o->u.sem.timeline ? &type : NULL };
 
         r = dev->fn.CreateSemaphore(d, &ci, NULL, OUT(VkSemaphore));
         break;
@@ -956,7 +1060,12 @@ void zss_real_destroy(struct zss_dev *dev, enum zss_kind kind, struct zss_real *
     switch (kind) {
     case ZK_BUFFER: if (h) dev->fn.DestroyBuffer(d, H(VkBuffer), NULL); break;
     case ZK_IMAGE: if (h && !r->borrowed) dev->fn.DestroyImage(d, H(VkImage), NULL); break;
-    case ZK_VIEW: if (h) dev->fn.DestroyImageView(d, H(VkImageView), NULL); break;
+    case ZK_VIEW:
+        if (h) {
+            zss_lower_forget_view(dev, H(VkImageView));
+            dev->fn.DestroyImageView(d, H(VkImageView), NULL);
+        }
+        break;
     case ZK_SAMPLER: if (h) dev->fn.DestroySampler(d, H(VkSampler), NULL); break;
     case ZK_YCBCR:
         if (h && dev->gpu) {
@@ -1069,7 +1178,8 @@ VKAPI_ATTR VkResult VKAPI_CALL zss_CreateBuffer(VkDevice device, const VkBufferC
 
     (void)alloc;
     o->u.buf.ci = *ci;
-    o->u.buf.ci.pNext = NULL;
+    /* The wide usage flags (maintenance5) come chained. */
+    o->u.buf.ci.pNext = zss_chain_keep(o, ci->pNext);
     o->u.buf.ci.pQueueFamilyIndices =
         ci->sharingMode == VK_SHARING_MODE_CONCURRENT
             ? zss_obj_dup(o, ci->pQueueFamilyIndices, ci->queueFamilyIndexCount * sizeof(uint32_t))
@@ -1568,6 +1678,15 @@ void zss_dset_apply(struct zss_dev *dev, struct zss_obj *set)
                     e->layout,
                 };
                 w[n].pImageInfo = &ii[n];
+            } else if (s->type == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER || s->type == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER ||
+                       s->type == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC ||
+                       s->type == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC) {
+                /* Written with no buffer: a null descriptor (robustness2), and written again as one. */
+                bi[n] = (VkDescriptorBufferInfo){ VK_NULL_HANDLE, 0, VK_WHOLE_SIZE };
+                w[n].pBufferInfo = &bi[n];
+            } else if (s->type != VK_DESCRIPTOR_TYPE_SAMPLER) {
+                ii[n] = (VkDescriptorImageInfo){ VK_NULL_HANDLE, VK_NULL_HANDLE, e->layout };
+                w[n].pImageInfo = &ii[n];
             } else {
                 continue;
             }
@@ -1731,6 +1850,30 @@ VKAPI_ATTR VkResult VKAPI_CALL zss_MergePipelineCaches(VkDevice device, VkPipeli
 
 #define DUP1(field) ci->field = zss_obj_dup(o, ci->field, sizeof(*ci->field))
 
+/* A shader module of the layer's own, made from inside the gate (the entry point would enter it again). */
+static VkResult shader_new(struct zss_dev *dev, const VkShaderModuleCreateInfo *ci, VkShaderModule *out)
+{
+    struct zss_obj *o = zss_obj_new(dev, ZK_SHADER);
+    VkResult r;
+
+    o->u.shader.ci = *ci;
+    o->u.shader.ci.pNext = NULL;
+    o->u.shader.ci.pCode = zss_obj_dup(o, ci->pCode, ci->codeSize);
+    r = create_real(dev, o);
+    if (r != VK_SUCCESS) {
+        zss_real_destroy(dev, o->kind, &o->r);
+        zss_obj_kill(o);
+        *out = VK_NULL_HANDLE;
+    } else {
+        *out = (VkShaderModule)(uintptr_t)o;
+    }
+    return r;
+}
+
+/* Shader modules made by pipeline_copy for stages that carried their code (maintenance5); let go once the pipeline exists. */
+static __thread VkShaderModule pipeline_tmp[8];
+static __thread uint32_t pipeline_tmp_n;
+
 static void pipeline_copy(struct zss_obj *o, const VkGraphicsPipelineCreateInfo *src)
 {
     VkGraphicsPipelineCreateInfo *ci = &o->u.pipe.ci;
@@ -1738,12 +1881,31 @@ static void pipeline_copy(struct zss_obj *o, const VkGraphicsPipelineCreateInfo 
     bool tess = false, raster = true;
 
     *ci = *src;
-    ci->pNext = NULL;
+    /* Rendering formats (dynamic rendering) and the wide flags (maintenance5) come chained here. */
+    ci->pNext = zss_chain_keep(o, src->pNext);
     stages = zss_obj_dup(o, src->pStages, src->stageCount * sizeof(*stages));
     for (uint32_t i = 0; i < src->stageCount; i++) {
         const VkSpecializationInfo *spec = src->pStages[i].pSpecializationInfo;
 
         stages[i].pNext = NULL;
+        if (!stages[i].module) {
+            /*
+             * maintenance5: no module, the shader's code chained to the stage
+             * instead. It becomes a module of the layer's, so that a rebuild
+             * makes it again like any other.
+             */
+            for (const VkBaseInStructure *x = src->pStages[i].pNext; x; x = x->pNext)
+                if (x->sType == VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO && pipeline_tmp_n < 8) {
+                    VkShaderModuleCreateInfo mci = *(const VkShaderModuleCreateInfo *)x;
+                    VkShaderModule m = VK_NULL_HANDLE;
+
+                    mci.pNext = NULL;
+                    if (shader_new(o->dev, &mci, &m) == VK_SUCCESS) {
+                        stages[i].module = m;
+                        pipeline_tmp[pipeline_tmp_n++] = m;
+                    }
+                }
+        }
         stages[i].pName = zss_obj_dup(o, src->pStages[i].pName, strlen(src->pStages[i].pName) + 1);
         if (spec) {
             VkSpecializationInfo *s = zss_obj_dup(o, spec, sizeof(*spec));
@@ -1761,7 +1923,7 @@ static void pipeline_copy(struct zss_obj *o, const VkGraphicsPipelineCreateInfo 
     if (src->pVertexInputState) {
         VkPipelineVertexInputStateCreateInfo *v = zss_obj_dup(o, src->pVertexInputState, sizeof(*v));
 
-        v->pNext = NULL;
+        v->pNext = zss_chain_keep(o, src->pVertexInputState->pNext);
         v->pVertexBindingDescriptions = zss_obj_dup(o, v->pVertexBindingDescriptions,
             v->vertexBindingDescriptionCount * sizeof(VkVertexInputBindingDescription));
         v->pVertexAttributeDescriptions = zss_obj_dup(o, v->pVertexAttributeDescriptions,
@@ -1842,8 +2004,12 @@ VKAPI_ATTR VkResult VKAPI_CALL zss_CreateGraphicsPipelines(
         struct zss_obj *o = zss_obj_new(dev, ZK_PIPELINE);
         VkResult r;
 
+        pipeline_tmp_n = 0;
         pipeline_copy(o, &infos[i]);
         r = create_real(dev, o);
+        /* The pipeline keeps them for its rebuild; the application never had them. */
+        for (uint32_t k = 0; k < pipeline_tmp_n; k++)
+            destroy_obj(dev, ZOBJ(pipeline_tmp[k]));
         if (r != VK_SUCCESS) {
             zss_obj_kill(o);
             out[i] = VK_NULL_HANDLE;
@@ -1944,8 +2110,6 @@ VKAPI_ATTR VkResult VKAPI_CALL zss_AllocateCommandBuffers(VkDevice device,
     VkResult r = VK_SUCCESS;
     uint32_t i;
 
-    if (info->level != VK_COMMAND_BUFFER_LEVEL_PRIMARY)
-        zss_dev_untracked(dev, "secondary command buffers");
     for (i = 0; i < info->commandBufferCount && r == VK_SUCCESS; i++) {
         struct zss_obj *o = zss_obj_new(dev, ZK_CMDBUF);
 
@@ -2101,8 +2265,13 @@ VKAPI_ATTR VkResult VKAPI_CALL zss_CreateSemaphore(VkDevice device, const VkSema
     ENTER(device);
     struct zss_obj *o = zss_obj_new(dev, ZK_SEMAPHORE);
 
-    (void)ci;
     (void)alloc;
+    for (const VkBaseInStructure *s = ci->pNext; s; s = s->pNext)
+        if (s->sType == VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO &&
+            ((const VkSemaphoreTypeCreateInfo *)s)->semaphoreType == VK_SEMAPHORE_TYPE_TIMELINE) {
+            o->u.sem.timeline = true;
+            o->u.sem.value = ((const VkSemaphoreTypeCreateInfo *)s)->initialValue;
+        }
     return finish_create(dev, o, (uint64_t *)out);
 }
 
@@ -2299,6 +2468,7 @@ VKAPI_ATTR VkResult VKAPI_CALL zss_QueueSubmit(VkQueue queue, uint32_t n, const 
     /* Repeated from the top after a loss: by then every real handle is new. */
     do {
         VkSubmitInfo *real = calloc(n + 1, sizeof(*real));
+        VkTimelineSemaphoreSubmitInfo *tl = calloc(n + 1, sizeof(*tl));
         void **scratch = calloc(3 * (size_t)n + 1, sizeof(*scratch));
 
         zss_sync_to_device(dev, NULL);
@@ -2316,6 +2486,13 @@ VKAPI_ATTR VkResult VKAPI_CALL zss_QueueSubmit(VkQueue queue, uint32_t n, const 
                 signals[j] = ZREAL(VkSemaphore, s->pSignalSemaphores[j]);
             real[i] = *s;
             real[i].pNext = NULL;
+            /* Timeline values are plain numbers: passed on as they are. */
+            for (const VkBaseInStructure *x = s->pNext; x; x = x->pNext)
+                if (x->sType == VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO) {
+                    tl[i] = *(const VkTimelineSemaphoreSubmitInfo *)x;
+                    tl[i].pNext = NULL;
+                    real[i].pNext = &tl[i];
+                }
             real[i].pWaitSemaphores = waits;
             real[i].pCommandBuffers = cbs;
             real[i].pSignalSemaphores = signals;
@@ -2328,6 +2505,7 @@ VKAPI_ATTR VkResult VKAPI_CALL zss_QueueSubmit(VkQueue queue, uint32_t n, const 
         for (uint32_t i = 0; i < 3 * n; i++)
             free(scratch[i]);
         free(scratch);
+        free(tl);
         free(real);
     } while (zss_lost(dev, r));
 
@@ -2341,8 +2519,19 @@ VKAPI_ATTR VkResult VKAPI_CALL zss_QueueSubmit(VkQueue queue, uint32_t n, const 
                 ZOBJ(s->pWaitSemaphores[j])->u.sem.signaled = false;
             for (uint32_t j = 0; j < s->commandBufferCount; j++)
                 zss_cmd_track_submit(dev, (struct zss_obj *)s->pCommandBuffers[j]);
-            for (uint32_t j = 0; j < s->signalSemaphoreCount; j++)
-                ZOBJ(s->pSignalSemaphores[j])->u.sem.signaled = true;
+            const VkTimelineSemaphoreSubmitInfo *t = NULL;
+
+            for (const VkBaseInStructure *x = s->pNext; x; x = x->pNext)
+                if (x->sType == VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO)
+                    t = (const VkTimelineSemaphoreSubmitInfo *)x;
+            for (uint32_t j = 0; j < s->signalSemaphoreCount; j++) {
+                struct zss_obj *sem = ZOBJ(s->pSignalSemaphores[j]);
+
+                sem->u.sem.signaled = true;
+                /* The value this submission will reach; after a loss the work is run again, so it is reached. */
+                if (sem->u.sem.timeline && t && j < t->signalSemaphoreValueCount && t->pSignalSemaphoreValues[j] > sem->u.sem.value)
+                    sem->u.sem.value = t->pSignalSemaphoreValues[j];
+            }
         }
         if (fence)
             ZOBJ(fence)->u.fence.pending = true;

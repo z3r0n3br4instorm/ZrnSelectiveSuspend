@@ -57,6 +57,7 @@ struct gpu {
     bool nvidia_suspended, rpm_suspended;
     bool kmod; /* the kernel module does state and power for this device */
     const char *loss_told; /* what the module was last told to do about the driver on a loss; NULL if nothing yet */
+    bool reappear_said; /* "reappeared" was logged for the current loss */
     bool rebind_free; /* nothing has the device open, so even a driver that clings to open devices can be rebound */
     unsigned char config[256];
     size_t config_len;
@@ -104,7 +105,7 @@ extern struct zssd_config zssd_cfg;
 /* What a process holding the device means for a power-off. */
 enum holder_verdict { HV_MIGRATE, HV_STOP, HV_ALLOW, HV_FREEZE, HV_BLOCK };
 struct holder_facts {
-    bool registered;     /* started under the ZSS layer */
+    bool registered;     /* started under ZSS_AirLock */
     bool migratable;
     bool display_server;
     bool listed_service; /* in stop_services */

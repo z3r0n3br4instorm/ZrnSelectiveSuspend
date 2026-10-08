@@ -38,7 +38,7 @@ enum holder_verdict holder_verdict(const struct holder_facts *f, const char **wh
         /* Cannot be moved, but can wait where it is, like any process outside the layer. */
         if (f->freezable)
             return HV_FREEZE;
-        *why = "it uses something the ZSS layer cannot move";
+        *why = "it uses something ZSS_AirLock cannot move";
         return HV_BLOCK;
     }
     if (f->listed_service)
@@ -57,7 +57,7 @@ enum holder_verdict holder_verdict(const struct holder_facts *f, const char **wh
      */
     if (f->freezable)
         return HV_FREEZE;
-    *why = "not started under the ZSS layer";
+    *why = "not started under ZSS_AirLock";
     return HV_BLOCK;
 }
 
