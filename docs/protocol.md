@@ -75,6 +75,7 @@ The answer to `migrate`, `evacuate`, `restore` or `resume`. Exactly one is sent 
 | Field | Type | Meaning |
 | :--- | :--- | :--- |
 | `detached` | string | comma-separated addresses of GPUs that are currently detached; the layer does not load their drivers |
+| `software` | bool | whether this daemon may send applications to the software renderer; the layer then counts it among the GPUs whose common capabilities it reports |
 
 ### `migrate`
 Leave a GPU.

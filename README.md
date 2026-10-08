@@ -78,8 +78,16 @@ Consequences worth knowing:
 
 - Only applications started under the layer can be moved. Anything else that
   holds the GPU is frozen while it is off, or blocks a detach.
-- The layer offers Vulkan 1.0 with swapchains. Programs that need a newer
-  Vulkan, and OpenGL programs, are not covered by it.
+- The layer offers Vulkan 1.1 with swapchains and a short list of
+  extensions. Chromium runs under it and can be moved between the NVIDIA and
+  Intel GPUs while it draws (see
+  [`docs/applications/chromium.md`](docs/applications/chromium.md)). Programs
+  that need Vulkan 1.2 or more, and OpenGL programs, are not covered yet.
+- What a program is offered is what every GPU it may be moved to has, so that
+  nothing it enables can hold it on one card. On the reference laptop that
+  withholds seven features of the NVIDIA card. `ZSS_PROFILE=native` offers
+  each GPU's own instead; a program that uses the difference is then parked
+  rather than moved.
 - A card that vanishes without warning is noticed by the kernel module within
   about a tenth of a second, marked disconnected, and its driver told through
   the kernel's PCI error-recovery handlers if it has them, or frozen if it is
@@ -125,7 +133,7 @@ The installer puts `zssd`, `zssctl` and `zss-run` under `/usr/local`, creates a
 To power a GPU off under a running desktop, the NVIDIA driver needs the
 wake-on-touch patch in [`patches/`](patches/). The installer offers to apply it
 through DKMS when the driver version is one the patch has been validated
-against (470.256.02 so far, patch revision 4); it then survives kernel updates, and a hook
+against (470.256.02 so far, patch revision 5); it then survives kernel updates, and a hook
 re-applies it after a driver update. The stock modules are kept and restored at
 boot if the patched driver does not load. `zss-nvidia-patch status` shows where
 things stand, and `zss-nvidia-patch remove` puts the stock driver back.
@@ -252,14 +260,26 @@ build/src/zssctl/zssctl detach 0000:01:00.0
 build/src/zssctl/zssctl attach 0000:01:00.0
 ```
 
-Applications run under the layer see a Vulkan 1.0 device. Programs that need a
+Applications run under the layer see a Vulkan 1.1 device. Programs that need a
 newer Vulkan version do not start under it yet.
+
+A browser, started on the dedicated GPU. `zss-run` recognises a program built
+on Chromium (a browser, an Electron application) and adds the two switches
+that make it draw through Vulkan; `--plain` leaves the arguments alone and
+`--print` shows what would be run:
+
+```sh
+build/src/layer/zss-run chromium
+```
 
 | Variable | Effect |
 | :--- | :--- |
 | `ZSS_SOCKET` | Socket of the daemon to talk to (default `/run/zss/zssd.sock`) |
 | `ZSS_DEBUG` | Makes the layer log what it loads and why a device is not migratable |
 | `ZSS_ALLOW_SOFTWARE` | Lets a parked application resume on a software renderer |
+| `ZSS_START_ON` | The GPU a program starts on: `dedicated` (what `zss-run` uses by default: the discrete card), a PCI address, part of a GPU's name, or `any`. `zss-run --on GPU` sets it. The other GPUs are not listed to the program but it can still be moved to them |
+| `ZSS_PROFILE` | `portable` (default): each GPU reports what all GPUs the program may be moved to have. `native`: each reports its own |
+| `ZSS_VULKAN` | `1.0` makes the layer present Vulkan 1.0 only, as it did before |
 | `ZSS_REAL_DRIVER_FILES` | Colon-separated driver manifests for the layer to use instead of the system's |
 | `ZSS_RETAIN` | Where uploaded textures are kept so they survive a lost GPU: `disk` (default), `ram`, or `off` |
 | `ZSS_RETAIN_LIMIT_MB`, `ZSS_RETAIN_QUEUE_MB` | Size cap of the store (4096) and of data waiting to be written (256) |

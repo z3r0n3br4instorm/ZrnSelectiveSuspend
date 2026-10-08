@@ -145,8 +145,14 @@ blocking the power-off. Guards added: the terminal the command was typed in is
 never frozen, the idle timer never freezes anything, and a plain detach still
 refuses.
 
-**Status: built.** Tested with a file-backed device and in QEMU; freezing a
-real GPU client across a real power cut has not been tried.
+**Tried on the laptop by the author**, with `glxgears`: "it successfully
+halted it and resumed it, but the colors were glitched". So the freeze and
+thaw of a real GPU client across a real power cut works, and what the client
+had in video memory does not come back intact. The NVIDIA driver is running
+with `PreserveVideoMemoryAllocations` off, which is the likely reason; that
+has not been confirmed by switching it on.
+
+**Status: built.** The process survives; its picture is not yet right.
 
 ## 11. Every program under the ZSS layer
 
@@ -328,3 +334,343 @@ author asks for a log there.
 **Status: built, unproven.** This entry is its first use. Whether it fires by
 itself in a later session has not been seen yet.
 
+## 22. Newer Vulkan, OpenGL, and real applications
+
+**As proposed.** "my next target is to get newer vulkan versions and opengl
+versions work with this and run real applications under this, like a browser
+or something like zed editor". It picks up idea 11 ("shouldn't all the
+programs start under the zss layer ?") from the other end: make the layer
+able to carry them.
+
+**What came of it.** Not started. What was established when it was raised:
+the layer offers Vulkan 1.0 today; the laptop's two real drivers both stop at
+1.2 and only the software renderer goes further; and Mesa's Zink driver, which
+runs OpenGL on top of Vulkan, is installed. The proposed route is therefore
+one piece of work and not two: widen the layer's Vulkan to what Zink needs,
+and OpenGL programs come along through Zink.
+
+The author then corrected a doubt raised in reply ("zed works with
+acceleration"): Zed runs on this laptop's Vulkan 1.2 hardware, so it is a fair
+target and not out of reach. The work was written up the same day as the
+change `zss-vulkan-12-and-opengl`: 40 tasks, starting with a survey of what
+Zed, Firefox and Zink actually ask of Vulkan.
+
+While the surveys were being made the author added an observation of their
+own: "i could never start helium or firefox under the nvidia card with
+prime-run, it will always fall back to software rendering instead of using the
+accelerator", and asked for the cause of Zink refusing the NVIDIA driver to be
+found first. It was: current Zink requires two Vulkan extensions the 470
+driver does not have. The browser question was narrowed but not closed (the
+driver's side of `prime-run` works, and Firefox does open the NVIDIA device).
+
+Then Chromium was started on the NVIDIA card with two Vulkan flags and the
+author saw it work: "holy crap acceleration works, with that flags, this means
+it works right ? anyways lets implement the vulkan and opengl stuff now". It
+did mean that: a Chromium-based browser draws on the card that way, with no
+`prime-run`.
+
+The implementation went by what Chromium needed rather than by the plan's
+order. The layer now offers Vulkan 1.1; reports to each program only what
+every GPU it may be moved to has (the "portable profile"); rebuilds a
+program's swapchain on the new GPU itself, where before it told the program
+to; and carries the contents of the window's images across. On 8 October 2026
+Chromium, started with `zss-run --on nvidia`, was moved from the NVIDIA card
+to the Intel GPU and back while drawing, with the same GPU process throughout
+and correct window captures on each. That was done against a dry-run daemon:
+the programs were moved, the card's power was not touched.
+
+Not done: Vulkan 1.2, OpenGL through Zink, Zed, Firefox, and Chromium through
+a real `zssctl off`.
+
+**Status: partly built.** A browser moves between the two GPUs; the rest of
+the target is open.
+
+## 23. The fans go to full speed when the card is off
+
+**As proposed.** "when i turn off the GPU the  fans are ramping up to full
+speed", with the instruction to stop the other work and find out why.
+
+**What came of it.** The cause was outside the project. The fan daemon,
+`mbpfan`, had been patched locally to watch the card's temperature sensors
+too. With the card's power cut those sensors read -127 °C, the firmware's "no
+sensor", and `mbpfan` stored the reading as an unsigned number: an enormous
+temperature, so full speed. It was patched to ignore such readings, rebuilt
+and installed, and the fans followed the real temperature again.
+
+They were still loud, for a real reason: the settings called for full speed
+at 70 °C and the processor sat near that under a video call. The author had
+the limit moved to 80.
+
+One thing it leaves for the project: cutting a card's power makes its sensors
+vanish, and other software on the machine may be reading them.
+
+**Status: built.** The case of the card being switched off while the patched
+`mbpfan` is already running has not been watched yet.
+
+## 24. Supply missing features in the shim: software, or another GPU
+
+**As proposed.** "this is a shim right, so we can alter these calls, on nvidia
+too if there are features that are not available in for the card that a
+browser is required, lets just use software for them and make them work, and
+if there is another GPU that has those features, we'll route those calls only
+for that GPU and route the other calls to the main GPU", said about the
+features the portable profile withholds.
+
+**What came of it.** Not built; answered with what is possible. The first
+half holds: the layer sees every call and every shader, so a feature a driver
+lacks can be supplied by rewriting what the application asks into what the
+driver has. That is the open decision about Zink (task 1.7: the NVIDIA driver
+lacks dynamic rendering, and the layer could lower it to render passes), and
+it is how 64-bit and 16-bit integers in shaders could be offered on the Intel
+GPU.
+
+The second half, sending single calls to a second GPU or to software, does
+not hold for drawing: a draw reads and writes the same images as the draws
+around it, and two GPUs here share no memory, so every switch would copy the
+frame's images through main memory. Whole programs can run on another GPU or
+in software, and already do.
+
+It also turned out that nothing was missing for the browser: the withheld
+features are ones the NVIDIA card has and the Intel GPU lacks, and Chromium
+ran without them.
+
+**Status: open.** Recommended as the way to settle task 1.7; not started.
+
+## 25. `zss-run` means the dedicated GPU
+
+**As proposed.** "wait we dont even need the --on command, if im using zss-run
+that means im using it to run a program in nvidia GPU, so it should by default
+use dedicated GPU by default (nvidia, radeon)". Before it: "if the provided
+address is not a GPU then error out, PCI address is not a GPU. zss-run is just
+for GPUs, log that ... remembner we are currently building this for a GPU but
+our long term goal is any PCI card".
+
+**What came of it.** Built the same day. `zss-run PROGRAM` starts the program
+on the discrete GPU and lists only that one to it; `--on` remains for naming
+another (an address, part of a name, or "any"). An address that is not a
+display controller is refused with "PCI address is not a GPU", one that does
+not exist with its own message, and each run says in one line where the
+program is being started and that only GPUs are managed for now. If the
+dedicated GPU is powered off the program is offered the others instead.
+
+**Status: built.**
+
+## 26. Lie to the application about what the device supports
+
+**As proposed.** "it will lie to the applicatiob by saying yes this device
+supports what you are asking, for and then launch it, its fine if it crashes
+but applications like chromium will work", offered as the way to start a
+browser under `zss-run` without its two Vulkan flags, in place of the launcher
+adding them.
+
+**What came of it.** Not built; checked first. A browser started without the
+flags does not ask the layer for anything it could be lied to about: Chromium
+under `zss-run` with no flags created no Vulkan device at all. It draws through
+OpenGL, which the layer does not see. The flags are what make it use Vulkan in
+the first place.
+
+Where lying does apply is one step further on: sending the browser's OpenGL
+through Mesa's Zink, which turns it into Vulkan, and having the layer claim
+the two extensions Zink insists on and the NVIDIA driver lacks. Claimed and
+not backed, Zink's first drawing call would have nowhere to go; so there the
+lie has to be backed by the rewrite proposed under idea 24.
+
+**Status: open.** Depends on the OpenGL route (tasks 1.7 and 6).
+
+## 27. Add the browser's Vulkan switches automatically
+
+**As proposed.** After the cause of the software fallback was found: "ayyo if
+thats the issue, then check what card the display is driven by, if its not
+the dedicated, add those flags automatically", and then "this should be done
+to chromium based applications as well, it should auto detect if the launching
+applicaiton is a chromium based one, and then apply it".
+
+**What came of it.** Built, with one change. `zss-run` recognises a program
+built on Chromium by the two runtime files that sit beside its binary,
+following launcher scripts and small launcher programs to find it, and adds
+`--use-angle=vulkan --enable-features=Vulkan`. On this laptop it recognises
+`chromium`, `helium-browser`, `code` and `teams-for-linux`, and leaves
+`vkcube`, `zed` and `glxgears` alone. `zss-run chromium`, with nothing else,
+was then moved from the NVIDIA card to the Intel GPU and back.
+
+The change: the check of which card drives the display was left out. A
+Chromium program without the switches draws through OpenGL, and then it is
+not on the layer at all, whichever card drives the display; so under
+`zss-run` the switches are always needed.
+
+This reverses the answer to idea 26, where the author had rejected the
+launcher adding the flags: once the cause was known, they asked for it.
+
+**Status: built.** Only `chromium` itself has been run this way.
+
+## 28. Cut the power under a running browser
+
+**As proposed.** "okay then, the happy path works , lets try to cut power to
+the GPU while a browser is running and see if it recovers".
+
+**What came of it.** Rehearsed first, not yet done for real. With a loss
+injected by the layer itself, Chromium's first two attempts ended with it
+restarting its GPU process: the layer still answered "out of date" on that
+path, and then could not make the new swapchain while the window's old one
+existed on the same driver. Both were fixed, and the window is now asked to
+repaint after a loss, since a dead GPU's images cannot be read. After that the
+same GPU process carried on and the whole window was drawn, three runs out of
+three.
+
+The real cut was held back for the author's word, given as "go", and made on
+8 October 2026 (`docs/track-c/cut-chromium-2026-10-08.log`). The kernel module
+saw the loss in 0.1 s and froze the NVIDIA driver before it touched the dead
+card, as designed. Then everything that was inside the driver went to sleep
+in it: the browser's GPU threads, so the layer could not move the browser,
+and the X server, which uses the NVIDIA driver for the external outputs, so
+the desktop stopped. Chromium's own watchdog killed its GPU process after
+about 23 s. The author reported "sadly, it crashed the X server" and pressed
+the power key; the journal shows an orderly shutdown, and no crash of the X
+server, which was waiting on the frozen driver.
+
+What it shows: freezing the driver protects the kernel but holds everyone who
+calls it. That is the open question of the kernel shim's task 3b.10, now
+measured with a real application.
+
+**Status: tried, failed.** The browser did not survive and the desktop had to
+be restarted.
+
+## 29. Do something about the X server on a surprise disconnect
+
+**As proposed.** "well we need to do something about the X server crashing on
+suprise disconnect", after the browser cut (idea 28) and again after a
+diagnostic cut that ended in a restart ("crashed and restarted").
+
+**What came of it.** The diagnostic cut showed where the X server was: asleep
+inside the NVIDIA driver's modesetting call, because the kernel module had
+frozen that driver the moment the card went. The project's own notes held the
+other half: in the very first cut, before the freeze existed, the X server
+had survived. The freeze protects the kernel and makes an idle card
+recoverable, but with anything running on the card it stops the display
+server and keeps programs from being moved.
+
+So the freeze was made conditional. The kernel module has a switch
+(`on_loss`: freeze or leave), and the daemon sets it every second from who is
+using the card: leave while a program or an active output is on it, freeze
+while it is idle. With that installed, the cut was repeated under the browser
+(`docs/track-c/cut-chromium-2.log`): the X server paused for about five
+seconds and carried on, the layer rebuilt the browser's devices on the Intel
+GPU, and the browser kept drawing. No restart.
+
+Two things it did not fix. Chromium's GPU process was still killed by its own
+watchdog about 20 s after the cut and replaced by a new one: a thread stayed
+inside NVIDIA's library after the loss. And the card cannot come back until
+the display server is restarted, because the NVIDIA driver will not use a
+device it has seen vanish; `zssctl on` now says so.
+
+The diagnostic cut's restart was the tester's doing: the script asked the
+module to take the card back with the browser still alive, which is the one
+thing earlier runs had shown must not be done. The script now refuses that.
+
+**Status: built.** The desktop survives a loss under load; a seamless browser
+and the card's return without a log-out are open.
+
+## 30. Wrap the X server in the shim too
+
+**As proposed.** "what if we wrap x server as well ? ... we'll wrap X server
+around our zss shim , and on GPU disconnect it will use some software tricks to
+make the X server not crash". Followed by "will there be noticable lag".
+
+**What came of it.** Not built; answered. The shim stands between a program
+and its Vulkan driver, and the X server does not reach the card through
+Vulkan: it loads NVIDIA's own X driver, which speaks a private language to the
+kernel driver. There is nothing there to intercept and answer.
+
+The aim behind it was taken up in another form: get the NVIDIA driver out of
+the X server altogether. The main X server would run on the Intel GPU alone
+and see the external monitor as a virtual output; a helper owned by ZSS would
+show that output's frames on the card's real connector. A loss would then be
+a monitor unplugged, and the card could return without a log-out. Estimated
+cost: about one frame of delay on external monitors, unmeasured.
+
+**Status: open.** Superseded in its details by idea 31.
+
+## 31. A second X server on the GPU for its display
+
+**As proposed.** "instead when a display connected to the GPU we'll start
+another X Server running in the GPU, to that display and then connect that x
+server to the main xserver so we can drag windows around, what do you think".
+
+**What came of it.** Not built; taken as the way to do idea 30. Two X servers
+cannot share windows: a window belongs to one server, and nothing in X moves
+it to another. But a second X server on the card is a good helper for the
+display proxy: NVIDIA's own driver sets the mode and shows the picture, so
+nothing has to be proven about driving the ports without X. The main server
+keeps one desktop, with the external monitor as a virtual output of it, which
+is what makes dragging windows across work; the second server shows that
+output full screen. If the card is lost only the second server is affected,
+and bringing the card back is restarting it.
+
+**Status: open.** Recommended; a feasibility test comes first.
+
+## 32. A text screen when the display server goes down
+
+**As proposed.** "wait this is a bit out of scope right, The main ZSS core unit
+should be responsible for PCI-e devices hotplug, restore and keeping the system
+stable ... is there a way to show a TTY screen when X crashes ? with a message",
+with a draft: the subsystem detected a PCI-e or Lightridge change that affected
+the display server, the session is alive, a count and list of running
+programs, an attempt to get the display server back, and "Save Program states
+? (Y/N)".
+
+**What came of it.** Not built; answered. It set the scope: the second X
+server and the display proxy (ideas 30 and 31) are outside the core and were
+put aside. The daemon can already put progress on a text console (`zssctl off
+--console`), so the screen itself is a small addition where the display
+server has died or is still answering. Where it is hung, it holds the screen
+and will not hand it over; then the text screen can only come after the
+server is stopped, which closes the programs that have windows.
+
+"Save program states" was answered as not possible: nothing can save a
+graphical program's state from outside it. Real choices were proposed in its
+place (wait, or restart the display server).
+
+**Status: open.** Waiting for the author's choice of what the prompt offers.
+
+## 33. Freeze the driver always, and divert the calls it cannot answer
+
+**As proposed.** "our core should be able to handle both of this, as soon as
+the card gets lost, it should handle this by freezing the driver ... if the
+nvidia driver is frozen and it doesnt respond x calls, we should divert them
+somehow", and with it the question "I also doesnt understand how the X server
+doesnt crash when we suspend the card systematically".
+
+**What came of it.** Not built; answered and planned. The question's answer:
+in an orderly switch-off the X server does wait on the driver too, but only
+for a moment, because the driver saved its state first and the daemon powers
+the card back on for as long as the call takes. After a loss neither is true.
+
+The proposal was taken as a third behaviour for the frozen driver, beside
+"sleep" and "leave it to find out": stay frozen, so the driver never learns of
+the loss and the card stays recoverable, but refuse callers at once instead of
+putting them to sleep. Calls cannot be answered for the driver, whose language
+is private; they can be turned away. Whether the X server takes a refusal in
+its stride is not known, and can be found out safely with the card powered,
+where a freeze is undone by a thaw.
+
+Written the same day, on the author's "do it": revision 5 of the driver patch
+(the gate refuses with an error while frozen and refusing; closing a file is
+still put off until the thaw), a third value `refuse` for the kernel module's
+`on_loss`, a daemon setting `loss_while_busy` that picks it, and a test that
+freezes the driver in its refusing way with the card powered, asks the display
+server for the things that send it into the driver, and thaws. The driver
+compiles and the ten suites pass.
+
+Installed and run once that evening, with the card powered. The display
+server answered every display query at once while the driver refused (18
+callers turned away, no stall), which is what the proposal needed to be true.
+The thaw afterwards stopped the machine: the driver's resume decided the card
+had "fallen off the bus" although it was powered. The first explanation given
+(the kernel module misreading the resume as a loss) was disproved by a second
+run with the module out of the way, which failed the same way; the author
+reported "froze and had to restart X again". Why a refusing freeze cannot be
+thawed where a plain one could the day before is not known yet.
+
+**Status: built, half working.** Refusal does what was wanted while the card
+is away. The thaw after it fails, cause unknown; the daemon's setting stays at
+`leave`.

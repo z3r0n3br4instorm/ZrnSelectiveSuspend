@@ -66,6 +66,8 @@ Everything is under `/sys/kernel/zss/`, root only.
 | `PCI/iommu` | `yes` or `no` |
 | `PCI/answers` | `1` if the device answers on the bus right now |
 | `PCI/needs_rebind` | `1` after a loss the driver could not be told about |
+| `PCI/on_loss` | What happens to the driver when the device goes silent: `freeze` (default), `refuse` or `leave`. Frozen, the driver never learns of the loss and can be given the device back, but everything that calls it sleeps until then, the display server included. Refusing, it is frozen in the same way and turns callers away with an error at once: programs can be moved, the display server is not held, and the driver can still be thawed (needs a driver that offers `nv_zss_freeze_refusing()`, which is revision 5 of the NVIDIA patch; otherwise it is frozen plainly). Left, the driver finds out by itself, and one that cannot recover a lost device has to be reloaded. The daemon writes `freeze` while the device is idle and its `loss_while_busy` setting (`leave` unless configured) while anything is running on it |
+| `PCI/driver_refusing` | `1` while the driver is frozen and refusing |
 | `PCI/driver_frozen` | `1` while the driver is frozen because the device went silent |
 | `PCI/test_fault` | fault switches for the `test` backend only |
 

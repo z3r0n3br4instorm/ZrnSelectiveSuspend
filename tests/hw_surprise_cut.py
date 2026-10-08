@@ -14,12 +14,17 @@ application, does the application live, does the display server answer.
 
 Every observation is written and synced at once, so the log survives a crash.
 
-Usage: sudo python3 hw_surprise_cut.py check|cut|restore LOGFILE APP_PID
+Usage: sudo python3 hw_surprise_cut.py check|cut|restore|diagnose LOGFILE APP_PID
        (DISPLAY and XAUTHORITY of the session in the environment)
 
   check    look, and say whether everything is in place; change nothing
   cut      switch the power rail off and observe for 20 s; nothing is restored
   restore  switch the rail on again and ask the kernel module to take the device back
+  diagnose cut the rail, record where the X server and the application wait
+           (state, wait channel and kernel stack of every thread), then switch
+           the rail back on after 4 s and ask the module to take the device
+           back, recording again: so that a desktop stopped by the loss comes
+           back by itself, and the log says what stopped it
 """
 import glob
 import os
@@ -113,6 +118,33 @@ def x_answers():
         return f"cannot ask ({e.strerror})"
 
 
+def waits(pid, who):
+    """Where each thread of a process is: its state, what it waits on, and its kernel stack."""
+    if not pid or not os.path.exists(f"/proc/{pid}"):
+        say(f"  {who}: not running")
+        return
+    for task in sorted(glob.glob(f"/proc/{pid}/task/*"), key=lambda p: int(p.rsplit("/", 1)[1])):
+        stat = read(task + "/stat").rsplit(")", 1)[-1].split()
+        name = read(task + "/comm")
+        stack = " < ".join(l.split(" ", 1)[-1].split("+")[0] for l in read(task + "/stack").split("\n")[:8] if l)
+        if stat[0] != "S" or "nv" in stack or "zss" in stack or "down" in stack:
+            say(f"  {who} thread {task.rsplit('/', 1)[1]} ({name}) state {stat[0]} wchan {read(task + '/wchan')}: {stack}")
+    say(f"  {who}: {len(glob.glob(f'/proc/{pid}/task/*'))} thread(s); those not shown sleep in user space waits")
+
+
+def stuck():
+    """Every thread on the machine in uninterruptible sleep."""
+    found = 0
+    for task in glob.glob("/proc/[0-9]*/task/[0-9]*"):
+        stat = read(task + "/stat").rsplit(")", 1)[-1].split()
+        if stat and stat[0] == "D":
+            found += 1
+            stack = " < ".join(l.split(" ", 1)[-1].split("+")[0] for l in read(task + "/stack").split("\n")[:6] if l)
+            say(f"  uninterruptible: {task} ({read(task + '/comm')}): {stack}")
+    if not found:
+        say("  no thread on the machine is in uninterruptible sleep")
+
+
 class Kmsg:
     def __init__(self):
         self.fd = os.open("/dev/kmsg", os.O_RDONLY | os.O_NONBLOCK)
@@ -180,6 +212,44 @@ def main():
         say("observation over; the rail is still OFF and nothing was restored")
         say(f"summary: loss seen by the module after {seen_lost}, application moved after {seen_moved}, "
             f"application {app_state()}, X {x_answers()}")
+        return 0
+
+    if MODE == "diagnose":
+        xorg = int(subprocess.run(["pidof", "-s", "Xorg"], capture_output=True, text=True).stdout.strip() or 0)
+        look(kmsg, "before")
+        say(f"DIAGNOSE: cutting the rail; X server pid {xorg}; the rail comes back on by itself after 4 s")
+        t = time.time()
+        port(base + GMUX_POWER, 1)
+        port(base + GMUX_POWER, 0)
+        for at in (0.5, 2.0):
+            time.sleep(max(0, at - (time.time() - t)))
+            say(f"+{time.time() - t:5.2f}s: module={read(KMOD + '/state')} driver_frozen={read(KMOD + '/driver_frozen')}")
+            waits(xorg, "X server")
+            waits(APP, "application")
+            stuck()
+        time.sleep(max(0, 4.0 - (time.time() - t)))
+        say("switching the power rail back on")
+        port(base + GMUX_POWER, 1)
+        port(base + GMUX_POWER, 3)
+        for _ in range(30):
+            time.sleep(0.1)
+            if bus() != "ffff":
+                break
+        if read(KMOD + "/driver_frozen") == "1" and APP and os.path.exists(f"/proc/{APP}"):
+            # Resuming a frozen driver under a program that was drawing on the card took the machine down twice.
+            say("the driver is frozen and the application still exists: NOT asking the module to take the device back")
+        else:
+            say(f"bus now reads {bus()}; asking the kernel module to take the device back")
+            try:
+                with open(KMOD + "/power", "w") as f:
+                    f.write("on")
+                say("the module accepted")
+            except OSError as e:
+                say(f"the module refused: {e.strerror}: {read(KMOD + '/last_error')}")
+        for at in (6.0, 10.0):
+            time.sleep(max(0, at - (time.time() - t)))
+            look(kmsg, f"+{time.time() - t:5.2f}s")
+            waits(xorg, "X server")
         return 0
 
     if MODE == "restore":

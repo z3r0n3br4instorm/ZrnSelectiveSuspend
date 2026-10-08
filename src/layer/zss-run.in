@@ -1,12 +1,133 @@
 #!/bin/sh
 # SPDX-License-Identifier: GPL-2.0-only
 # Runs a program with the ZSS graphics layer as its only Vulkan driver, which
-# is what makes the program migratable. Usage: zss-run <program> [args...]
+# is what makes the program migratable.
+#
+# Usage: zss-run [--on GPU] [--plain] [--print] <program> [args...]
+#
+# The program starts on the dedicated GPU (the NVIDIA or Radeon card of a
+# machine that also has an integrated one). --on names another: a PCI address
+# (0000:01:00.0), part of a GPU's name (intel), or "any" to let the program
+# choose among all of them. Wherever it starts, it can be moved.
+#
+# A program built on Chromium (a browser, an Electron application) draws
+# through OpenGL unless told otherwise, and the layer is a Vulkan driver: it
+# would never be asked. Such a program is recognised by the files that sit
+# beside its binary and is given the two switches that make it draw through
+# Vulkan. --plain leaves the program's arguments alone. --print shows the
+# command that would be run and runs nothing.
+#
+# ZSS manages GPUs only for now. Other PCI cards are a goal, not a feature.
 manifest="${ZSS_MANIFEST:-@MANIFEST@}"
-if [ $# -eq 0 ]; then
-    echo "usage: zss-run <program> [args...]" >&2
+
+usage() {
+    echo "usage: zss-run [--on GPU] [--plain] [--print] <program> [args...]" >&2
+    echo "  Starts the program on the dedicated GPU, or on the one --on names" >&2
+    echo "  (a PCI address, part of a GPU's name, or \"any\")." >&2
+    echo "  A Chromium-based program is given the switches that make it draw" >&2
+    echo "  through Vulkan; --plain leaves its arguments alone." >&2
+    echo "  --print shows what would be run, and runs nothing." >&2
+    echo "  zss-run is for GPUs: other PCI cards are not managed yet." >&2
     exit 2
+}
+
+on="${ZSS_START_ON:-dedicated}"
+plain=""
+print=""
+while :; do
+    case "$1" in
+    --on) [ $# -ge 2 ] || usage; on="$2"; shift 2 ;;
+    --plain) plain=1; shift ;;
+    --print) print=1; shift ;;
+    *) break ;;
+    esac
+done
+[ $# -gt 0 ] || usage
+
+# Chromium's runtime keeps these two files beside the binary, whatever the
+# program built on it is called.
+chromium_dir() {
+    [ -e "$1/icudtl.dat" ] && { [ -e "$1/v8_context_snapshot.bin" ] || [ -e "$1/snapshot_blob.bin" ]; }
+}
+
+# Whether a file is such a binary, or a launcher (a script, or a small
+# program) that names one. Launchers are followed three deep.
+chromium_based() {
+    local f t
+    f="$(readlink -f "$1" 2>/dev/null)" || return 1
+    [ -f "$f" ] || return 1
+    chromium_dir "$(dirname "$f")" && return 0
+    [ "$2" -lt 3 ] || return 1
+    [ "$(stat -c %s "$f" 2>/dev/null || echo 9999999)" -le 1048576 ] || return 1
+    for t in $(grep -ao '/[A-Za-z0-9_.+/-]*' "$f" 2>/dev/null | sort -u); do
+        [ "$t" != "$f" ] || continue
+        if [ -d "$t" ]; then
+            chromium_dir "$t" && return 0
+        elif [ -f "$t" ] && [ -x "$t" ]; then
+            case "$t" in /bin/*|/usr/bin/env|/usr/bin/*sh|/usr/bin/cat|/usr/bin/sed|/usr/bin/grep) continue ;; esac
+            chromium_based "$t" $(($2 + 1)) && return 0
+        fi
+    done
+    return 1
+}
+
+# A PCI address has to be a card that is there, and a display controller.
+case "$on" in
+[0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F]:[0-9a-fA-F][0-9a-fA-F]:[0-9a-fA-F][0-9a-fA-F].[0-7])
+    dev="${ZSS_SYSFS_PCI:-/sys/bus/pci/devices}/$on"
+    if [ ! -e "$dev/class" ]; then
+        echo "zss-run: $on: there is no PCI device at that address" >&2
+        exit 2
+    fi
+    case "$(cat "$dev/class")" in
+    0x03*) ;;
+    *)
+        echo "zss-run: $on: PCI address is not a GPU (zss-run is for GPUs; other PCI cards are not managed yet)" >&2
+        exit 2
+        ;;
+    esac
+    ;;
+esac
+
+case "$on" in
+dedicated) where="the dedicated GPU" ;;
+any) where="a GPU of its own choosing" ;;
+*) where="GPU $on" ;;
+esac
+note=""
+for a in "$@"; do
+    # Someone who names the drawing backend is steering the program already.
+    case "$a" in --use-angle=*|--use-gl=*) plain=1 ;; esac
+done
+if [ -z "$plain" ] && prog="$(command -v "$1" 2>/dev/null)" && chromium_based "$prog" 0; then
+    # A second --enable-features would replace the program's own, so Vulkan joins the one that is there.
+    angle=1 feature=1 n=$# i=0
+    for a in "$@"; do
+        case "$a" in
+        --use-angle=*) angle="" ;;
+        --enable-features=*) feature="" ;;
+        esac
+    done
+    while [ $i -lt $n ]; do
+        a="$1"; shift; i=$((i + 1))
+        case "$a" in
+        --enable-features=*Vulkan*) ;;
+        --enable-features=*) a="$a,Vulkan" ;;
+        esac
+        set -- "$@" "$a"
+    done
+    [ -z "$angle" ] || set -- "$@" --use-angle=vulkan
+    [ -z "$feature" ] || set -- "$@" --enable-features=Vulkan
+    note="; it is built on Chromium, so it is told to draw through Vulkan"
 fi
+
+if [ -n "$print" ]; then
+    echo "ZSS_START_ON=$on VK_DRIVER_FILES=$manifest $*"
+    exit 0
+fi
+[ -n "$ZSS_QUIET" ] || echo "zss-run: starting $(basename "$1") on $where (GPUs only for now)$note" >&2
+
+export ZSS_START_ON="$on"
 export VK_DRIVER_FILES="$manifest"
 export VK_ICD_FILENAMES="$manifest"
 exec "$@"

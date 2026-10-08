@@ -32,6 +32,18 @@ Status words: **built** (exists and tested somewhere), **built, unproven**
 | 19 | [Freeze the driver the moment the card disappears](ideas.md#19-freeze-the-driver-the-moment-the-card-disappears) | partly built |
 | 20 | [Keep this log](ideas.md#20-keep-this-log) | built |
 | 21 | [A skill that keeps the log by itself](ideas.md#21-a-skill-that-keeps-the-log-by-itself) | built, unproven |
+| 22 | [Newer Vulkan, OpenGL, and real applications](ideas.md#22-newer-vulkan-opengl-and-real-applications) | partly built |
+| 23 | [The fans go to full speed when the card is off](ideas.md#23-the-fans-go-to-full-speed-when-the-card-is-off) | built |
+| 24 | [Supply missing features in the shim: software, or another GPU](ideas.md#24-supply-missing-features-in-the-shim-software-or-another-gpu) | open |
+| 25 | [`zss-run` means the dedicated GPU](ideas.md#25-zss-run-means-the-dedicated-gpu) | built |
+| 26 | [Lie to the application about what the device supports](ideas.md#26-lie-to-the-application-about-what-the-device-supports) | open |
+| 27 | [Add the browser's Vulkan switches automatically](ideas.md#27-add-the-browsers-vulkan-switches-automatically) | built |
+| 28 | [Cut the power under a running browser](ideas.md#28-cut-the-power-under-a-running-browser) | tried, failed |
+| 29 | [Do something about the X server on a surprise disconnect](ideas.md#29-do-something-about-the-x-server-on-a-surprise-disconnect) | built |
+| 30 | [Wrap the X server in the shim too](ideas.md#30-wrap-the-x-server-in-the-shim-too) | set aside |
+| 31 | [A second X server on the GPU for its display](ideas.md#31-a-second-x-server-on-the-gpu-for-its-display) | set aside |
+| 32 | [A text screen when the display server goes down](ideas.md#32-a-text-screen-when-the-display-server-goes-down) | open |
+| 33 | [Freeze the driver always, and divert the calls it cannot answer](ideas.md#33-freeze-the-driver-always-and-divert-the-calls-it-cannot-answer) | built, half working |
 
 Standing constraints the author set along the way, which shaped several of the
 answers: external displays must keep working (so the NVIDIA driver stays loaded

@@ -98,6 +98,7 @@ void zss_obj_unref(struct zss_obj *o)
         free(o->u.img.ret);
         free(o->u.img.layout);
         free(o->u.img.saved);
+        free(o->u.img.pending);
         break;
     case ZK_DSET: slots_free(o); break;
     case ZK_CMDBUF: zss_cmd_reset(o); free(o->u.cb.refs); break;
@@ -221,7 +222,8 @@ bool zss_families_fit(const struct zss_dev *dev, const struct zss_gpu *gpu)
 VkResult zss_dev_create_real(struct zss_dev *dev, struct zss_gpu *gpu)
 {
     static const float prio[16] = { 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1 };
-    static const char *const swapchain_ext[] = { VK_KHR_SWAPCHAIN_EXTENSION_NAME };
+    const char *exts[17];
+    uint32_t nexts = 0;
     VkDeviceQueueCreateInfo qci[ZSS_MAX_FAMILIES];
     VkDeviceCreateInfo ci = { .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO };
     VkCommandPoolCreateInfo pci = {
@@ -256,10 +258,13 @@ VkResult zss_dev_create_real(struct zss_dev *dev, struct zss_gpu *gpu)
     ci.queueCreateInfoCount = dev->nreq;
     ci.pQueueCreateInfos = qci;
     ci.pEnabledFeatures = &dev->features;
-    if (dev->want_swapchain) {
-        ci.enabledExtensionCount = 1;
-        ci.ppEnabledExtensionNames = swapchain_ext;
-    }
+    ci.pNext = dev->feat_chain;
+    if (dev->want_swapchain)
+        exts[nexts++] = VK_KHR_SWAPCHAIN_EXTENSION_NAME;
+    for (uint32_t i = 0; i < dev->nexts; i++)
+        exts[nexts++] = dev->exts[i];
+    ci.enabledExtensionCount = nexts;
+    ci.ppEnabledExtensionNames = exts;
 
     r = gpu->drv->fn.CreateDevice(pd, &ci, NULL, &dev->real);
     if (r != VK_SUCCESS)
@@ -361,9 +366,48 @@ VKAPI_ATTR VkResult VKAPI_CALL zss_CreateDevice(VkPhysicalDevice pd, const VkDev
     dev->migratable = true;
     if (ci->pEnabledFeatures)
         dev->features = *ci->pEnabledFeatures;
-    for (uint32_t i = 0; i < ci->enabledExtensionCount; i++)
+    {
+        /* Features may also come chained, either all of them or the newer ones only. */
+        VkPhysicalDeviceFeatures chained;
+        bool had;
+
+        dev->feat_chain = zss_feats_keep(ci->pNext, &chained, &had);
+        if (had)
+            dev->features = chained;
+    }
+    {
+        /*
+         * Something the GPU has but its group does not was never offered. An
+         * application that asks for it anyway is told so, with the GPU that
+         * caused it, rather than being let onto a device it could never leave.
+         */
+        const VkBool32 *want = (const VkBool32 *)&dev->features, *own = (const VkBool32 *)&gpu->features;
+        char why[400] = "";
+
+        for (size_t k = 0; k < sizeof(dev->features) / sizeof(VkBool32) && !why[0]; k++) {
+            const struct zss_gpu *lacking = want[k] && own[k] ? zss_profile_feature_lacking(gpu, k) : NULL;
+
+            if (lacking)
+                snprintf(why, sizeof(why), "%s is not in the portable profile: %s lacks it", zss_feature_name(k),
+                         lacking->props.deviceName);
+        }
+        if (why[0] || !zss_feats_in_profile(gpu, dev->feat_chain, why, sizeof(why))) {
+            zss_log("device on %s refused: %s. ZSS_PROFILE=native offers each GPU's own features instead",
+                    gpu->props.deviceName, why);
+            zss_feats_free(dev->feat_chain);
+            free(dev);
+            zss_leave();
+            return VK_ERROR_FEATURE_NOT_PRESENT;
+        }
+    }
+    for (uint32_t i = 0; i < ci->enabledExtensionCount; i++) {
+        const char *offered = zss_offered_ext_named(ci->ppEnabledExtensionNames[i]);
+
         if (!strcmp(ci->ppEnabledExtensionNames[i], VK_KHR_SWAPCHAIN_EXTENSION_NAME))
             dev->want_swapchain = true;
+        else if (offered && dev->nexts < 16)
+            dev->exts[dev->nexts++] = offered;
+    }
     for (uint32_t i = 0; i < ci->queueCreateInfoCount && i < ZSS_MAX_FAMILIES; i++) {
         dev->req[dev->nreq].family = ci->pQueueCreateInfos[i].queueFamilyIndex;
         dev->req[dev->nreq++].count = ci->pQueueCreateInfos[i].queueCount;
@@ -371,6 +415,7 @@ VKAPI_ATTR VkResult VKAPI_CALL zss_CreateDevice(VkPhysicalDevice pd, const VkDev
 
     r = zss_dev_create_real(dev, gpu);
     if (r != VK_SUCCESS) {
+        zss_feats_free(dev->feat_chain);
         free(dev);
         zss_leave();
         return r;
@@ -379,6 +424,8 @@ VKAPI_ATTR VkResult VKAPI_CALL zss_CreateDevice(VkPhysicalDevice pd, const VkDev
     dev->next_dev = zss_devices;
     zss_devices = dev;
     pthread_mutex_unlock(&zss_lock);
+    zss_dbg("device created on %s (%u extension(s) beyond the swapchain%s)", gpu->props.deviceName, dev->nexts,
+            dev->want_swapchain ? "" : ", no swapchain");
     zss_control_state_changed();
     *out = (VkDevice)dev;
     zss_leave();
@@ -417,6 +464,7 @@ VKAPI_ATTR void VKAPI_CALL zss_DestroyDevice(VkDevice device, const VkAllocation
         zss_obj_unref(dev->head);
     }
     pthread_mutex_unlock(&zss_lock);
+    zss_feats_free(dev->feat_chain);
     free(dev->queues);
     free(dev);
     zss_control_state_changed();
@@ -757,14 +805,29 @@ VkResult zss_real_create(struct zss_dev *dev, struct zss_obj *o)
         return real_image(dev, o);
     case ZK_VIEW: {
         VkImageViewCreateInfo ci = o->u.view.ci;
+        VkSamplerYcbcrConversionInfo conv;
 
         ci.image = ZREAL(VkImage, ci.image);
+        ci.pNext = zss_chain_real(ci.pNext, &conv, sizeof(conv));
         r = dev->fn.CreateImageView(d, &ci, NULL, OUT(VkImageView));
         break;
     }
-    case ZK_SAMPLER:
-        r = dev->fn.CreateSampler(d, &o->u.sampler.ci, NULL, OUT(VkSampler));
+    case ZK_SAMPLER: {
+        VkSamplerCreateInfo ci = o->u.sampler.ci;
+        VkSamplerYcbcrConversionInfo conv;
+
+        ci.pNext = zss_chain_real(ci.pNext, &conv, sizeof(conv));
+        r = dev->fn.CreateSampler(d, &ci, NULL, OUT(VkSampler));
         break;
+    }
+    case ZK_YCBCR: {
+        /* Looked up when needed: only a driver of Vulkan 1.1 has it, and only such a one is asked. */
+        PFN_vkCreateSamplerYcbcrConversion make = (PFN_vkCreateSamplerYcbcrConversion)
+            dev->gpu->drv->fn.GetDeviceProcAddr(d, "vkCreateSamplerYcbcrConversion");
+
+        r = make ? make(d, &o->u.ycbcr.ci, NULL, OUT(VkSamplerYcbcrConversion)) : VK_ERROR_FEATURE_NOT_PRESENT;
+        break;
+    }
     case ZK_SHADER:
         r = dev->fn.CreateShaderModule(d, &o->u.shader.ci, NULL, OUT(VkShaderModule));
         break;
@@ -895,6 +958,15 @@ void zss_real_destroy(struct zss_dev *dev, enum zss_kind kind, struct zss_real *
     case ZK_IMAGE: if (h && !r->borrowed) dev->fn.DestroyImage(d, H(VkImage), NULL); break;
     case ZK_VIEW: if (h) dev->fn.DestroyImageView(d, H(VkImageView), NULL); break;
     case ZK_SAMPLER: if (h) dev->fn.DestroySampler(d, H(VkSampler), NULL); break;
+    case ZK_YCBCR:
+        if (h && dev->gpu) {
+            PFN_vkDestroySamplerYcbcrConversion unmake = (PFN_vkDestroySamplerYcbcrConversion)
+                dev->gpu->drv->fn.GetDeviceProcAddr(d, "vkDestroySamplerYcbcrConversion");
+
+            if (unmake)
+                unmake(d, H(VkSamplerYcbcrConversion), NULL);
+        }
+        break;
     case ZK_SHADER: if (h) dev->fn.DestroyShaderModule(d, H(VkShaderModule), NULL); break;
     case ZK_RENDERPASS: if (h) dev->fn.DestroyRenderPass(d, H(VkRenderPass), NULL); break;
     case ZK_FRAMEBUFFER: if (h) dev->fn.DestroyFramebuffer(d, H(VkFramebuffer), NULL); break;
@@ -973,6 +1045,7 @@ static void destroy_obj(struct zss_dev *dev, struct zss_obj *o)
 DESTROY_FN(Buffer, VkBuffer)
 DESTROY_FN(ImageView, VkImageView)
 DESTROY_FN(Sampler, VkSampler)
+DESTROY_FN(SamplerYcbcrConversion, VkSamplerYcbcrConversion)
 DESTROY_FN(ShaderModule, VkShaderModule)
 DESTROY_FN(RenderPass, VkRenderPass)
 DESTROY_FN(Framebuffer, VkFramebuffer)
@@ -1050,7 +1123,7 @@ VKAPI_ATTR VkResult VKAPI_CALL zss_CreateImage(VkDevice device, const VkImageCre
 
     (void)alloc;
     o->u.img.ci = *ci;
-    o->u.img.ci.pNext = NULL;
+    o->u.img.ci.pNext = zss_chain_keep(o, ci->pNext);
     o->u.img.ci.pQueueFamilyIndices =
         ci->sharingMode == VK_SHARING_MODE_CONCURRENT
             ? zss_obj_dup(o, ci->pQueueFamilyIndices, ci->queueFamilyIndexCount * sizeof(uint32_t))
@@ -1142,7 +1215,7 @@ VKAPI_ATTR VkResult VKAPI_CALL zss_CreateImageView(VkDevice device, const VkImag
 
     (void)alloc;
     o->u.view.ci = *ci;
-    o->u.view.ci.pNext = NULL;
+    o->u.view.ci.pNext = zss_chain_keep(o, ci->pNext);
     zss_obj_dep(o, ZOBJ(ci->image));
     return finish_create(dev, o, (uint64_t *)out);
 }
@@ -1155,7 +1228,33 @@ VKAPI_ATTR VkResult VKAPI_CALL zss_CreateSampler(VkDevice device, const VkSample
 
     (void)alloc;
     o->u.sampler.ci = *ci;
-    o->u.sampler.ci.pNext = NULL;
+    o->u.sampler.ci.pNext = zss_chain_keep(o, ci->pNext);
+    return finish_create(dev, o, (uint64_t *)out);
+}
+
+/*
+ * A sampler Ycbcr conversion is a fixed recipe for turning sampled values
+ * into colour, referred to from samplers and image views. It is values only,
+ * so rebuilding one on another GPU is creating it again from the same recipe.
+ */
+VKAPI_ATTR VkResult VKAPI_CALL zss_CreateSamplerYcbcrConversion(VkDevice device,
+                                                                const VkSamplerYcbcrConversionCreateInfo *ci,
+                                                                const VkAllocationCallbacks *alloc,
+                                                                VkSamplerYcbcrConversion *out)
+{
+    ENTER(device);
+    struct zss_obj *o;
+
+    (void)alloc;
+    if (zss_format_planar(ci->format)) {
+        /* Reported as unsupported by the format queries; see zss_format_planar(). */
+        *out = VK_NULL_HANDLE;
+        zss_leave();
+        return VK_ERROR_FORMAT_NOT_SUPPORTED;
+    }
+    o = zss_obj_new(dev, ZK_YCBCR);
+    o->u.ycbcr.ci = *ci;
+    o->u.ycbcr.ci.pNext = NULL;
     return finish_create(dev, o, (uint64_t *)out);
 }
 
@@ -1670,10 +1769,18 @@ static void pipeline_copy(struct zss_obj *o, const VkGraphicsPipelineCreateInfo 
         ci->pVertexInputState = v;
     }
     DUP1(pInputAssemblyState);
+    if (ci->pInputAssemblyState)
+        ((VkPipelineInputAssemblyStateCreateInfo *)ci->pInputAssemblyState)->pNext = NULL;
     DUP1(pRasterizationState);
+    if (ci->pRasterizationState)
+        ((VkPipelineRasterizationStateCreateInfo *)ci->pRasterizationState)->pNext =
+            zss_chain_keep(o, src->pRasterizationState->pNext);
     if (src->pRasterizationState && src->pRasterizationState->rasterizerDiscardEnable)
         raster = false;
     ci->pTessellationState = tess ? zss_obj_dup(o, src->pTessellationState, sizeof(*src->pTessellationState)) : NULL;
+    if (ci->pTessellationState)
+        ((VkPipelineTessellationStateCreateInfo *)ci->pTessellationState)->pNext =
+            zss_chain_keep(o, src->pTessellationState->pNext);
 
     /* With rasterisation off the remaining pointers may legally be garbage. */
     if (!raster) {
@@ -1699,6 +1806,8 @@ static void pipeline_copy(struct zss_obj *o, const VkGraphicsPipelineCreateInfo 
             ci->pMultisampleState = m;
         }
         DUP1(pDepthStencilState);
+        if (ci->pDepthStencilState)
+            ((VkPipelineDepthStencilStateCreateInfo *)ci->pDepthStencilState)->pNext = NULL;
         if (src->pColorBlendState) {
             VkPipelineColorBlendStateCreateInfo *c = zss_obj_dup(o, src->pColorBlendState, sizeof(*c));
 

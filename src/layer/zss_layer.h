@@ -62,7 +62,10 @@
     X(CmdCopyQueryPoolResults) X(CmdPushConstants) X(CmdBeginRenderPass) X(CmdNextSubpass) \
     X(CmdEndRenderPass) X(CmdExecuteCommands) \
     X(CreateSwapchainKHR) X(DestroySwapchainKHR) X(GetSwapchainImagesKHR) \
-    X(AcquireNextImageKHR) X(QueuePresentKHR)
+    X(AcquireNextImageKHR) X(QueuePresentKHR) \
+    /* VK_EXT_transform_feedback: NULL on a device that was not created with it. */ \
+    X(CmdBindTransformFeedbackBuffersEXT) X(CmdBeginTransformFeedbackEXT) X(CmdEndTransformFeedbackEXT) \
+    X(CmdBeginQueryIndexedEXT) X(CmdEndQueryIndexedEXT) X(CmdDrawIndirectByteCountEXT)
 
 struct zss_dev_fns {
 #define X(n) PFN_vk##n n;
@@ -78,6 +81,7 @@ struct zss_dev_fns {
     X(GetPhysicalDeviceMemoryProperties) X(GetPhysicalDeviceSparseImageFormatProperties) \
     X(EnumerateDeviceExtensionProperties) X(CreateDevice) X(GetDeviceProcAddr) \
     X(GetPhysicalDeviceProperties2) X(GetPhysicalDeviceProperties2KHR) \
+    X(GetPhysicalDeviceFeatures2) X(GetPhysicalDeviceFeatures2KHR) \
     X(DestroySurfaceKHR) X(GetPhysicalDeviceSurfaceSupportKHR) \
     X(GetPhysicalDeviceSurfaceCapabilitiesKHR) X(GetPhysicalDeviceSurfaceFormatsKHR) \
     X(GetPhysicalDeviceSurfacePresentModesKHR) \
@@ -135,12 +139,15 @@ struct zss_gpu {
     VkQueueFamilyProperties fam[ZSS_MAX_FAMILIES];
     uint32_t next;
     VkExtensionProperties *ext;
+    /* Read once when the GPU was found, for the portable profile (profile.c). */
+    VkFormatProperties *fmt; /* by core format number */
+    uint64_t *featbits;      /* two words per feature structure the layer knows (vk11.c) */
 };
 
 enum zss_kind {
     ZK_MEMORY, ZK_BUFFER, ZK_IMAGE, ZK_VIEW, ZK_SAMPLER, ZK_SHADER, ZK_RENDERPASS,
     ZK_FRAMEBUFFER, ZK_DSL, ZK_DPOOL, ZK_DSET, ZK_PLAYOUT, ZK_PCACHE, ZK_PIPELINE,
-    ZK_CPOOL, ZK_CMDBUF, ZK_FENCE, ZK_SEMAPHORE, ZK_SWAPCHAIN,
+    ZK_CPOOL, ZK_CMDBUF, ZK_FENCE, ZK_SEMAPHORE, ZK_SWAPCHAIN, ZK_YCBCR,
     /* Forwarded without tracking; using one makes the device non-migratable. */
     ZK_OPAQUE_EVENT, ZK_OPAQUE_QUERYPOOL, ZK_OPAQUE_BUFFERVIEW, ZK_OPAQUE_PIPELINE,
     ZK_COUNT
@@ -210,6 +217,9 @@ struct zss_obj {
             VkImageLayout *layout; /* [mip * arrayLayers + layer] */
             uint8_t *saved;
             VkDeviceSize saved_size;
+            /* A rebuilt swapchain's image: contents to put in it when the application first gets it (swapchain.c). */
+            uint8_t *pending;
+            VkDeviceSize pending_size;
             /* Retained uploads, indexed [(mip * arrayLayers + layer) * 2 + (stencil ? 1 : 0)]. */
             struct zss_ret *ret;
             bool carried;    /* holds GPU-generated contents that later frames depend on */
@@ -217,6 +227,7 @@ struct zss_obj {
         } img;
         struct { VkImageViewCreateInfo ci; } view;
         struct { VkSamplerCreateInfo ci; } sampler;
+        struct { VkSamplerYcbcrConversionCreateInfo ci; } ycbcr;
         struct { VkShaderModuleCreateInfo ci; } shader;
         struct { VkRenderPassCreateInfo ci; } rp;
         struct { VkFramebufferCreateInfo ci; } fb;
@@ -247,6 +258,13 @@ struct zss_obj {
             struct zss_obj **images;
             uint32_t nimages;
             bool retired;
+            /* Kept across a rebuild on another GPU (swapchain.c). Bit and index are the application's. */
+            uint32_t *real_of, *undo_real_of; /* application's image index -> the driver's */
+            uint64_t acquired;                /* acquired and not yet presented */
+            uint64_t fresh, undo_fresh;       /* not yet put in the layout the application believes */
+            uint32_t gen;                     /* counts rebuilds */
+            bool undo_valid;                  /* the build in progress rebuilt this swapchain */
+            uint64_t undo_pending;            /* images whose contents that rebuild took over */
         } sc;
     } u;
 };
@@ -300,6 +318,9 @@ struct zss_dev {
     bool dead;           /* recovery is impossible: the application gets the error */
     uint32_t generation; /* bumped every time the real device is replaced */
     int lost_contents;   /* objects zero-filled by the last recovery */
+    void *feat_chain;    /* feature structures enabled at creation, kept for every rebuild (vk11.c) */
+    const char *exts[16]; /* offered extensions the application enabled */
+    uint32_t nexts;
     struct zss_inflight inflight[ZSS_MAX_INFLIGHT]; /* oldest first */
     uint32_t ninflight;
 
@@ -316,6 +337,46 @@ ZSS_DEV_FNS(X)
 extern __typeof__(*(PFN_vkCreateDevice)0) zss_CreateDevice;
 
 /* Unwrapping. VK_NULL_HANDLE stays null. */
+/* Vulkan 1.1 (vk11.c). */
+struct zss_entry {
+    const char *name;
+    PFN_vkVoidFunction fn;
+};
+uint32_t zss_api_version(void);
+uint32_t zss_gpu_api_version(const struct zss_gpu *gpu);
+void *zss_feats_keep(const void *pnext, VkPhysicalDeviceFeatures *base, bool *had_base);
+void zss_feats_free(void *chain);
+bool zss_feats_supported(struct zss_gpu *gpu, const void *chain, char *reason, size_t rlen);
+uint32_t zss_offered_ext_count(void);
+const char *zss_offered_ext(uint32_t i);
+const char *zss_offered_ext_named(const char *name);
+void *zss_chain_keep(struct zss_obj *o, const void *pnext);
+void *zss_chain_real(const void *kept, void *scratch, size_t room);
+bool zss_format_planar(VkFormat f);
+extern __typeof__(*(PFN_vkCreateSamplerYcbcrConversion)0) zss_CreateSamplerYcbcrConversion;
+extern __typeof__(*(PFN_vkDestroySamplerYcbcrConversion)0) zss_DestroySamplerYcbcrConversion;
+void zss_feats_cache(struct zss_gpu *gpu, VkPhysicalDevice pd);
+bool zss_feats_in_profile(const struct zss_gpu *gpu, const void *chain, char *reason, size_t rlen);
+/* The portable profile (profile.c). */
+bool zss_profile_member(const struct zss_gpu *self, const struct zss_gpu *g);
+void zss_profile_cache(struct zss_gpu *gpu, VkPhysicalDevice pd);
+uint32_t zss_profile_api_version(const struct zss_gpu *self);
+void zss_profile_limits(const struct zss_gpu *self, VkPhysicalDeviceLimits *lim);
+void zss_profile_features(const struct zss_gpu *self, VkPhysicalDeviceFeatures *f);
+const struct zss_gpu *zss_profile_feature_lacking(const struct zss_gpu *self, size_t k);
+bool zss_profile_has_ext(const struct zss_gpu *self, const char *name);
+void zss_profile_format(const struct zss_gpu *self, VkFormat format, VkFormatProperties *p);
+bool zss_profile_format_usable(const struct zss_gpu *self, VkFormat format, VkImageTiling tiling);
+uint32_t zss_profile_families(const struct zss_gpu *self, VkQueueFamilyProperties *out);
+void zss_profile_describe(const struct zss_gpu *self);
+bool zss_control_software_allowed(void);
+const char *zss_feature_name(size_t k);
+PFN_vkVoidFunction zss_vk11_instance_proc(const char *name);
+PFN_vkVoidFunction zss_vk11_device_proc(const char *name);
+PFN_vkVoidFunction zss_instance_proc(const char *name);
+extern __typeof__(*(PFN_vkCmdSetDeviceMask)0) zss_CmdSetDeviceMask;
+extern __typeof__(*(PFN_vkCmdDispatchBase)0) zss_CmdDispatchBase;
+
 #define ZOBJ(handle) ((struct zss_obj *)(uintptr_t)(handle))
 #define ZREAL(T, handle) ((T)(uintptr_t)((handle) ? ZOBJ(handle)->r.h : 0))
 #define ZHANDLE(T, obj) ((T)(uintptr_t)(obj))
@@ -366,6 +427,11 @@ VkResult zss_backing_alloc(struct zss_dev *dev, const VkMemoryRequirements *req,
 void zss_dset_apply(struct zss_dev *dev, struct zss_obj *set);
 void zss_sync_to_device(struct zss_dev *dev, struct zss_obj *only_mem);
 void zss_sync_from_device(struct zss_dev *dev, struct zss_obj *only_mem);
+void zss_surface_repaint(struct zss_driver *drv, VkSurfaceKHR outer);
+bool zss_swapchain_rebuild(struct zss_dev *dev, struct zss_obj *sc);
+void zss_swapchain_rollback(struct zss_obj *sc);
+VkResult zss_image_bring_up(struct zss_dev *dev, struct zss_obj *img, const uint8_t *bytes, VkDeviceSize size);
+void zss_control_exclusive(void (*fn)(void *), void *arg);
 VkResult zss_util_begin(struct zss_dev *dev);
 VkResult zss_util_run(struct zss_dev *dev);
 VkImageAspectFlags zss_format_aspects(VkFormat f);

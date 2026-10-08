@@ -1,0 +1,9 @@
+<!doctype html><title>zss anim</title><body style="margin:0;background:#123">
+<!-- A page that changes every frame in one part and never in the rest; the frame number is in the title. -->
+<canvas id=c width=900 height=500></canvas><div id=t style="color:#fff;font:20px monospace"></div>
+<script>
+const c=document.getElementById('c'),x=c.getContext('2d');let n=0;
+function f(){n++;x.fillStyle='hsl('+(n%360)+',70%,45%)';x.fillRect(0,0,900,500);
+x.fillStyle='#fff';x.beginPath();x.arc(450+300*Math.cos(n/30),250+150*Math.sin(n/20),40,0,7);x.fill();
+document.getElementById('t').textContent='frame '+n;document.title='zss anim '+n;requestAnimationFrame(f)}f();
+</script>

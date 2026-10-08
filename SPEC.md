@@ -366,7 +366,7 @@ When re-energizing a GPU from a 0W cold state or reconnecting an eGPU:
 1. **Unannounced loss of a card in use.** Decide what a frozen driver does with callers other than the display server (sleeping keeps an application from being moved), then try closing the stuck programs before the driver is resumed.
 2. **Try the module on an open driver on real hardware** (`amdgpu`, `i915`/`xe` or `nouveau`), and settle how the display server is handled there.
 3. **Try the `acpi` backend** on a hybrid laptop that has firmware power resources.
-4. **A wider Vulkan surface in the layer** (beyond 1.0), and an OpenGL path, so that more applications can be moved rather than frozen.
+4. **A wider Vulkan surface in the layer**, and an OpenGL path, so that more applications can be moved rather than frozen. Vulkan 1.1, the portable profile and in-place swapchain rebuild are done, and Chromium moves between the two GPUs of the reference laptop (`zss-vulkan-12-and-opengl`, in progress). Vulkan 1.2, OpenGL through Zink, and a browser through a real power-off are next.
 5. **Notice a monitor plugged in while the card is off** (the gmux hot-plug interrupt on the reference laptop).
 
 ### Open, with no test bed yet

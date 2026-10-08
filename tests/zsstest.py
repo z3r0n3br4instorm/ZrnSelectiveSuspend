@@ -34,6 +34,9 @@ def quiet_env(extra=None):
     env = dict(os.environ)
     env.pop("ZSS_DEBUG", None)
     env["XDG_CACHE_HOME"] = CACHE
+    # The tests pick their GPU by name, among all of them; the launcher's default is the dedicated one only.
+    env["ZSS_START_ON"] = "any"
+    env["ZSS_QUIET"] = "1"
     if extra:
         env.update(extra)
     return env

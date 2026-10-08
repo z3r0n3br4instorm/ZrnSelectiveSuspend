@@ -17,6 +17,7 @@ enum zss_op {
     OP_COPY_BUFFER_TO_IMAGE, OP_COPY_IMAGE_TO_BUFFER, OP_UPDATE_BUFFER, OP_FILL_BUFFER,
     OP_CLEAR_COLOR, OP_CLEAR_DS, OP_CLEAR_ATTACHMENTS, OP_RESOLVE, OP_BARRIER, OP_PUSH_CONSTANTS,
     OP_BEGIN_RP, OP_NEXT_SUBPASS, OP_END_RP,
+    OP_BIND_XFB, OP_BEGIN_XFB, OP_END_XFB, OP_DRAW_BYTE_COUNT,
 };
 
 /* One uniform node; each op uses the fields it needs. */
@@ -238,6 +239,32 @@ static void exec(struct zss_dev *dev, VkCommandBuffer cb, const struct zss_cmd *
     case OP_END_RP:
         fn->CmdEndRenderPass(cb);
         break;
+    case OP_BIND_XFB: {
+        struct zss_obj **bufs = c->a[0];
+        VkBuffer real[8];
+
+        for (uint32_t i = 0; i < c->n[0] && i < 8; i++)
+            real[i] = R(VkBuffer, bufs[i]);
+        fn->CmdBindTransformFeedbackBuffersEXT(cb, c->u[0], c->n[0], real, c->a[1], c->a[2]);
+        break;
+    }
+    case OP_BEGIN_XFB:
+    case OP_END_XFB: {
+        /* Counter buffers are optional as a whole and one by one. */
+        struct zss_obj **bufs = c->a[0];
+        VkBuffer real[8];
+
+        for (uint32_t i = 0; bufs && i < c->n[0] && i < 8; i++)
+            real[i] = R(VkBuffer, bufs[i]);
+        if (c->op == OP_BEGIN_XFB)
+            fn->CmdBeginTransformFeedbackEXT(cb, c->u[0], c->n[0], bufs ? real : NULL, c->a[1]);
+        else
+            fn->CmdEndTransformFeedbackEXT(cb, c->u[0], c->n[0], bufs ? real : NULL, c->a[1]);
+        break;
+    }
+    case OP_DRAW_BYTE_COUNT:
+        fn->CmdDrawIndirectByteCountEXT(cb, c->u[0], c->u[1], R(VkBuffer, c->h[0]), c->s[0], c->u[2], c->u[3]);
+        break;
     }
 }
 
@@ -456,6 +483,16 @@ void zss_cmd_track_submit(struct zss_dev *dev, struct zss_obj *cb)
             if (c->h[0])
                 buffer_dirty(c->h[0]);
             break;
+        case OP_BIND_XFB:
+        case OP_END_XFB: {
+            /* What the GPU captured, and the counters saying how much, exist nowhere else. */
+            struct zss_obj **bufs = c->a[0];
+
+            for (uint32_t i = 0; bufs && i < c->n[0]; i++)
+                if (bufs[i])
+                    buffer_dirty(bufs[i]);
+            break;
+        }
         case OP_COPY_IMAGE:
         case OP_BLIT_IMAGE:
         case OP_RESOLVE:
@@ -1058,3 +1095,110 @@ VKAPI_ATTR void VKAPI_CALL zss_CmdExecuteCommands(VkCommandBuffer cmd, uint32_t 
     free(real);
     zss_leave();
 }
+
+/* ---- VK_EXT_transform_feedback ------------------------------------------------------- */
+
+VKAPI_ATTR void VKAPI_CALL zss_CmdBindTransformFeedbackBuffersEXT(VkCommandBuffer cmd, uint32_t first, uint32_t n,
+                                                                  const VkBuffer *bufs, const VkDeviceSize *offs,
+                                                                  const VkDeviceSize *sizes)
+{
+    CB(cmd);
+    struct zss_cmd *c = rec(cb, OP_BIND_XFB);
+    struct zss_obj **list = calloc(n ? n : 1, sizeof(*list));
+
+    c->u[0] = first;
+    c->n[0] = n;
+    for (uint32_t i = 0; i < n; i++)
+        list[i] = use(cb, H(bufs[i]));
+    c->a[0] = list;
+    c->a[1] = dup(offs, n * sizeof(*offs));
+    c->a[2] = dup(sizes, n * sizeof(*sizes));
+    RUN(c);
+}
+
+static void xfb_span(VkCommandBuffer cmd, enum zss_op op, uint32_t first, uint32_t n, const VkBuffer *bufs,
+                     const VkDeviceSize *offs)
+{
+    CB(cmd);
+    struct zss_cmd *c = rec(cb, op);
+
+    c->u[0] = first;
+    c->n[0] = n;
+    if (bufs && n) {
+        struct zss_obj **list = calloc(n, sizeof(*list));
+
+        for (uint32_t i = 0; i < n; i++)
+            list[i] = use(cb, H(bufs[i]));
+        c->a[0] = list;
+        c->a[1] = dup(offs, n * sizeof(*offs));
+    }
+    RUN(c);
+}
+
+VKAPI_ATTR void VKAPI_CALL zss_CmdBeginTransformFeedbackEXT(VkCommandBuffer cmd, uint32_t first, uint32_t n,
+                                                            const VkBuffer *bufs, const VkDeviceSize *offs)
+{
+    xfb_span(cmd, OP_BEGIN_XFB, first, n, bufs, offs);
+}
+
+VKAPI_ATTR void VKAPI_CALL zss_CmdEndTransformFeedbackEXT(VkCommandBuffer cmd, uint32_t first, uint32_t n,
+                                                          const VkBuffer *bufs, const VkDeviceSize *offs)
+{
+    xfb_span(cmd, OP_END_XFB, first, n, bufs, offs);
+}
+
+VKAPI_ATTR void VKAPI_CALL zss_CmdDrawIndirectByteCountEXT(VkCommandBuffer cmd, uint32_t instances, uint32_t first_instance,
+                                                           VkBuffer counter, VkDeviceSize counter_offset,
+                                                           uint32_t counter_start, uint32_t stride)
+{
+    CB(cmd);
+    struct zss_cmd *c = rec(cb, OP_DRAW_BYTE_COUNT);
+
+    c->u[0] = instances;
+    c->u[1] = first_instance;
+    c->h[0] = use(cb, H(counter));
+    c->s[0] = counter_offset;
+    c->u[2] = counter_start;
+    c->u[3] = stride;
+    RUN(c);
+}
+
+/* Query pools are not carried across (see OPAQUE_CREATE in device.c), so these pass straight through like the plain ones. */
+VKAPI_ATTR void VKAPI_CALL zss_CmdBeginQueryIndexedEXT(VkCommandBuffer cmd, VkQueryPool pool, uint32_t query,
+                                                       VkQueryControlFlags flags, uint32_t index)
+{
+    CB(cmd);
+    if (dev->fn.CmdBeginQueryIndexedEXT)
+        dev->fn.CmdBeginQueryIndexedEXT(REAL_CB, ZREAL(VkQueryPool, pool), query, flags, index);
+    zss_leave();
+}
+
+VKAPI_ATTR void VKAPI_CALL zss_CmdEndQueryIndexedEXT(VkCommandBuffer cmd, VkQueryPool pool, uint32_t query, uint32_t index)
+{
+    CB(cmd);
+    if (dev->fn.CmdEndQueryIndexedEXT)
+        dev->fn.CmdEndQueryIndexedEXT(REAL_CB, ZREAL(VkQueryPool, pool), query, index);
+    zss_leave();
+}
+
+/* ---- Vulkan 1.1 ---------------------------------------------------------------------- */
+
+VKAPI_ATTR void VKAPI_CALL zss_CmdSetDeviceMask(VkCommandBuffer cmd, uint32_t mask)
+{
+    /* There is one device in every group the layer presents, so the mask can only select it. */
+    (void)cmd; (void)mask;
+}
+
+VKAPI_ATTR void VKAPI_CALL zss_CmdDispatchBase(VkCommandBuffer cmd, uint32_t bx, uint32_t by, uint32_t bz, uint32_t x, uint32_t y,
+                                               uint32_t z)
+{
+    CB(cmd);
+    PFN_vkCmdDispatchBase real = dev->gpu ? (PFN_vkCmdDispatchBase)dev->gpu->drv->fn.GetDeviceProcAddr(dev->real, "vkCmdDispatchBase")
+                                           : NULL;
+
+    zss_dev_untracked(dev, "compute dispatch");
+    if (real)
+        real(REAL_CB, bx, by, bz, x, y, z);
+    zss_leave();
+}
+

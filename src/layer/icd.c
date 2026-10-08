@@ -194,6 +194,7 @@ static void gpu_fill(struct zss_driver *drv, struct zss_gpu *gpu, VkPhysicalDevi
     drv->fn.EnumerateDeviceExtensionProperties(pd, NULL, &gpu->next, NULL);
     gpu->ext = calloc(gpu->next ? gpu->next : 1, sizeof(*gpu->ext));
     drv->fn.EnumerateDeviceExtensionProperties(pd, NULL, &gpu->next, gpu->ext);
+    zss_profile_cache(gpu, pd);
 
     if (props2 && has_ext(gpu->ext, gpu->next, VK_EXT_PCI_BUS_INFO_EXTENSION_NAME)) {
         VkPhysicalDevicePCIBusInfoPropertiesEXT pci = {
@@ -612,6 +613,8 @@ static void zss_init(void)
     for (int i = 0; i < zss_ngpus; i++)
         zss_dbg("gpu %d: %s pci=%s driver=%s", i, zss_gpus[i]->props.deviceName,
                 zss_gpus[i]->pci[0] ? zss_gpus[i]->pci : "-", zss_gpus[i]->drv->lib);
+    for (int i = 0; i < zss_ngpus; i++)
+        zss_profile_describe(zss_gpus[i]);
     zss_control_state_changed();
 }
 
@@ -667,6 +670,37 @@ static void x_link_close(VkIcdWsiPlatform platform, void *link)
             disconnect(link);
         dlclose(lib);
     }
+}
+
+/*
+ * Asks the display server to have a window repainted, as it does when the
+ * window is uncovered. For when what the window's images held could not be
+ * carried over (the GPU was lost, nothing could be read from it): an
+ * application that redraws only what changed would leave the rest blank.
+ * X11 only; elsewhere nothing is done.
+ */
+void zss_surface_repaint(struct zss_driver *drv, VkSurfaceKHR outer)
+{
+    void *lib = dlopen("libxcb.so.1", RTLD_NOW | RTLD_NOLOAD);
+    unsigned (*clear_area)(void *, uint8_t, uint32_t, int16_t, int16_t, uint16_t, uint16_t) =
+        lib ? (unsigned (*)(void *, uint8_t, uint32_t, int16_t, int16_t, uint16_t, uint16_t))dlsym(lib, "xcb_clear_area") : NULL;
+    int (*flush)(void *) = lib ? (int (*)(void *))dlsym(lib, "xcb_flush") : NULL;
+
+    pthread_mutex_lock(&zss_lock);
+    for (int i = 0; clear_area && flush && i < ZSS_MAX_SURFACES; i++) {
+        struct zss_surface *c = &drv->surfaces[i];
+        void *conn = c->link ? c->link : c->platform == VK_ICD_WSI_PLATFORM_XCB ? (void *)c->native[0] : NULL;
+
+        if (c->outer != outer || !conn ||
+            (c->platform != VK_ICD_WSI_PLATFORM_XCB && c->platform != VK_ICD_WSI_PLATFORM_XLIB))
+            continue;
+        /* No size means the whole window; the flag asks for the expose events an uncovering would bring. */
+        clear_area(conn, 1, (uint32_t)c->native[1], 0, 0, 0, 0);
+        flush(conn);
+    }
+    pthread_mutex_unlock(&zss_lock);
+    if (lib)
+        dlclose(lib);
 }
 
 /*
@@ -893,7 +927,14 @@ static const char *const instance_exts[] = {
     VK_KHR_XCB_SURFACE_EXTENSION_NAME,
     VK_KHR_XLIB_SURFACE_EXTENSION_NAME,
     VK_KHR_WAYLAND_SURFACE_EXTENSION_NAME,
+    /* Folded into Vulkan 1.1; still asked for by name. Listed last: they are left out under ZSS_VULKAN=1.0. */
+    VK_KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_EXTENSION_NAME,
+    VK_KHR_EXTERNAL_MEMORY_CAPABILITIES_EXTENSION_NAME,
+    VK_KHR_EXTERNAL_FENCE_CAPABILITIES_EXTENSION_NAME,
+    VK_KHR_EXTERNAL_SEMAPHORE_CAPABILITIES_EXTENSION_NAME,
+    VK_KHR_DEVICE_GROUP_CREATION_EXTENSION_NAME,
 };
+#define ZSS_INSTANCE_EXTS_1_0 4
 
 static VkResult fill_exts(const char *const *names, uint32_t have, uint32_t *count,
                           VkExtensionProperties *props)
@@ -919,7 +960,9 @@ static VKAPI_ATTR VkResult VKAPI_CALL zss_EnumerateInstanceExtensionProperties(
 {
     if (layer)
         return VK_ERROR_LAYER_NOT_PRESENT;
-    return fill_exts(instance_exts, 4, count, props);
+    return fill_exts(instance_exts, zss_api_version() >= VK_API_VERSION_1_1
+                                        ? (uint32_t)(sizeof(instance_exts) / sizeof(instance_exts[0])) : ZSS_INSTANCE_EXTS_1_0,
+                     count, props);
 }
 
 static VKAPI_ATTR VkResult VKAPI_CALL zss_CreateInstance(const VkInstanceCreateInfo *ci,
@@ -945,6 +988,48 @@ static VKAPI_ATTR void VKAPI_CALL zss_DestroyInstance(VkInstance instance,
     free(instance);
 }
 
+/*
+ * Whether a GPU is shown to the application. ZSS_START_ON says where a
+ * program should start: "dedicated" (what zss-run asks for by default) is
+ * the discrete GPU, the card ZSS exists to manage; otherwise a PCI address
+ * or part of a GPU's name; "any" or nothing lists them all. A program that
+ * would choose for itself is then left no choice (browsers prefer the
+ * integrated GPU). The GPUs not listed stay places it can be moved to. If
+ * what was asked for is not present, powered off for instance, everything is
+ * listed: starting somewhere beats not starting.
+ */
+static bool start_match(const struct zss_gpu *gpu, const char *want)
+{
+    if (gpu->detached)
+        return false;
+    if (!strcmp(want, "dedicated"))
+        return gpu->props.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU;
+    return !strcmp(gpu->pci, want) || strcasestr(gpu->props.deviceName, want) != NULL;
+}
+
+static bool gpu_listed(const struct zss_gpu *gpu)
+{
+    static bool said;
+    const char *want = getenv("ZSS_START_ON");
+    const struct zss_gpu *first = NULL;
+
+    if (gpu->detached)
+        return false;
+    if (!want || !*want || !strcmp(want, "any"))
+        return true;
+    for (int i = 0; i < zss_ngpus && !first; i++)
+        if (start_match(zss_gpus[i], want))
+            first = zss_gpus[i];
+    if (!said) {
+        said = true;
+        if (first)
+            zss_log("starting on %s (%s)", first->props.deviceName, first->pci[0] ? first->pci : "no PCI address");
+        else
+            zss_log("no GPU matching \"%s\" is available; the program chooses among those that are", want);
+    }
+    return !first || start_match(gpu, want);
+}
+
 static VKAPI_ATTR VkResult VKAPI_CALL zss_EnumeratePhysicalDevices(VkInstance instance,
                                                                    uint32_t *count,
                                                                    VkPhysicalDevice *out)
@@ -954,7 +1039,7 @@ static VKAPI_ATTR VkResult VKAPI_CALL zss_EnumeratePhysicalDevices(VkInstance in
     (void)instance;
     zss_enter();
     for (int i = 0; i < zss_ngpus; i++)
-        if (!zss_gpus[i]->detached)
+        if (gpu_listed(zss_gpus[i]))
             have++;
     if (!out) {
         *count = have;
@@ -962,55 +1047,55 @@ static VKAPI_ATTR VkResult VKAPI_CALL zss_EnumeratePhysicalDevices(VkInstance in
         return VK_SUCCESS;
     }
     for (int i = 0; i < zss_ngpus && n < *count; i++)
-        if (!zss_gpus[i]->detached)
+        if (gpu_listed(zss_gpus[i]))
             out[n++] = (VkPhysicalDevice)zss_gpus[i];
     *count = n;
     zss_leave();
     return n < have ? VK_INCOMPLETE : VK_SUCCESS;
 }
 
-static VKAPI_ATTR void VKAPI_CALL zss_GetPhysicalDeviceProperties(VkPhysicalDevice pd,
+VKAPI_ATTR void VKAPI_CALL zss_GetPhysicalDeviceProperties(VkPhysicalDevice pd,
                                                                   VkPhysicalDeviceProperties *p)
 {
     *p = ((struct zss_gpu *)pd)->props;
-    /* Only the Vulkan 1.0 core is tracked, so that is what the device claims. */
-    p->apiVersion = VK_API_VERSION_1_0;
+    /* The version the layer tracks, or the lowest among the drivers of the group if that is lower. */
+    p->apiVersion = zss_profile_api_version((struct zss_gpu *)pd);
+    zss_profile_limits((struct zss_gpu *)pd, &p->limits);
 }
 
-static VKAPI_ATTR void VKAPI_CALL zss_GetPhysicalDeviceFeatures(VkPhysicalDevice pd,
+VKAPI_ATTR void VKAPI_CALL zss_GetPhysicalDeviceFeatures(VkPhysicalDevice pd,
                                                                 VkPhysicalDeviceFeatures *f)
 {
     *f = ((struct zss_gpu *)pd)->features;
     f->sparseBinding = f->sparseResidencyBuffer = f->sparseResidencyImage2D = VK_FALSE;
     f->sparseResidencyImage3D = f->sparseResidency2Samples = f->sparseResidency4Samples = VK_FALSE;
     f->sparseResidency8Samples = f->sparseResidency16Samples = f->sparseResidencyAliased = VK_FALSE;
+    zss_profile_features((struct zss_gpu *)pd, f);
 }
 
-static VKAPI_ATTR void VKAPI_CALL zss_GetPhysicalDeviceMemoryProperties(
+VKAPI_ATTR void VKAPI_CALL zss_GetPhysicalDeviceMemoryProperties(
     VkPhysicalDevice pd, VkPhysicalDeviceMemoryProperties *m)
 {
     *m = ((struct zss_gpu *)pd)->mem;
 }
 
-static VKAPI_ATTR void VKAPI_CALL zss_GetPhysicalDeviceQueueFamilyProperties(
+VKAPI_ATTR void VKAPI_CALL zss_GetPhysicalDeviceQueueFamilyProperties(
     VkPhysicalDevice pd, uint32_t *count, VkQueueFamilyProperties *props)
 {
     struct zss_gpu *gpu = (struct zss_gpu *)pd;
-    uint32_t n;
+    VkQueueFamilyProperties fam[ZSS_MAX_FAMILIES];
+    uint32_t have = zss_profile_families(gpu, fam), n;
 
     if (!props) {
-        *count = gpu->nfam;
+        *count = have;
         return;
     }
-    n = *count < gpu->nfam ? *count : gpu->nfam;
-    for (uint32_t i = 0; i < n; i++) {
-        props[i] = gpu->fam[i];
-        props[i].queueFlags &= VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT | VK_QUEUE_TRANSFER_BIT;
-    }
+    n = *count < have ? *count : have;
+    memcpy(props, fam, n * sizeof(*props));
     *count = n;
 }
 
-static VKAPI_ATTR void VKAPI_CALL zss_GetPhysicalDeviceFormatProperties(VkPhysicalDevice pd,
+VKAPI_ATTR void VKAPI_CALL zss_GetPhysicalDeviceFormatProperties(VkPhysicalDevice pd,
                                                                         VkFormat format,
                                                                         VkFormatProperties *p)
 {
@@ -1021,12 +1106,13 @@ static VKAPI_ATTR void VKAPI_CALL zss_GetPhysicalDeviceFormatProperties(VkPhysic
     gpu = gpu_effective((struct zss_gpu *)pd);
     real = zss_gpu_real(gpu);
     memset(p, 0, sizeof(*p));
-    if (real)
+    if (real && !zss_format_planar(format))
         gpu->drv->fn.GetPhysicalDeviceFormatProperties(real, format, p);
+    zss_profile_format((struct zss_gpu *)pd, format, p);
     zss_leave();
 }
 
-static VKAPI_ATTR VkResult VKAPI_CALL zss_GetPhysicalDeviceImageFormatProperties(
+VKAPI_ATTR VkResult VKAPI_CALL zss_GetPhysicalDeviceImageFormatProperties(
     VkPhysicalDevice pd, VkFormat format, VkImageType type, VkImageTiling tiling,
     VkImageUsageFlags usage, VkImageCreateFlags flags, VkImageFormatProperties *p)
 {
@@ -1037,7 +1123,7 @@ static VKAPI_ATTR VkResult VKAPI_CALL zss_GetPhysicalDeviceImageFormatProperties
     zss_enter();
     gpu = gpu_effective((struct zss_gpu *)pd);
     real = zss_gpu_real(gpu);
-    if (real)
+    if (real && !zss_format_planar(format) && zss_profile_format_usable((struct zss_gpu *)pd, format, tiling))
         r = gpu->drv->fn.GetPhysicalDeviceImageFormatProperties(real, format, type, tiling, usage,
                                                                  flags, p);
     zss_leave();
@@ -1056,13 +1142,19 @@ static VKAPI_ATTR void VKAPI_CALL zss_GetPhysicalDeviceSparseImageFormatProperti
 static VKAPI_ATTR VkResult VKAPI_CALL zss_EnumerateDeviceExtensionProperties(
     VkPhysicalDevice pd, const char *layer, uint32_t *count, VkExtensionProperties *props)
 {
-    static const char *const names[] = { VK_KHR_SWAPCHAIN_EXTENSION_NAME };
+    const char *names[17];
     struct zss_gpu *gpu = (struct zss_gpu *)pd;
+    uint32_t n = 0;
 
     if (layer)
         return VK_ERROR_LAYER_NOT_PRESENT;
-    return fill_exts(names, has_ext(gpu->ext, gpu->next, VK_KHR_SWAPCHAIN_EXTENSION_NAME) ? 1 : 0,
-                     count, props);
+    /* The swapchain, and whatever else the layer offers that this GPU's driver has too. */
+    if (has_ext(gpu->ext, gpu->next, VK_KHR_SWAPCHAIN_EXTENSION_NAME))
+        names[n++] = VK_KHR_SWAPCHAIN_EXTENSION_NAME;
+    for (uint32_t i = 0; i < zss_offered_ext_count() && n < 17; i++)
+        if (zss_profile_has_ext(gpu, zss_offered_ext(i)))
+            names[n++] = zss_offered_ext(i);
+    return fill_exts(names, n, count, props);
 }
 
 /* Resolves the GPU and real surface a surface query should go to. */
@@ -1102,10 +1194,29 @@ static VKAPI_ATTR VkResult VKAPI_CALL zss_GetPhysicalDeviceSurfaceSupportKHR(
     return r;
 }
 
+/*
+ * A window's surface, as the other GPUs of the group see it. What a swapchain
+ * may be like is each driver's own answer, and a swapchain made to one
+ * driver's answer has to be made again on another after a move. So these
+ * queries, too, give what all of them can do. A member whose driver cannot be
+ * reached now (its GPU is powered off) is left out: moving there later may
+ * then need the application to rebuild its swapchain.
+ */
+static bool surface_peer(struct zss_gpu *shown, struct zss_gpu *eff, int i, VkSurfaceKHR surface,
+                         struct zss_gpu **peer, VkPhysicalDevice *real, VkSurfaceKHR *rsurf)
+{
+    *peer = zss_gpus[i];
+    if (*peer == eff || !zss_profile_member(shown, *peer))
+        return false;
+    *real = zss_gpu_real(*peer);
+    return *real && (*peer)->drv->fn.GetPhysicalDeviceSurfaceCapabilitiesKHR &&
+           zss_surface_real((*peer)->drv, surface, rsurf) == VK_SUCCESS;
+}
+
 static VKAPI_ATTR VkResult VKAPI_CALL zss_GetPhysicalDeviceSurfaceCapabilitiesKHR(
     VkPhysicalDevice pd, VkSurfaceKHR surface, VkSurfaceCapabilitiesKHR *caps)
 {
-    struct zss_gpu *gpu;
+    struct zss_gpu *gpu, *peer;
     VkPhysicalDevice real;
     VkSurfaceKHR rsurf;
     VkResult r;
@@ -1114,6 +1225,25 @@ static VKAPI_ATTR VkResult VKAPI_CALL zss_GetPhysicalDeviceSurfaceCapabilitiesKH
     r = surface_target(pd, surface, &gpu, &real, &rsurf);
     if (r == VK_SUCCESS)
         r = gpu->drv->fn.GetPhysicalDeviceSurfaceCapabilitiesKHR(real, rsurf, caps);
+    for (int i = 0; r == VK_SUCCESS && i < zss_ngpus; i++) {
+        VkSurfaceCapabilitiesKHR c;
+
+        if (!surface_peer((struct zss_gpu *)pd, gpu, i, surface, &peer, &real, &rsurf) ||
+            peer->drv->fn.GetPhysicalDeviceSurfaceCapabilitiesKHR(real, rsurf, &c) != VK_SUCCESS)
+            continue;
+        if (c.minImageCount > caps->minImageCount)
+            caps->minImageCount = c.minImageCount;
+        /* Zero means no upper limit. */
+        if (c.maxImageCount && (!caps->maxImageCount || c.maxImageCount < caps->maxImageCount))
+            caps->maxImageCount = c.maxImageCount;
+        if (c.maxImageArrayLayers < caps->maxImageArrayLayers)
+            caps->maxImageArrayLayers = c.maxImageArrayLayers;
+        caps->supportedUsageFlags &= c.supportedUsageFlags;
+        /* Drivers may have no alpha mode in common for a window; one has to be reported, so then it is this GPU's. */
+        if (caps->supportedCompositeAlpha & c.supportedCompositeAlpha)
+            caps->supportedCompositeAlpha &= c.supportedCompositeAlpha;
+        caps->supportedTransforms = (caps->supportedTransforms & c.supportedTransforms) | caps->currentTransform;
+    }
     zss_leave();
     return r;
 }
@@ -1121,33 +1251,89 @@ static VKAPI_ATTR VkResult VKAPI_CALL zss_GetPhysicalDeviceSurfaceCapabilitiesKH
 static VKAPI_ATTR VkResult VKAPI_CALL zss_GetPhysicalDeviceSurfaceFormatsKHR(
     VkPhysicalDevice pd, VkSurfaceKHR surface, uint32_t *count, VkSurfaceFormatKHR *formats)
 {
-    struct zss_gpu *gpu;
+    struct zss_gpu *gpu, *peer;
     VkPhysicalDevice real;
     VkSurfaceKHR rsurf;
+    VkSurfaceFormatKHR all[128], theirs[128];
+    uint32_t n = 128, kept = 0;
     VkResult r;
 
     zss_enter();
     r = surface_target(pd, surface, &gpu, &real, &rsurf);
     if (r == VK_SUCCESS)
-        r = gpu->drv->fn.GetPhysicalDeviceSurfaceFormatsKHR(real, rsurf, count, formats);
+        r = gpu->drv->fn.GetPhysicalDeviceSurfaceFormatsKHR(real, rsurf, &n, all);
+    if (r < 0) {
+        zss_leave();
+        return r;
+    }
+    for (int i = 0; i < zss_ngpus; i++) {
+        uint32_t nt = 128;
+
+        if (!surface_peer((struct zss_gpu *)pd, gpu, i, surface, &peer, &real, &rsurf) ||
+            peer->drv->fn.GetPhysicalDeviceSurfaceFormatsKHR(real, rsurf, &nt, theirs) < 0)
+            continue;
+        kept = 0;
+        for (uint32_t k = 0; k < n; k++)
+            for (uint32_t t = 0; t < nt; t++)
+                if (all[k].format == theirs[t].format && all[k].colorSpace == theirs[t].colorSpace) {
+                    all[kept++] = all[k];
+                    break;
+                }
+        n = kept;
+    }
     zss_leave();
-    return r;
+    if (!formats) {
+        *count = n;
+        return VK_SUCCESS;
+    }
+    kept = *count < n ? *count : n;
+    memcpy(formats, all, kept * sizeof(*formats));
+    *count = kept;
+    return kept < n ? VK_INCOMPLETE : VK_SUCCESS;
 }
 
 static VKAPI_ATTR VkResult VKAPI_CALL zss_GetPhysicalDeviceSurfacePresentModesKHR(
     VkPhysicalDevice pd, VkSurfaceKHR surface, uint32_t *count, VkPresentModeKHR *modes)
 {
-    struct zss_gpu *gpu;
+    struct zss_gpu *gpu, *peer;
     VkPhysicalDevice real;
     VkSurfaceKHR rsurf;
+    VkPresentModeKHR all[16], theirs[16];
+    uint32_t n = 16, kept = 0;
     VkResult r;
 
     zss_enter();
     r = surface_target(pd, surface, &gpu, &real, &rsurf);
     if (r == VK_SUCCESS)
-        r = gpu->drv->fn.GetPhysicalDeviceSurfacePresentModesKHR(real, rsurf, count, modes);
+        r = gpu->drv->fn.GetPhysicalDeviceSurfacePresentModesKHR(real, rsurf, &n, all);
+    if (r < 0) {
+        zss_leave();
+        return r;
+    }
+    for (int i = 0; i < zss_ngpus; i++) {
+        uint32_t nt = 16;
+
+        if (!surface_peer((struct zss_gpu *)pd, gpu, i, surface, &peer, &real, &rsurf) ||
+            peer->drv->fn.GetPhysicalDeviceSurfacePresentModesKHR(real, rsurf, &nt, theirs) < 0)
+            continue;
+        kept = 0;
+        for (uint32_t k = 0; k < n; k++)
+            for (uint32_t t = 0; t < nt; t++)
+                if (all[k] == theirs[t]) {
+                    all[kept++] = all[k];
+                    break;
+                }
+        n = kept;
+    }
     zss_leave();
-    return r;
+    if (!modes) {
+        *count = n;
+        return VK_SUCCESS;
+    }
+    kept = *count < n ? *count : n;
+    memcpy(modes, all, kept * sizeof(*modes));
+    *count = kept;
+    return kept < n ? VK_INCOMPLETE : VK_SUCCESS;
 }
 
 static VKAPI_ATTR VkBool32 VKAPI_CALL zss_PresentationSupport(void)
@@ -1157,10 +1343,6 @@ static VKAPI_ATTR VkBool32 VKAPI_CALL zss_PresentationSupport(void)
 
 /* ---- entry-point table ------------------------------------------------- */
 
-struct zss_entry {
-    const char *name;
-    PFN_vkVoidFunction fn;
-};
 
 static VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL zss_GetDeviceProcAddr(VkDevice device,
                                                                       const char *name);
@@ -1194,7 +1376,15 @@ PFN_vkVoidFunction zss_device_proc(const char *name)
     for (size_t i = 0; i < sizeof(device_entries) / sizeof(device_entries[0]); i++)
         if (!strcmp(device_entries[i].name, name))
             return device_entries[i].fn;
-    return NULL;
+    return zss_vk11_device_proc(name);
+}
+
+PFN_vkVoidFunction zss_instance_proc(const char *name)
+{
+    for (size_t i = 0; i < sizeof(instance_entries) / sizeof(instance_entries[0]); i++)
+        if (!strcmp(instance_entries[i].name, name))
+            return instance_entries[i].fn;
+    return zss_vk11_instance_proc(name);
 }
 
 static VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL zss_GetDeviceProcAddr(VkDevice device,
@@ -1214,11 +1404,10 @@ ZSS_EXPORT VKAPI_ATTR VkResult VKAPI_CALL vk_icdNegotiateLoaderICDInterfaceVersi
 VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL vk_icdGetInstanceProcAddr(VkInstance instance,
                                                                    const char *name)
 {
+    PFN_vkVoidFunction fn = zss_instance_proc(name);
+
     (void)instance;
-    for (size_t i = 0; i < sizeof(instance_entries) / sizeof(instance_entries[0]); i++)
-        if (!strcmp(instance_entries[i].name, name))
-            return instance_entries[i].fn;
-    return zss_device_proc(name);
+    return fn ? fn : zss_device_proc(name);
 }
 
 VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL vk_icdGetPhysicalDeviceProcAddr(VkInstance instance,

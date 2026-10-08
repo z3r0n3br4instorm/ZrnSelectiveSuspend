@@ -1,0 +1,15 @@
+{
+    "file_format_version": "1.1.0",
+    "layer": {
+        "name": "VK_LAYER_ZSS_survey",
+        "type": "GLOBAL",
+        "library_path": "@LIB@",
+        "api_version": "1.4.0",
+        "implementation_version": "1",
+        "description": "ZrnSelectiveSuspend: records what an application asks of Vulkan",
+        "functions": {
+            "vkGetInstanceProcAddr": "zss_survey_GetInstanceProcAddr",
+            "vkGetDeviceProcAddr": "zss_survey_GetDeviceProcAddr"
+        }
+    }
+}

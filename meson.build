@@ -20,7 +20,10 @@ wsi_headers = [
   dependency('wayland-client').partial_dependency(compile_args: true, includes: true),
 ]
 
+python = import('python').find_installation('python3')
+
 subdir('src/common')
+subdir('tools')
 subdir('src/layer')
 subdir('src/daemon')
 subdir('src/zssctl')

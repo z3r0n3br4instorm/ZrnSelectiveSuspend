@@ -22,6 +22,13 @@ static bool holding; /* gate held because something is parked */
 /* One relocation at a time, whether the daemon asked for it or a thread hit a lost device. */
 static pthread_mutex_t op_lock = PTHREAD_MUTEX_INITIALIZER;
 
+static bool software_ok; /* the daemon may send applications to the software renderer */
+
+bool zss_control_software_allowed(void)
+{
+    return software_ok || getenv("ZSS_ALLOW_SOFTWARE") != NULL;
+}
+
 bool zss_control_detached(const char *pci)
 {
     return pci[0] && strstr(detached, pci) != NULL;
@@ -147,6 +154,25 @@ static void release(void)
         holding = false;
         zss_hold_end();
     }
+}
+
+/*
+ * Runs `fn` with every application thread out of the layer, as a migration
+ * does. For an application thread that needs a moment alone with the device;
+ * it must not be inside the gate itself when it calls this.
+ */
+void zss_control_exclusive(void (*fn)(void *), void *arg)
+{
+    bool was = false;
+
+    pthread_mutex_lock(&op_lock);
+    was = holding;
+    if (!was)
+        zss_hold_begin();
+    fn(arg);
+    if (!was)
+        zss_hold_end();
+    pthread_mutex_unlock(&op_lock);
 }
 
 static int reply_lost_contents = -1; /* set by a recovery, sent with its outcome */
@@ -457,8 +483,10 @@ void zss_control_start(void)
     send_msg(&o);
 
     if (zss_recv(&reader, &m, 2000) == 1) {
-        if (zj_is(&m, "welcome"))
+        if (zj_is(&m, "welcome")) {
             snprintf(detached, sizeof(detached), "%s", zj_str(&m, "detached", ""));
+            software_ok = zj_bool(&m, "software", false);
+        }
         zj_free(&m);
     }
     if (pthread_create(&tid, NULL, control_thread, NULL) == 0)

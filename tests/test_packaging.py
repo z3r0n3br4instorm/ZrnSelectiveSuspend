@@ -158,9 +158,9 @@ def install_into_a_staging_root_and_remove():
 
     # Asked for, the module's source lands where DKMS expects it, complete.
     rc, out = run(os.path.join(PKG, "install.sh"), "--build", BUILD, "--destdir", root, "--kernel-module")
-    src = os.path.join(root, "usr/src/zss-0.1.0")
+    src = os.path.join(root, "usr/src/zss-0.2.0")
     check(rc == 0 and sorted(os.listdir(src)) == ["Kbuild", "Makefile", "dkms.conf", "zss.c"], "module source not staged: " + out)
-    check('PACKAGE_VERSION="0.1.0"' in open(os.path.join(src, "dkms.conf")).read(), "dkms.conf and the directory disagree")
+    check('PACKAGE_VERSION="0.2.0"' in open(os.path.join(src, "dkms.conf")).read(), "dkms.conf and the directory disagree")
 
     rc, out = run(os.path.join(PKG, "uninstall.sh"), "--destdir", root)
     check(rc == 0 and tree(root) == ["etc/zss/zssd.conf"], f"uninstall left more than the configuration: {tree(root)}")

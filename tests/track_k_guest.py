@@ -285,6 +285,67 @@ def a_pulled_card_is_reported():
     write(f"{ROOT}/unmanage", CARD)
 
 
+def driver_refuses_when_told():
+    """Told to refuse on a loss, the module freezes the driver in its refusing way, and the thaw ends that."""
+    hooks = os.path.join(BUILD, "kmod", "zss_test_hooks.ko")
+    par = "/sys/module/zss_test_hooks/parameters/"
+    unload()
+    check(subprocess.run(["insmod", hooks]).returncode == 0, "the stand-in module did not load")
+    check(subprocess.run(["insmod", KO, "freeze_any=1"]).returncode == 0, "zss.ko did not load with freeze_any")
+    try:
+        check(write(f"{ROOT}/manage", f"{CARD} backend=test quiesce=none") == 0, "manage failed")
+        check(write(dev("on_loss"), "refuse") == 0 and read(dev("on_loss")) == "refuse", "on_loss was not accepted")
+        ev = Events()
+        try:
+            write(dev("test_fault"), "8")
+            lost = ev.next(1.0, ZSS_STATE="lost", ZSS_PCI=CARD)
+        finally:
+            ev.close()
+        check("frozen and refusing" in lost.get("ZSS_REASON", ""), "the event does not say the driver refuses: " + str(lost))
+        check(read(par + "frozen") == "1" and read(par + "refusing") == "1" and read(dev("driver_frozen")) == "1" and
+              read(dev("driver_refusing")) == "1", "the driver was not frozen in its refusing way")
+        write(dev("test_fault"), "0")
+        check(write(dev("power"), "on") == 0 and read(dev("state")) == "on", "the device was not taken back")
+        check(read(par + "frozen") == "0" and read(par + "refusing") == "0" and read(dev("driver_refusing")) == "0",
+              "the thaw did not end the refusing")
+    finally:
+        write(dev("test_fault"), "0")
+        write(f"{ROOT}/unmanage", CARD)
+        unload()
+        subprocess.run(["rmmod", "zss_test_hooks"])
+
+
+def driver_is_left_alone_when_told():
+    """Told to leave the driver on a loss, the module does not freeze it: the driver finds out by itself."""
+    hooks = os.path.join(BUILD, "kmod", "zss_test_hooks.ko")
+    par = "/sys/module/zss_test_hooks/parameters/"
+    unload()
+    check(subprocess.run(["insmod", hooks]).returncode == 0, "the stand-in module did not load")
+    check(subprocess.run(["insmod", KO, "freeze_any=1"]).returncode == 0, "zss.ko did not load with freeze_any")
+    try:
+        check(write(f"{ROOT}/manage", f"{CARD} backend=test quiesce=none") == 0, "manage failed")
+        check(read(dev("on_loss")) == "freeze", "the default on a loss is not to freeze: " + read(dev("on_loss")))
+        check(write(dev("on_loss"), "nonsense") == errno.EINVAL, "a meaningless on_loss was accepted")
+        check(write(dev("on_loss"), "leave") == 0 and read(dev("on_loss")) == "leave", "on_loss was not accepted")
+        ev = Events()
+        try:
+            write(dev("test_fault"), "8")
+            lost = ev.next(1.0, ZSS_STATE="lost", ZSS_PCI=CARD)
+        finally:
+            ev.close()
+        check("driver frozen" not in lost.get("ZSS_REASON", ""), "the event says the driver was frozen: " + str(lost))
+        check(read(par + "freezes") == "0" and read(par + "frozen") == "0" and read(dev("driver_frozen")) == "0",
+              "the driver was frozen although the module was told to leave it")
+        write(dev("test_fault"), "0")
+        check(write(dev("power"), "on") == 0 and read(dev("state")) == "on", "the device was not taken back")
+        check(read(par + "thaws") == "0", "a driver that was never frozen was thawed")
+    finally:
+        write(dev("test_fault"), "0")
+        write(f"{ROOT}/unmanage", CARD)
+        unload()
+        subprocess.run(["rmmod", "zss_test_hooks"])
+
+
 def driver_is_frozen_on_loss_and_thawed_on_return():
     """A driver that offers the freeze hooks is frozen the moment its device goes silent, and thawed when it is back."""
     hooks = os.path.join(BUILD, "kmod", "zss_test_hooks.ko")
@@ -423,6 +484,8 @@ if __name__ == "__main__":
         ("a device that goes silent is noticed and can be taken back", silence_is_noticed),
         ("a pulled card is reported and its return can be managed", a_pulled_card_is_reported),
         ("a driver with freeze hooks is frozen on a loss and thawed on the return", driver_is_frozen_on_loss_and_thawed_on_return),
+        ("told to leave the driver on a loss, the module does not freeze it", driver_is_left_alone_when_told),
+        ("told to refuse on a loss, the module freezes the driver in its refusing way", driver_refuses_when_told),
         ("the daemon powers a device off and on through the module", daemon_uses_the_module),
         ("the daemon hears of a loss from the module and takes the device back", daemon_hears_of_a_loss_from_the_module),
         ("unloading the module restores power", unloading_restores_power),

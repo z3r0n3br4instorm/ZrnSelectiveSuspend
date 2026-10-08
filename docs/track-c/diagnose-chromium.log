@@ -1,0 +1,24 @@
+[  0.001] ==== check at 2026-10-08 15:15:13, application pid 20421, gmux base 0x700
+[  0.014] check: bus=de10 module=on driver_frozen=0 nvidia=running [0000:01:00.0 nvidia online; 0000:01:00.1 snd_hda_intel online]
+[  0.042] check: daemon: 0000:01:00.0  state=attached  backend=zss-kmod  removal=not supported  wake=yes  iommu=no | pid 751     nvidia-persiste  non-migratable: not started under the ZSS layer | pid 1073    Xorg             display-server | pid 20421   chromium         migratable
+[  0.055] check: application: alive, state R, holds ['/dev/dri/card1', '/dev/dri/renderD128', '/dev/dri/renderD129', '/dev/nvidia-modeset', '/dev/nvidia0', '/dev/nvidiactl']
+[  0.071] check: X server: answers
+[  0.101] READY: everything is in place
+[  0.000] ==== diagnose at 2026-10-08 15:15:13, application pid 20421, gmux base 0x700
+[  0.024] before: bus=de10 module=on driver_frozen=0 nvidia=running [0000:01:00.0 nvidia online; 0000:01:00.1 snd_hda_intel online]
+[  0.057] before: daemon: 0000:01:00.0  state=attached  backend=zss-kmod  removal=not supported  wake=yes  iommu=no | pid 751     nvidia-persiste  non-migratable: not started under the ZSS layer | pid 1073    Xorg             display-server | pid 20421   chromium         migratable
+[  0.069] before: application: alive, state S, holds ['/dev/dri/card1', '/dev/dri/renderD128', '/dev/dri/renderD129', '/dev/nvidia-modeset', '/dev/nvidia0', '/dev/nvidiactl']
+[  0.084] before: X server: answers
+[  0.096] DIAGNOSE: cutting the rail; X server pid 1073; the rail comes back on by itself after 4 s
+[  0.608] + 0.50s: module=lost driver_frozen=1
+[  0.620]   X server thread 1073 (Xorg) state S wchan nvkms_ioctl: nvkms_ioctl
+[  0.632]   X server: 4 thread(s); those not shown sleep in user space waits
+[  0.646]   application: 14 thread(s); those not shown sleep in user space waits
+[  0.689]   uninterruptible: /proc/2121/task/2121 (zrn_perfd): acpi_smbus_transaction < acpi_battery_get_state < acpi_sbs_battery_get_property < power_supply_format_property < dev_attr_show < sysfs_kf_seq_show
+[  2.108] + 2.00s: module=lost driver_frozen=1
+[  2.120]   X server thread 1073 (Xorg) state S wchan nvkms_ioctl: nvkms_ioctl
+[  2.131]   X server: 4 thread(s); those not shown sleep in user space waits
+[  2.144]   application: 14 thread(s); those not shown sleep in user space waits
+[  2.209]   no thread on the machine is in uninterruptible sleep
+[  4.108] switching the power rail back on
+[  4.221] bus now reads de10; asking the kernel module to take the device back

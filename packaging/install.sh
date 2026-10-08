@@ -93,7 +93,7 @@ detect() {
 report() {
     say "ZrnSelectiveSuspend: what this machine supports"
     say ""
-    say "  Application migration       yes (Vulkan 1.0 applications started with zss-run)"
+    say "  Application migration       yes (Vulkan 1.1 applications started with zss-run)"
     if [ -z "$GPU" ]; then
         say "  Discrete GPU                none found"
     else
@@ -175,19 +175,8 @@ cat > "$D$PREFIX/share/zss/zss_icd.json" <<JSON
     }
 }
 JSON
-cat > "$D$PREFIX/bin/zss-run" <<RUN
-#!/bin/sh
-# Runs a program with the ZSS graphics layer as its only Vulkan driver, which
-# is what makes the program migratable. Usage: zss-run <program> [args...]
-manifest="\${ZSS_MANIFEST:-$PREFIX/share/zss/zss_icd.json}"
-if [ \$# -eq 0 ]; then
-    echo "usage: zss-run <program> [args...]" >&2
-    exit 2
-fi
-export VK_DRIVER_FILES="\$manifest"
-export VK_ICD_FILENAMES="\$manifest"
-exec "\$@"
-RUN
+# One launcher for the build tree and the installed system; only the manifest's path differs.
+sed "s|@MANIFEST@|$PREFIX/share/zss/zss_icd.json|" "$REPO/src/layer/zss-run.in" > "$D$PREFIX/bin/zss-run"
 chmod 755 "$D$PREFIX/bin/zss-run"
 
 if [ -f "$D/etc/zss/zssd.conf" ]; then

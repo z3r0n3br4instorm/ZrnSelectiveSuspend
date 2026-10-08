@@ -1,0 +1,60 @@
+zss-run: starting chromium on the dedicated GPU (GPUs only for now); it is built on Chromium, so it is told to draw through Vulkan
+MESA-INTEL: warning: Ivy Bridge Vulkan support is incomplete
+[zss] opened driver libvulkan_intel_hasvk.so
+[zss] closed driver libvulkan_intel_hasvk.so
+[zss] opened driver libvulkan_intel.so
+[zss] closed driver libvulkan_intel.so
+[zss] opened driver libvulkan_lvp.so
+[zss] closed driver libvulkan_lvp.so
+[zss] opened driver libvulkan_nouveau.so
+[zss] closed driver libvulkan_nouveau.so
+[zss] opened driver libGLX_nvidia.so.0
+[zss] closed driver libGLX_nvidia.so.0
+[zss] opened driver libvulkan_radeon.so
+[zss] closed driver libvulkan_radeon.so
+[zss] gpu 0: NVIDIA GeForce GT 650M pci=0000:01:00.0 driver=libGLX_nvidia.so.0
+[zss] gpu 1: Intel(R) HD Graphics 4000 (IVB GT2) pci=0000:00:02.0 driver=libvulkan_intel_hasvk.so
+[zss] gpu 2: llvmpipe (LLVM 22.1.8, 256 bits) pci=- driver=libvulkan_lvp.so
+[zss] profile of NVIDIA GeForce GT 650M: portable, 2 GPU(s) in its group, 7 core feature(s) withheld
+[zss] profile of Intel(R) HD Graphics 4000 (IVB GT2): portable, 2 GPU(s) in its group, 0 core feature(s) withheld
+[zss] profile of llvmpipe (LLVM 22.1.8, 256 bits): portable, 3 GPU(s) in its group, 14 core feature(s) withheld
+[zss] starting on NVIDIA GeForce GT 650M (0000:01:00.0)
+[zss] opened driver libGLX_nvidia.so.0
+[zss] device created on NVIDIA GeForce GT 650M (3 extension(s) beyond the swapchain)
+[zss] device created on NVIDIA GeForce GT 650M (0 extension(s) beyond the swapchain)
+MESA-INTEL: warning: Ivy Bridge Vulkan support is incomplete
+[zss] opened driver libvulkan_intel_hasvk.so
+[18884:18937:1008/152753.565206:ERROR:google_apis/gcm/engine/registration_request.cc:291] Registration response error message: PHONE_REGISTRATION_ERROR
+[18884:18937:1008/152753.565824:ERROR:google_apis/gcm/engine/registration_request.cc:291] Registration response error message: PHONE_REGISTRATION_ERROR
+[18884:18937:1008/152753.580555:ERROR:google_apis/gcm/engine/registration_request.cc:291] Registration response error message: PHONE_REGISTRATION_ERROR
+[zss] cut 1 connection(s) of the lost device's driver to the display server
+[zss] swapchain alpha mode 0x1 is not on the target; using 0x8
+[zss] abandoning the lost device on NVIDIA GeForce GT 650M: a thread is still inside its driver
+[zss] recovered after submit 588 onto Intel(R) HD Graphics 4000 (IVB GT2); 70 object(s) lost their contents; rebuild took 2167 ms
+[zss] abandoning the lost device on NVIDIA GeForce GT 650M: a thread is still inside its driver
+[zss] recovered after submit 588 onto Intel(R) HD Graphics 4000 (IVB GT2); 0 object(s) lost their contents; rebuild took 1 ms
+[18884:18937:1008/152814.364067:ERROR:google_apis/gcm/engine/registration_request.cc:291] Registration response error message: DEPRECATED_ENDPOINT
+[18884:18884:1008/152820.996864:ERROR:content/browser/gpu/gpu_process_host.cc:1035] GPU process exited unexpectedly: exit_code=512
+MESA-INTEL: warning: Ivy Bridge Vulkan support is incomplete
+[zss] opened driver libvulkan_intel_hasvk.so
+[zss] closed driver libvulkan_intel_hasvk.so
+[zss] opened driver libvulkan_intel.so
+[zss] closed driver libvulkan_intel.so
+[zss] opened driver libvulkan_lvp.so
+[zss] closed driver libvulkan_lvp.so
+[zss] opened driver libvulkan_nouveau.so
+[zss] closed driver libvulkan_nouveau.so
+[zss] skipping libGLX_nvidia.so.0: its GPU is detached
+[zss] opened driver libvulkan_radeon.so
+[zss] closed driver libvulkan_radeon.so
+[zss] gpu 0: Intel(R) HD Graphics 4000 (IVB GT2) pci=0000:00:02.0 driver=libvulkan_intel_hasvk.so
+[zss] gpu 1: llvmpipe (LLVM 22.1.8, 256 bits) pci=- driver=libvulkan_lvp.so
+[zss] profile of Intel(R) HD Graphics 4000 (IVB GT2): portable, 1 GPU(s) in its group, 0 core feature(s) withheld
+[zss] profile of llvmpipe (LLVM 22.1.8, 256 bits): portable, 2 GPU(s) in its group, 14 core feature(s) withheld
+[zss] no GPU matching "dedicated" is available; the program chooses among those that are
+MESA-INTEL: warning: Ivy Bridge Vulkan support is incomplete
+[zss] opened driver libvulkan_intel_hasvk.so
+[zss] opened driver libvulkan_lvp.so
+[zss] device created on Intel(R) HD Graphics 4000 (IVB GT2) (3 extension(s) beyond the swapchain)
+[zss] device created on Intel(R) HD Graphics 4000 (IVB GT2) (0 extension(s) beyond the swapchain)
+[18884:18937:1008/152911.712132:ERROR:google_apis/gcm/engine/registration_request.cc:291] Registration response error message: DEPRECATED_ENDPOINT

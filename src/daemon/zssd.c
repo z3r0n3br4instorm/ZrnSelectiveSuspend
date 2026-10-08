@@ -75,6 +75,7 @@ static bool wake_event;  /* a pollable wake file became readable */
 struct zssd_config zssd_cfg = {
     .runtime_dir = "/run/zss",
     .stop_services = "nvidia-persistenced",
+    .loss_while_busy = "leave",
     .hide_while_off = "auto",
     .service_cmd = "systemctl",
     .wake_file = "",
@@ -769,8 +770,10 @@ static bool do_release(struct client *req, struct gpu *g, const char *to, bool o
 
         if (c->fd >= 0 && c->outcome == OC_MIGRATED && c->view[gi].origin > 0)
             moved++;
-        if (c->fd >= 0 && c->outcome == OC_PARKED)
+        if (c->fd >= 0 && c->outcome == OC_PARKED) {
             parked++;
+            logmsg("%s (%d) is parked: %s", c->name, c->pid, c->outcome_reason[0] ? c->outcome_reason : "no reason given");
+        }
         if (c->fd < 0 || c->outcome != OC_FAILED)
             continue;
         snprintf(msg, sizeof(msg), "%s (pid %d) could not be migrated: %s", c->name, c->pid,
@@ -1008,6 +1011,7 @@ static void do_attach(struct client *req, struct gpu *g, bool restore, const cha
     enum gpu_state before = g->state;
     bool lost = g->state == GS_LOST;
     bool wait_bus;
+    char bound[64] = "";
 
     if (g->dry_detached) {
         g->dry_detached = false;
@@ -1056,6 +1060,45 @@ static void do_attach(struct client *req, struct gpu *g, bool restore, const cha
             }
             return;
         }
+    }
+    /*
+     * Lost with its driver left to find out. The NVIDIA driver, once it has
+     * seen a device vanish, does not use it again until it is bound afresh,
+     * and it cannot be unbound while anything has the device open: not the
+     * display server either. Until then the device stays where it is.
+     */
+    g->rebind_free = false;
+    pci_driver(g->pci, bound, sizeof(bound));
+    if (lost && g->kmod && !gpu_driver_frozen(g) && !strcmp(bound, "nvidia")) {
+        char who[300] = "";
+        pid_t holders[128];
+        int nh = find_holders(g, holders, 128);
+
+        for (int i = 0; i < nh; i++) {
+            char comm[64];
+
+            pid_comm(holders[i], comm, sizeof(comm));
+            if (service_listed(comm))
+                continue;
+            snprintf(who + strlen(who), sizeof(who) - strlen(who), "%s%s (pid %d)", who[0] ? ", " : "", comm, holders[i]);
+        }
+        if (who[0]) {
+            char msg[640];
+
+            snprintf(msg, sizeof(msg),
+                     "the driver saw the device vanish and will not use it again until it is reloaded, which it cannot be "
+                     "while these have the device open: %.300s. Log out of the session (that restarts the display server); "
+                     "the device is taken back once nothing holds it", who);
+            if (req) {
+                send_result(req, false, "", msg, g);
+            } else if (strncmp(g->last_refusal, who, sizeof(g->last_refusal) - 1)) {
+                logmsg("%s: %s", g->pci, msg);
+                snprintf(g->last_refusal, sizeof(g->last_refusal), "%s", who);
+            }
+            return;
+        }
+        services_stop(g);
+        g->rebind_free = true;
     }
     if (lost && g->seen && !g->kmod && !gpu_returned(g)) {
         send_result(req, false, "", "the device is still absent", g);
@@ -1615,6 +1658,8 @@ static void handle(struct client *c, struct zj_msg *m)
         }
         zj_begin(&o, "welcome");
         zj_add_str(&o, "detached", list);
+        /* Whether the software renderer is somewhere this daemon sends applications: it shapes what they are offered. */
+        zj_add_bool(&o, "software", allow_software || !strcmp(default_target, "software"));
         zss_send(c->fd, &o);
         logmsg("client %s (%d) registered", c->name, c->pid);
     } else if (zj_is(m, "state")) {
@@ -1781,6 +1826,8 @@ static int set_option(const char *key, const char *value)
         zssd_cfg.stop_services = v;
     else if (!strcmp(key, "kmod_backend"))
         zssd_cfg.kmod_backend = v;
+    else if (!strcmp(key, "loss_while_busy") && (!strcmp(v, "leave") || !strcmp(v, "refuse") || !strcmp(v, "freeze")))
+        zssd_cfg.loss_while_busy = v;
     else if (!strcmp(key, "hide_while_off"))
         zssd_cfg.hide_while_off = v;
     else if (!strcmp(key, "runtime_dir"))
@@ -2013,6 +2060,10 @@ int main(int argc, char **argv)
             last_check = now_ms();
             check_bus();
             check_idle();
+            /* Freezing the driver on a loss is right only while nothing is running on the device. */
+            for (int i = 0; i < ngpus; i++)
+                if (gpus[i].kmod && gpus[i].state == GS_ATTACHED && !busy)
+                    gpu_set_on_loss(&gpus[i], gpu_in_use(&gpus[i]) ? zssd_cfg.loss_while_busy : "freeze");
         }
     }
 

@@ -1,0 +1,11 @@
+[  0.010] ==== refuse dry run at 2026-10-08 17:08:53; hold=running; X pid 1399 state S wchan do_epoll_wait
+[  0.026]   before: xdpyinfo: returned 0 in 0.00 s
+[  0.038] freezerefuse: ok; hold=frozen refusing
+[  0.566]   X pid 1399 state R wchan 0; refused so far 2
+[  0.581]   xdpyinfo: returned 0 in 0.00 s
+[  0.887]   xrandr --listproviders: returned 0 in 0.29 s
+[  1.104]   xrandr (asks every output, the NVIDIA ones too): returned 0 in 0.21 s
+[  1.123]   nvidia-smi (an ordinary program calling the driver): returned 255 in 0.01 s (Failed to initialize NVML: Driver/library version mismatch)
+[  1.146]   X pid 1399 state S wchan do_epoll_wait; refused so far 18
+[  1.557] thaw: ok; hold=running
+[  2.778]   after: xdpyinfo: returned 0 in 0.02 s

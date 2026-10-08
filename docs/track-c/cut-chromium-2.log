@@ -1,0 +1,59 @@
+[  0.000] ==== check at 2026-10-08 15:28:00, application pid 18952, gmux base 0x700
+[  0.013] check: bus=de10 module=on driver_frozen=0 nvidia=running [0000:01:00.0 nvidia online; 0000:01:00.1 snd_hda_intel online]
+[  0.044] check: daemon: 0000:01:00.0  state=attached  backend=zss-kmod  removal=not supported  wake=yes  iommu=no | pid 749     nvidia-persiste  non-migratable: not started under the ZSS layer | pid 1419    Xorg             display-server | pid 18952   chromium         migratable
+[  0.058] check: application: alive, state S, holds ['/dev/dri/card1', '/dev/dri/renderD128', '/dev/dri/renderD129', '/dev/nvidia-modeset', '/dev/nvidia0', '/dev/nvidiactl']
+[  0.074] check: X server: answers
+[  0.105] READY: everything is in place
+[  0.000] ==== cut at 2026-10-08 15:28:00, application pid 18952, gmux base 0x700
+[  0.018] before: bus=de10 module=on driver_frozen=0 nvidia=running [0000:01:00.0 nvidia online; 0000:01:00.1 snd_hda_intel online]
+[  0.045] before: daemon: 0000:01:00.0  state=attached  backend=zss-kmod  removal=not supported  wake=yes  iommu=no | pid 749     nvidia-persiste  non-migratable: not started under the ZSS layer | pid 1419    Xorg             display-server | pid 18952   chromium         migratable
+[  0.058] before: application: alive, state S, holds ['/dev/dri/card1', '/dev/dri/renderD128', '/dev/dri/renderD129', '/dev/nvidia-modeset', '/dev/nvidia0', '/dev/nvidiactl']
+[  0.073] before: X server: answers
+[  0.100] CUTTING the discrete GPU's power rail now, with its driver running and nothing warned
+[  0.228] the kernel module reported the loss 100 ms after the cut
+[  0.357] + 0.21s: bus=ffff module=lost driver_frozen=0 nvidia=running [0000:01:00.0 nvidia offline; 0000:01:00.1 snd_hda_intel offline]
+[  0.383] + 0.21s: daemon: 0000:01:00.0  state=lost  backend=zss-kmod  removal=not supported  wake=yes  iommu=no | pid 1419    Xorg             stale: holds a handle to a device that is gone | pid 18952   chromium         migratable
+[  0.395] + 0.21s: application: alive, state S, holds ['/dev/dri/card1', '/dev/dri/renderD128', '/dev/dri/renderD129', '/dev/nvidia-modeset', '/dev/nvidia0', '/dev/nvidiactl']
+[  2.409] + 0.21s: X server: NO ANSWER in 2 s
+[  2.420] + 0.21s: kernel: snd_hda_intel 0000:00:1b.0: Unstable LPIB (256688 >= 8192); disabling LPIB delay counting
+[  2.432] + 0.21s: kernel: zss: 0000:01:00.0: lost (stopped answering)
+[  2.443] + 0.21s: kernel: NVRM: GPU at PCI:0000:01:00: GPU-0b408da4-2e5c-e152-9491-e9f264d11c9e
+[  2.454] + 0.21s: kernel: NVRM: Xid (PCI:0000:01:00): 79, pid=1419, GPU has fallen off the bus.
+[  2.465] + 0.21s: kernel: NVRM: GPU 0000:01:00.0: GPU has fallen off the bus.
+[  2.476] + 0.21s: kernel: NVRM: A GPU crash dump has been created. If possible, please run\x0aNVRM: nvidia-bug-report.sh as root to collect this data before\x0aNVRM: the NVIDIA kernel module is unloaded.
+[  2.808] + 2.68s: bus=ffff module=lost driver_frozen=0 nvidia=running [0000:01:00.0 nvidia offline; 0000:01:00.1 snd_hda_intel offline]
+[  2.834] + 2.68s: daemon: 0000:01:00.0  state=lost  backend=zss-kmod  removal=not supported  wake=yes  iommu=no | pid 1419    Xorg             stale: holds a handle to a device that is gone | pid 18952   chromium         migratable
+[  2.846] + 2.68s: application: alive, state S, holds ['/dev/dri/card1', '/dev/dri/renderD128', '/dev/dri/renderD129', '/dev/nvidia-modeset', '/dev/nvidia0', '/dev/nvidiactl']
+[  4.859] + 2.68s: X server: NO ANSWER in 2 s
+[  5.416] the daemon reported the application moved away 5.27 s after the cut
+[  5.428] + 5.27s: bus=ffff module=lost driver_frozen=0 nvidia=running [0000:01:00.0 nvidia offline; 0000:01:00.1 snd_hda_intel offline]
+[  5.460] + 5.27s: daemon: 0000:01:00.0  state=lost  backend=zss-kmod  removal=not supported  wake=yes  iommu=no | pid 1419    Xorg             stale: holds a handle to a device that is gone | pid 18952   chromium         migratable migrated-away
+[  5.473] + 5.27s: application: alive, state S, holds ['/dev/dri/card1', '/dev/dri/renderD128', '/dev/dri/renderD129', '/dev/nvidia-modeset', '/dev/nvidia0', '/dev/nvidiactl']
+[  5.489] + 5.27s: X server: answers
+[  7.504] + 7.38s: bus=ffff module=lost driver_frozen=0 nvidia=running [0000:01:00.0 nvidia offline; 0000:01:00.1 snd_hda_intel offline]
+[  7.531] + 7.38s: daemon: 0000:01:00.0  state=lost  backend=zss-kmod  removal=not supported  wake=yes  iommu=no | pid 1419    Xorg             stale: holds a handle to a device that is gone | pid 18952   chromium         migratable migrated-away
+[  7.545] + 7.38s: application: alive, state S, holds ['/dev/dri/card1', '/dev/dri/renderD128', '/dev/dri/renderD129', '/dev/nvidia-modeset', '/dev/nvidia0', '/dev/nvidiactl']
+[  7.560] + 7.38s: X server: answers
+[ 10.573] +10.45s: bus=ffff module=lost driver_frozen=0 nvidia=running [0000:01:00.0 nvidia offline; 0000:01:00.1 snd_hda_intel offline]
+[ 10.600] +10.45s: daemon: 0000:01:00.0  state=lost  backend=zss-kmod  removal=not supported  wake=yes  iommu=no | pid 1419    Xorg             stale: holds a handle to a device that is gone | pid 18952   chromium         migratable migrated-away
+[ 10.613] +10.45s: application: alive, state S, holds ['/dev/dri/card1', '/dev/dri/renderD128', '/dev/dri/renderD129', '/dev/nvidia-modeset', '/dev/nvidia0', '/dev/nvidiactl']
+[ 10.629] +10.45s: X server: answers
+[ 15.644] +15.52s: bus=ffff module=lost driver_frozen=0 nvidia=running [0000:01:00.0 nvidia offline; 0000:01:00.1 snd_hda_intel offline]
+[ 15.670] +15.52s: daemon: 0000:01:00.0  state=lost  backend=zss-kmod  removal=not supported  wake=yes  iommu=no | pid 1419    Xorg             stale: holds a handle to a device that is gone | pid 18952   chromium         migratable migrated-away
+[ 15.683] +15.52s: application: alive, state S, holds ['/dev/dri/card1', '/dev/dri/renderD128', '/dev/dri/renderD129', '/dev/nvidia-modeset', '/dev/nvidia0', '/dev/nvidiactl']
+[ 15.698] +15.52s: X server: answers
+[ 20.713] +20.59s: bus=ffff module=lost driver_frozen=0 nvidia=running [0000:01:00.0 nvidia offline; 0000:01:00.1 snd_hda_intel offline]
+[ 20.742] +20.59s: daemon: 0000:01:00.0  state=lost  backend=zss-kmod  removal=not supported  wake=yes  iommu=no | pid 1419    Xorg             stale: holds a handle to a device that is gone
+[ 20.754] +20.59s: application: GONE
+[ 20.771] +20.59s: X server: answers
+[ 20.783] +20.59s: kernel: nvidia-modeset: ERROR: GPU:0: Failed to query display engine channel state: 0x0000917d:0:0:0x0000000f
+[ 20.795] +20.59s: kernel: nvidia-modeset: ERROR: GPU:0: Failed to query display engine channel state: 0x0000917e:0:0:0x0000000f
+[ 20.807] +20.59s: kernel: nvidia-modeset: ERROR: GPU:0: Failed to query display engine channel state: 0x0000917c:0:0:0x0000000f
+[ 20.819] +20.59s: kernel: nvidia-modeset: ERROR: GPU:0: Failed to query display engine channel state: 0x0000917e:1:0:0x0000000f
+[ 20.831] +20.59s: kernel: nvidia-modeset: ERROR: GPU:0: Failed to query display engine channel state: 0x0000917c:1:0:0x0000000f
+[ 20.843] +20.59s: kernel: nvidia-modeset: ERROR: GPU:0: Failed to query display engine channel state: 0x0000917e:2:0:0x0000000f
+[ 20.855] +20.59s: kernel: nvidia-modeset: ERROR: GPU:0: Failed to query display engine channel state: 0x0000917c:2:0:0x0000000f
+[ 20.867] +20.59s: kernel: nvidia-modeset: ERROR: GPU:0: Failed to query display engine channel state: 0x0000917e:3:0:0x0000000f
+[ 20.880] +20.59s: kernel: nvidia-modeset: ERROR: GPU:0: Failed to query display engine channel state: 0x0000917c:3:0:0x0000000f
+[ 20.891] observation over; the rail is still OFF and nothing was restored
+[ 20.909] summary: loss seen by the module after 0.10049319267272949, application moved after 5.273369550704956, application GONE, X answers

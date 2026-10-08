@@ -1,0 +1,23 @@
+[  0.009] ==== refuse dry run at 2026-10-08 17:17:45; state=on frozen=0 refusing=0 hold=running; X pid 1393 state S wchan do_epoll_wait
+[  0.025]   before: xdpyinfo: returned 0 in 0.00 s
+[  0.087] on_loss=refuse: ok; module told the card is silent: refused: Operation not permitted: 
+[  2.111]   state=on frozen=0 refusing=0 hold=running
+[  2.123]   the driver is not refusing; nothing more is tried
+[  2.135] fault cleared: refused: Operation not permitted: ; module asked to take the card back: ok
+[  2.146]   state=on frozen=0 refusing=0 hold=running
+[  3.162]   after: xdpyinfo: returned 0 in 0.00 s
+[  8.200]   after: nvidia-smi: returned 0 in 0.02 s
+[  8.221]   state=on frozen=0 refusing=0 hold=running; X pid 1393 state S wchan do_epoll_wait; callers refused in all: 0
+[  8.266]   daemon: active
+[  0.009] ==== refuse dry run at 2026-10-08 17:20:54; hold=running; X pid 1393 state S wchan do_epoll_wait
+[  0.024]   before: xdpyinfo: returned 0 in 0.00 s
+[  0.086] daemon stopped; kernel module watching the card: no
+[  0.098] freezerefuse: ok; hold=frozen refusing
+[  0.620]   X pid 1393 state S wchan do_epoll_wait; refused so far 2
+[  0.634]   xdpyinfo: returned 0 in 0.00 s
+[  0.945]   xrandr --listproviders: returned 0 in 0.30 s
+[  1.148]   xrandr (asks every output, the NVIDIA ones too): returned 0 in 0.19 s
+[  1.163]   nvidia-smi (an ordinary program calling the driver): returned 255 in 0.00 s (Failed to initialize NVML: Driver/library version mismatch)
+[  1.185]   X pid 1393 state S wchan do_epoll_wait; refused so far 18
+[  1.584] thaw: ok; hold=running
+[  2.738]   after: xdpyinfo: returned 0 in 0.00 s

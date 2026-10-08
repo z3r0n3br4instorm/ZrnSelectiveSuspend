@@ -56,6 +56,8 @@ struct gpu {
     char audio_driver[64];
     bool nvidia_suspended, rpm_suspended;
     bool kmod; /* the kernel module does state and power for this device */
+    const char *loss_told; /* what the module was last told to do about the driver on a loss; NULL if nothing yet */
+    bool rebind_free; /* nothing has the device open, so even a driver that clings to open devices can be rebound */
     unsigned char config[256];
     size_t config_len;
 
@@ -89,6 +91,7 @@ const char *state_name(enum gpu_state s);
 struct zssd_config {
     const char *runtime_dir;   /* markers and saved PCI configuration */
     const char *stop_services; /* comma-separated units stopped around a power-off */
+    const char *loss_while_busy; /* what the driver does on a loss while the device is in use: leave, refuse or freeze */
     const char *kmod_backend;  /* power backend the kernel module is told to use; "" lets it choose */
     const char *hide_while_off; /* "auto", "no", or extra paths hidden with the device */
     const char *service_cmd;   /* systemctl, or a stand-in for tests */
@@ -117,6 +120,7 @@ bool gpu_wake_supported(struct gpu *g);
 bool gpu_on_bus(struct gpu *g);
 bool gpu_returned(struct gpu *g);
 bool gpu_driver_frozen(struct gpu *g);
+void gpu_set_on_loss(struct gpu *g, const char *what);
 int gpu_hide(struct gpu *g, char *what, size_t n);
 int gpu_unhide(struct gpu *g);
 long gpu_wake_count(struct gpu *g);

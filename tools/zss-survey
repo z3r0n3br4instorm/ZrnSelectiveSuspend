@@ -1,0 +1,146 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-2.0-only
+"""Runs a program on the real Vulkan drivers and reports what it asked of them.
+
+  zss-survey [--gl] [--seconds N] [--name NAME] [--out FILE.md] PROGRAM [ARGS...]
+
+  --gl         run an OpenGL program on Mesa's Zink, so that what is surveyed
+               is what Zink asks of Vulkan on the program's behalf
+  --seconds N  stop the program after N seconds (default: until it exits)
+  --out FILE   write the report there (default: standard output)
+
+The report lists the Vulkan version requested, the extensions and features
+enabled, the structures chained to the create calls, and every command called,
+and marks what the ZSS layer does not offer today.
+"""
+import glob
+import os
+import signal
+import subprocess
+import sys
+import tempfile
+import time
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+BUILD = os.path.abspath(os.environ.get("ZSS_BUILD") or os.path.join(HERE, "..", "build"))
+sys.path.insert(0, HERE)
+from zss_registry import Registry  # noqa: E402
+
+
+def layer_commands(names):
+    """Which of these commands the ZSS layer implements today: the built layer is asked, name by name."""
+    import ctypes
+    path = os.path.join(BUILD, "src", "layer", "libzss_vk.so")
+    try:
+        lib = ctypes.CDLL(path)
+        ask = lib.vk_icdGetInstanceProcAddr
+    except (OSError, AttributeError):
+        sys.exit(f"cannot ask the layer what it implements: {path} is not built")
+    ask.restype, ask.argtypes = ctypes.c_void_p, [ctypes.c_void_p, ctypes.c_char_p]
+    return {n for n in names if ask(None, n.encode())}
+
+
+def main():
+    args = sys.argv[1:]
+    gl, seconds, out, name = False, None, None, None
+    while args and args[0].startswith("--"):
+        a = args.pop(0)
+        if a == "--gl":
+            gl = True
+        elif a == "--seconds":
+            seconds = float(args.pop(0))
+        elif a == "--out":
+            out = args.pop(0)
+        elif a == "--name":
+            name = args.pop(0)
+        else:
+            sys.exit(__doc__)
+    if not args:
+        sys.exit(__doc__)
+    manifest_dir = os.path.join(BUILD, "tools")
+    if not os.path.exists(os.path.join(manifest_dir, "VkLayer_zss_survey.json")):
+        sys.exit(f"the survey layer is not built in {manifest_dir}; run ninja -C build")
+
+    work = tempfile.mkdtemp(prefix="zss-survey-")
+    env = dict(os.environ, VK_LAYER_PATH=manifest_dir, VK_INSTANCE_LAYERS="VK_LAYER_ZSS_survey", ZSS_SURVEY_DIR=work)
+    env.pop("VK_DRIVER_FILES", None)
+    env.pop("VK_ICD_FILENAMES", None)
+    if gl:
+        # LIBGL_KOPPER_DRI2: Zink's GLX otherwise insists on DRI3, which not every X screen offers.
+        env.update(MESA_LOADER_DRIVER_OVERRIDE="zink", GALLIUM_DRIVER="zink", __GLX_VENDOR_LIBRARY_NAME="mesa",
+                   __EGL_VENDOR_LIBRARY_FILENAMES="/usr/share/glvnd/egl_vendor.d/50_mesa.json", LIBGL_KOPPER_DRI2="1")
+    proc = subprocess.Popen(args, env=env, start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        proc.wait(seconds)
+    except subprocess.TimeoutExpired:
+        time.sleep(1.2)  # one more periodic write
+        try:
+            os.killpg(proc.pid, signal.SIGTERM)
+            proc.wait(5)
+        except (ProcessLookupError, subprocess.TimeoutExpired):
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+    except KeyboardInterrupt:
+        os.killpg(proc.pid, signal.SIGTERM)
+
+    reg = Registry()
+    have = layer_commands(reg.commands)
+    files = sorted(glob.glob(os.path.join(work, "survey-*.tsv")))
+    lines = [f"# Vulkan survey: {name or ' '.join(args)}", ""]
+    lines += [f"Run {'on Zink ' if gl else ''}with `{' '.join(args)}`"
+              + (f", stopped after {seconds:g} s." if seconds else ".")
+              + f" {len(files)} process(es) used Vulkan.", ""]
+    if not files:
+        lines += ["**No process created a Vulkan instance.** The program did not use Vulkan in this run.", ""]
+    for path in files:
+        rows = [l.rstrip("\n").split("\t") for l in open(path)]
+        get = lambda kind: [r[1:] for r in rows if r[0] == kind]
+        exe = get("exe")[0][0] if get("exe") else "?"
+        cmds = sorted(((r[0], int(r[1])) for r in get("command")), key=lambda c: -c[1])
+        lines += [f"## `{os.path.basename(exe)}`", ""]
+        for kind, value in get("instance") + get("device"):
+            lines.append(f"- {kind}: **{value}**")
+        for app, engine in get("application"):
+            lines.append(f"- application name: {app or '(none)'}; engine: {engine or '(none)'}")
+        lines.append("")
+        for level in ("instance", "device"):
+            exts = sorted({e[1] for e in get("extension") if e[0] == level})
+            if exts:
+                lines += [f"### Extensions enabled ({level})", ""]
+                for e in exts:
+                    promoted = reg.extensions.get(e, {}).get("promotedto") or ""
+                    note = f" (core in {promoted.replace('VK_VERSION_', '').replace('_', '.')})" if promoted else ""
+                    offered = e == "VK_KHR_swapchain" or e in ("VK_KHR_surface", "VK_KHR_xcb_surface", "VK_KHR_xlib_surface",
+                                                               "VK_KHR_wayland_surface")
+                    lines.append(f"- `{e}`{note}" + ("" if offered else " — **not offered by the ZSS layer**"))
+                lines.append("")
+        feats = sorted({f[1] for f in get("feature")})
+        if feats:
+            lines += ["### Features enabled", ""] + [f"- `{f}`" for f in feats] + [""]
+        structs = sorted({s[1] for s in get("struct")})
+        if structs:
+            lines += ["### Structures chained to the create calls", ""] + [f"- `{s}`" for s in structs] + [""]
+        missing = [(c, n) for c, n in cmds if c not in have]
+        lines += [f"### Commands called: {len(cmds)} different, {len(missing)} not in the ZSS layer", "",
+                  "| Command | Calls | Since | In the layer |", "| :--- | ---: | :--- | :--- |"]
+        for c, n in cmds:
+            info = reg.commands.get(c)
+            since = (info.since or ", ".join(info.extensions[:1])) if info else "?"
+            lines.append(f"| `{c}` | {n} | {since} | {'yes' if c in have else '**no**'} |")
+        lines.append("")
+    text = "\n".join(lines) + "\n"
+    if out:
+        os.makedirs(os.path.dirname(os.path.abspath(out)), exist_ok=True)
+        open(out, "w").write(text)
+        print(f"{out}: {len(files)} process(es)")
+    else:
+        sys.stdout.write(text)
+    for path in files:
+        os.remove(path)
+    os.rmdir(work)
+
+
+if __name__ == "__main__":
+    main()

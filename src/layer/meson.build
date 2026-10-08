@@ -1,8 +1,13 @@
 # SPDX-License-Identifier: GPL-2.0-only
 layer_lib = shared_library('zss_vk',
   'icd.c', 'gate.c', 'device.c', 'cmd.c', 'swapchain.c', 'format.c', 'migrate.c', 'control.c', 'retain.c',
+  'vk11.c', 'profile.c', layer_tables,
   dependencies: [common_dep, vulkan_headers, wsi_headers, threads, dl],
   c_args: ['-fvisibility=hidden'],
+  # The layer runs a thread of its own and keeps the application's objects. A
+  # program that unloads its Vulkan driver between probes (Chromium does)
+  # would pull the code out from under that thread, so the library stays.
+  link_args: ['-Wl,-z,nodelete'],
   install: true)
 
 # The loader finds the layer through this manifest. zss-run points it here.

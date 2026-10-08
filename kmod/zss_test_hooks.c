@@ -6,10 +6,11 @@
  */
 #include <linux/module.h>
 
-static int freezes, thaws, frozen, fail_thaw;
+static int freezes, thaws, frozen, refusing, fail_thaw;
 module_param(freezes, int, 0444);
 module_param(thaws, int, 0444);
 module_param(frozen, int, 0444);
+module_param(refusing, int, 0444);
 module_param(fail_thaw, int, 0644);
 
 int nv_zss_freeze(void);
@@ -25,13 +26,25 @@ int nv_zss_freeze(void)
 }
 EXPORT_SYMBOL_GPL(nv_zss_freeze);
 
+int nv_zss_freeze_refusing(void);
+
+int nv_zss_freeze_refusing(void)
+{
+	int ret = nv_zss_freeze();
+
+	if (ret == 0)
+		refusing = 1;
+	return ret;
+}
+EXPORT_SYMBOL_GPL(nv_zss_freeze_refusing);
+
 int nv_zss_thaw(void)
 {
 	if (!frozen)
 		return -EINVAL;
 	if (fail_thaw)
 		return -EIO;
-	frozen = 0;
+	frozen = refusing = 0;
 	thaws++;
 	return 0;
 }

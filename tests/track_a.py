@@ -52,7 +52,7 @@ def pci_of(name):
 
 
 def migrate_and_compare(tag, source_gpu, source_pci, target, reference_gpu, tolerance, app_env=None,
-                        released=None):
+                        released=None, extra_args=()):
     """Detach around frame 10, attach around frame 26, and compare all frames."""
     ref = os.path.join(work, tag + "-ref")
     out = os.path.join(work, tag + "-out")
@@ -60,7 +60,7 @@ def migrate_and_compare(tag, source_gpu, source_pci, target, reference_gpu, tole
     reference_frames(reference_gpu, FRAMES, ref)
 
     d = Daemon("--gpu", f"{source_pci}=dry-run", "--allow-software")
-    app = App(d, ["--gpu", source_gpu, "--frames", FRAMES, "--delay-ms", 40, "--out", out], app_env)
+    app = App(d, ["--gpu", source_gpu, "--frames", FRAMES, "--delay-ms", 40, "--out", out, *extra_args], app_env)
     try:
         app.wait_frame(10)
         rc, text = d.ctl("detach", source_pci, "--to", target)
@@ -107,7 +107,9 @@ def nvidia_to_software():
 
 
 def weaker_target_parks():
-    """An application using a feature the target lacks is parked, then resumes intact."""
+    """An application using a feature the target lacks is parked, then resumes intact.
+
+    Under the native profile, where each GPU offers all of its own features."""
     if not (SOFTWARE and INTEL):
         return "needs a software renderer and an Intel GPU as the weaker target"
     ref = os.path.join(work, "park-ref")
@@ -117,7 +119,7 @@ def weaker_target_parks():
 
     d = Daemon("--gpu", f"{FAKE_PCI}=dry-run")
     app = App(d, ["--gpu", f"[ZSS {FAKE_PCI}]", "--frames", FRAMES, "--delay-ms", 40, "--out", out,
-                  "--enable-all-features"], BOUND)
+                  "--enable-all-features"], {**BOUND, "ZSS_PROFILE": "native"})
     try:
         app.wait_frame(10)
         rc, text = d.ctl("detach", FAKE_PCI, "--to", pci_of("Intel"))
@@ -145,6 +147,16 @@ def weaker_target_parks():
         d.stop()
     ok, message = compare(ref, out)
     check(ok, message)
+
+
+def portable_profile_reaches_weaker_target():
+    """The same application, enabling everything it is offered, moves to the weaker GPU and back.
+
+    Under the portable profile what it is offered is what both GPUs have, so nothing holds it."""
+    if not (SOFTWARE and INTEL):
+        return "needs a software renderer and an Intel GPU as the weaker target"
+    migrate_and_compare("profile", f"[ZSS {FAKE_PCI}]", FAKE_PCI, pci_of("Intel"), "llvmpipe", 2, BOUND,
+                        extra_args=["--enable-all-features"])
 
 
 def bystander_is_left_alone():
@@ -265,6 +277,8 @@ if __name__ == "__main__":
             ("NVIDIA to Intel and back", nvidia_to_intel),
             ("NVIDIA to software and back", nvidia_to_software),
             ("weaker target parks, failed resume is named, origin resumes intact", weaker_target_parks),
+            ("portable profile: everything offered is enabled, and the weaker target is still reachable",
+             portable_profile_reaches_weaker_target),
             ("an application on another GPU is left alone", bystander_is_left_alone),
             ("untracked feature is reported and blocks detach", untracked_feature_is_named),
             ("vkcube survives migration and return", vkcube_cycle),

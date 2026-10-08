@@ -45,7 +45,7 @@
 #include <linux/sysfs.h>
 #include <linux/workqueue.h>
 
-#define ZSS_VERSION "0.1.0"
+#define ZSS_VERSION "0.2.0"
 #define ZSS_MAX_FUNCS 8
 #define ZSS_GUARD_MS 100
 #define ZSS_ANSWER_MS 3000
@@ -92,6 +92,8 @@ struct zss_dev {
 	bool removed; /* a function left the bus (set from the bus notifier) */
 	bool needs_rebind; /* came back from a loss with a driver that could not be told */
 	bool driver_frozen; /* the driver was frozen when the device went silent */
+	bool driver_refusing; /* and turns its callers away instead of making them wait */
+	int on_loss; /* what to do about the driver when the device goes silent (see on_loss) */
 	bool dying;
 
 	/* gmux */
@@ -102,6 +104,8 @@ struct zss_dev {
 	bool test_powered;
 	unsigned int test_fault;
 };
+
+enum { ZSS_LOSS_FREEZE, ZSS_LOSS_LEAVE, ZSS_LOSS_REFUSE };
 
 /* Test aid: use the freeze hooks whatever driver is bound (see zss_driver_hook). */
 static bool freeze_any;
@@ -541,7 +545,7 @@ static int zss_power_on(struct zss_dev *zd, const char *reason)
 				zss_fail(zd, "the driver did not resume the returned device (%d); it stays frozen", ret);
 				return ret;
 			}
-			zd->driver_frozen = false;
+			zd->driver_frozen = zd->driver_refusing = false;
 			told = true;
 		}
 		for (i = 0; i < zd->nfn; i++) {
@@ -646,8 +650,13 @@ static void zss_guard(struct work_struct *work)
 			zd->silent = 0;
 		} else if (zd->removed || ++zd->silent >= 2) {
 			/* First of all, before anything can ask the driver about the device. */
-			if (!zd->removed && zss_driver_hook(zd, "nv_zss_freeze") == 0)
-				zd->driver_frozen = true;
+			if (!zd->removed && zd->on_loss != ZSS_LOSS_LEAVE) {
+				/* A driver without the refusing freeze gets the plain one: frozen is the safer of the two. */
+				if (zd->on_loss == ZSS_LOSS_REFUSE && zss_driver_hook(zd, "nv_zss_freeze_refusing") == 0)
+					zd->driver_frozen = zd->driver_refusing = true;
+				else if (zss_driver_hook(zd, "nv_zss_freeze") == 0)
+					zd->driver_frozen = true;
+			}
 			zss_mark(zd, true);
 			/* The kernel's own way of telling a driver that its device is gone for good. */
 			for (i = 0; i < zd->nfn && !zd->removed; i++) {
@@ -661,6 +670,7 @@ static void zss_guard(struct work_struct *work)
 				device_unlock(&pdev->dev);
 			}
 			zss_set_state(zd, ZSS_LOST, zd->removed ? "left the bus"
+					      : zd->driver_refusing ? "stopped answering, driver frozen and refusing"
 					      : zd->driver_frozen ? "stopped answering, driver frozen" : "stopped answering");
 			zd->silent = 0;
 		}
@@ -788,6 +798,53 @@ static ssize_t driver_frozen_show(struct kobject *kobj, struct kobj_attribute *a
 	return sysfs_emit(buf, "%d\n", to_zss(kobj)->driver_frozen);
 }
 
+static ssize_t driver_refusing_show(struct kobject *kobj, struct kobj_attribute *attr, char *buf)
+{
+	return sysfs_emit(buf, "%d\n", to_zss(kobj)->driver_refusing);
+}
+
+/*
+ * What to do about the driver when the device goes silent.
+ *
+ * "freeze" shuts every caller out of the driver before it can find out. The
+ * driver never learns of the loss, so the device can be handed back to it
+ * later; but everything that calls it sleeps until then, the display server
+ * included, and a program drawing on the device can neither be moved off it
+ * nor survive its return.
+ *
+ * "refuse" freezes the driver in the same way and has it turn callers away
+ * with an error instead of making them wait. Programs get the error that
+ * lets them be moved, the display server is not held, and the driver can
+ * still be thawed. It needs a driver that offers nv_zss_freeze_refusing();
+ * one that does not is frozen plainly.
+ *
+ * "leave" lets the driver find the device gone by itself. Callers get errors
+ * too, but from a driver that has given the device up: one that cannot
+ * recover a lost device has to be reloaded before it will use it again.
+ *
+ * User space, which knows who is using the device, chooses.
+ */
+static const char *const zss_loss_names[] = { "freeze", "leave", "refuse" };
+
+static ssize_t on_loss_show(struct kobject *kobj, struct kobj_attribute *attr, char *buf)
+{
+	return sysfs_emit(buf, "%s\n", zss_loss_names[to_zss(kobj)->on_loss]);
+}
+
+static ssize_t on_loss_store(struct kobject *kobj, struct kobj_attribute *attr, const char *buf, size_t len)
+{
+	struct zss_dev *zd = to_zss(kobj);
+	int i;
+
+	for (i = 0; i < ARRAY_SIZE(zss_loss_names); i++) {
+		if (sysfs_streq(buf, zss_loss_names[i])) {
+			zd->on_loss = i;
+			return len;
+		}
+	}
+	return -EINVAL;
+}
+
 static ssize_t needs_rebind_show(struct kobject *kobj, struct kobj_attribute *attr, char *buf)
 {
 	return sysfs_emit(buf, "%d\n", to_zss(kobj)->needs_rebind);
@@ -823,12 +880,14 @@ static struct kobj_attribute iommu_attr = __ATTR_RO(iommu);
 static struct kobj_attribute answers_attr = __ATTR_RO(answers);
 static struct kobj_attribute needs_rebind_attr = __ATTR_RO(needs_rebind);
 static struct kobj_attribute driver_frozen_attr = __ATTR_RO(driver_frozen);
+static struct kobj_attribute driver_refusing_attr = __ATTR_RO(driver_refusing);
+static struct kobj_attribute on_loss_attr = __ATTR(on_loss, 0600, on_loss_show, on_loss_store);
 static struct kobj_attribute test_fault_attr = __ATTR(test_fault, 0600, test_fault_show, test_fault_store);
 
 static struct attribute *zss_dev_attrs[] = {
 	&state_attr.attr, &power_attr.attr, &backend_attr.attr, &quiesce_attr.attr, &functions_attr.attr,
 	&last_error_attr.attr, &cycles_attr.attr, &iommu_attr.attr, &answers_attr.attr, &needs_rebind_attr.attr,
-	&driver_frozen_attr.attr,
+	&driver_frozen_attr.attr, &driver_refusing_attr.attr, &on_loss_attr.attr,
 	&test_fault_attr.attr, NULL,
 };
 ATTRIBUTE_GROUPS(zss_dev);

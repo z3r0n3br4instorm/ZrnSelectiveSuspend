@@ -306,6 +306,17 @@ static VkResult capture(struct zss_dev *dev)
             r = capture_buffer(dev, o);
         else if (o->kind == ZK_IMAGE && o->r.backing && !o->u.img.swapchain)
             r = capture_image(dev, o);
+        else if (o->kind == ZK_IMAGE && o->u.img.swapchain && o->r.borrowed && !o->u.img.pending &&
+                 (o->u.img.ci.usage & VK_IMAGE_USAGE_TRANSFER_SRC_BIT) &&
+                 (o->u.img.ci.usage & VK_IMAGE_USAGE_TRANSFER_DST_BIT))
+            /*
+             * A window's images are not required to keep what was presented
+             * from them, but drivers do, and applications that redraw only
+             * what changed (browsers) count on it. So they are carried over
+             * like any other image, where the swapchain allows copying. One
+             * still waiting for contents from an earlier move keeps those.
+             */
+            r = capture_image(dev, o);
         else if (o->kind == ZK_FENCE)
             o->u.fence.signaled = dev->fn.GetFenceStatus(dev->real, (VkFence)(uintptr_t)o->r.h) == VK_SUCCESS;
     }
@@ -392,7 +403,8 @@ static VkResult restore_image(struct zss_dev *dev, struct zss_obj *o)
 
 static bool temp_kind(enum zss_kind k)
 {
-    return k == ZK_SHADER || k == ZK_RENDERPASS || k == ZK_DSL || k == ZK_PLAYOUT || k == ZK_SAMPLER;
+    return k == ZK_SHADER || k == ZK_RENDERPASS || k == ZK_DSL || k == ZK_PLAYOUT || k == ZK_SAMPLER ||
+           k == ZK_YCBCR;
 }
 
 static bool wanted(const struct zss_obj *o)
@@ -406,6 +418,41 @@ static bool wanted(const struct zss_obj *o)
         if (!o->deps[i]->r.h && o->deps[i]->kind != ZK_MEMORY && o->deps[i]->kind != ZK_SWAPCHAIN)
             return false;
     return true;
+}
+
+/*
+ * Brings a new image to where the application believes its old one is: the
+ * saved contents if there are any, and the layout it last gave it.
+ */
+VkResult zss_image_bring_up(struct zss_dev *dev, struct zss_obj *img, const uint8_t *bytes, VkDeviceSize size)
+{
+    const VkImageCreateInfo *ci = &img->u.img.ci;
+    struct stage s = { 0 };
+    VkResult r = VK_SUCCESS;
+
+    if (bytes && size == blob_size(img)) {
+        r = stage_new(dev, size, &s);
+        if (r == VK_SUCCESS)
+            memcpy(s.map, bytes, size);
+        else
+            bytes = NULL;
+    } else {
+        bytes = NULL;
+    }
+    r = zss_util_begin(dev);
+    if (r == VK_SUCCESS) {
+        if (bytes) {
+            copy_subresources(dev, img, s.buf, true);
+        } else {
+            for (uint32_t m = 0; m < ci->mipLevels; m++)
+                for (uint32_t l = 0; l < ci->arrayLayers; l++)
+                    if (settable(img->u.img.layout[m * ci->arrayLayers + l]))
+                        barrier(dev, img, m, l, VK_IMAGE_LAYOUT_UNDEFINED, img->u.img.layout[m * ci->arrayLayers + l]);
+        }
+        r = zss_util_run(dev);
+    }
+    stage_free(dev, &s);
+    return r;
 }
 
 static VkResult signal_semaphore(struct zss_dev *dev, struct zss_obj *o)
@@ -425,8 +472,12 @@ static VkResult signal_semaphore(struct zss_dev *dev, struct zss_obj *o)
 
 static VkResult build(struct zss_dev *dev, struct zss_gpu *target)
 {
-    VkResult r = zss_dev_create_real(dev, target);
+    VkResult r;
 
+    for (struct zss_obj *o = dev->head; o; o = o->next)
+        if (o->kind == ZK_SWAPCHAIN)
+            o->u.sc.undo_valid = false;
+    r = zss_dev_create_real(dev, target);
     if (r != VK_SUCCESS)
         return r;
 
@@ -434,9 +485,14 @@ static VkResult build(struct zss_dev *dev, struct zss_gpu *target)
         if (!wanted(o))
             continue;
         if (o->kind == ZK_SWAPCHAIN) {
-            zss_swapchain_retire(dev, o);
+            /* Rebuilt in place where the target allows it; otherwise the application is told to make a new one. */
+            if (!zss_swapchain_rebuild(dev, o))
+                zss_swapchain_retire(dev, o);
             continue;
         }
+        /* An image of a swapchain that was just rebuilt is the driver's, already in place. */
+        if (o->kind == ZK_IMAGE && o->u.img.swapchain && o->r.borrowed && o->r.h)
+            continue;
         r = zss_real_create(dev, o);
         if (r == VK_SUCCESS && o->kind == ZK_BUFFER)
             r = restore_buffer(dev, o);
@@ -476,6 +532,11 @@ static void teardown(struct zss_dev *dev)
 
 /* ---- compatibility ------------------------------------------------------------ */
 
+const char *zss_feature_name(size_t k)
+{
+    return k < sizeof(feature_names) / sizeof(feature_names[0]) ? feature_names[k] : "?";
+}
+
 bool zss_compatible(struct zss_dev *dev, struct zss_gpu *target, char *reason, size_t rlen)
 {
     const VkBool32 *want = (const VkBool32 *)&dev->features;
@@ -496,6 +557,18 @@ bool zss_compatible(struct zss_dev *dev, struct zss_gpu *target, char *reason, s
     for (uint32_t i = 0; i < target->next; i++)
         if (!strcmp(target->ext[i].extensionName, VK_KHR_SWAPCHAIN_EXTENSION_NAME))
             swapchain = true;
+    if (!zss_feats_supported(target, dev->feat_chain, reason, rlen))
+        return false;
+    for (uint32_t k = 0; k < dev->nexts; k++) {
+        bool has = false;
+
+        for (uint32_t i = 0; i < target->next; i++)
+            has = has || !strcmp(target->ext[i].extensionName, dev->exts[k]);
+        if (!has) {
+            snprintf(reason, rlen, "%s lacks the %s extension", target->props.deviceName, dev->exts[k]);
+            return false;
+        }
+    }
     if (dev->want_swapchain && !swapchain) {
         snprintf(reason, rlen, "%s cannot present", target->props.deviceName);
         return false;
@@ -813,6 +886,16 @@ static enum zss_outcome relocate(struct zss_dev *dev, struct zss_gpu *target, bo
     snap = calloc(n ? n : 1, sizeof(*snap));
     i = 0;
     for (struct zss_obj *o = dev->head; o; o = o->next) {
+        /*
+         * A driver gives a window one swapchain at a time. When the device is
+         * rebuilt on the driver it is already on (after a loss, a reset) the
+         * old swapchain has to go before the new one can be made. Should the
+         * rebuild then fail, the application is told to make a new one.
+         */
+        if (o->kind == ZK_SWAPCHAIN && o->r.h && target && dev->gpu && target->drv == dev->gpu->drv && !abandon) {
+            dev->fn.DestroySwapchainKHR(dev->real, (VkSwapchainKHR)(uintptr_t)o->r.h, NULL);
+            o->r.h = 0;
+        }
         snap[i++] = o->r;
         o->r = (struct zss_real){ 0 };
     }
@@ -834,8 +917,10 @@ static enum zss_outcome relocate(struct zss_dev *dev, struct zss_gpu *target, bo
                 i = 0;
                 for (struct zss_obj *o = dev->head; o; o = o->next) {
                     o->r = snap[i++];
-                    if (o->kind == ZK_SWAPCHAIN)
+                    if (o->kind == ZK_SWAPCHAIN) {
+                        zss_swapchain_rollback(o);
                         o->u.sc.retired = o->r.h == 0;
+                    }
                 }
                 free(snap);
                 free_saved(dev);

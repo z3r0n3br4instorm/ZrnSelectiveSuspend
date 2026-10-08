@@ -439,6 +439,7 @@ static int kmod_manage(struct gpu *g, char *err)
         return -1;
     }
     g->kmod = true;
+    g->loss_told = NULL;
     return 0;
 }
 
@@ -484,13 +485,13 @@ static int kmod_on(struct gpu *g, char *err)
 
         /* Back from a loss with a driver that has no way of being told: bind it afresh. */
         /*
-         * The proprietary NVIDIA driver is left out: it does not let go of a
-         * device a display server has open, and waits in the kernel instead,
-         * which would take the daemon with it.
+         * The proprietary NVIDIA driver is left out while anything has the
+         * device open: it does not let go of such a device, and waits in the
+         * kernel instead, which would take the daemon with it.
          */
         pci_driver(g->pci, driver, sizeof(driver));
         if (kmod_read(g, "needs_rebind", text, sizeof(text)) == 0 && text[0] == '1' && driver[0] &&
-            strcmp(driver, "nvidia")) {
+            (strcmp(driver, "nvidia") || g->rebind_free)) {
             snprintf(path, sizeof(path), "/sys/bus/pci/drivers/%s/unbind", driver);
             write_text(path, g->pci);
             snprintf(path, sizeof(path), "/sys/bus/pci/drivers/%s/bind", driver);
@@ -544,6 +545,24 @@ bool gpu_returned(struct gpu *g)
 }
 
 /* Whether the kernel module froze the device's driver when the device went silent. */
+/*
+ * Tells the kernel module what to do about the driver should the device go
+ * silent: freeze it, which keeps the device recoverable but puts everything
+ * that calls the driver to sleep, or leave it to find out, which keeps
+ * programs and the display server running. See on_loss in kmod/zss.c.
+ */
+void gpu_set_on_loss(struct gpu *g, const char *what)
+{
+    char path[300];
+
+    if (!g->kmod || (g->loss_told && !strcmp(g->loss_told, what)))
+        return;
+    snprintf(path, sizeof(path), KMOD_ROOT "/%s/on_loss", g->pci);
+    /* An older module has no such file and always freezes, or does not know the word: then it is told to leave. */
+    if (write_text(path, what) == 0 || (!strcmp(what, "refuse") && write_text(path, "leave") == 0))
+        g->loss_told = what;
+}
+
 bool gpu_driver_frozen(struct gpu *g)
 {
     char text[8] = "";

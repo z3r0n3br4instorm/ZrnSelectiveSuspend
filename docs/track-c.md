@@ -435,3 +435,55 @@ programs and then thawing works has not been tried.
 - **Bringing the card back after an unannounced power cut**, short of a reboot.
 - **Longer off periods**, and a cycle while an application is using the dGPU
   outside the layer.
+
+## Refusing driver, card powered: first dry run (8 October 2026, 17:08)
+
+Driver patch revision 5, kernel module 0.2.0. The driver was frozen in its
+refusing way through its own control file with the card on, the display
+server was asked for what sends it into the driver, and the driver was thawed
+the same way (`docs/track-c/refuse-dry-run.log`).
+
+| Step | Result |
+| :--- | :--- |
+| Freeze, refusing | Accepted at once |
+| `xdpyinfo` | Answered in under 10 ms |
+| `xrandr --listproviders` | Answered in 0.29 s |
+| `xrandr -q`, which asks every output, the NVIDIA ones too | Answered in 0.21 s |
+| `nvidia-smi` | Failed in 10 ms with its own message, as a program should |
+| Callers turned away by then | 18 |
+| X server | Running normally throughout |
+| Thaw | Reported done; the X server answered once more |
+| Two seconds later | **The machine slowed and stopped.** It was restarted by hand |
+
+**The display server takes a refusal in its stride.** That was the question,
+and for display queries it is answered: no stall at all, where a sleeping
+freeze stops the desktop and a driver left to find out stalls it for five
+seconds. A console switch while refusing was not tried.
+
+**The thaw after a refusing freeze then took the machine down.** The driver's
+resume logged `Xid 79 ... GPU has fallen off the bus` against the process
+doing the thaw, with the card powered and answering. A driver that has given
+its card up is where the earlier hangs came from, and this one followed.
+
+The first explanation was that the kernel module, still watching the card, had
+taken the driver's re-initialisation for a loss and frozen it again halfway.
+A second run disproved it (`docs/track-c/refuse-dry-run-2.log`, 17:20): with
+the daemon stopped and the module made to let go of the card first, the same
+`Xid 79` appeared at the thaw, and the desktop froze again.
+
+So the cause is not known. What is known:
+
+- A plain freeze and thaw with nothing calling in between worked the day
+  before, on revision 4.
+- A refusing freeze, with the display server and `nvidia-smi` turned away in
+  between (about 14 calls), does not thaw: the driver's own resume decides the
+  card is gone.
+- Whether it is the refused calls, something a refused program does next
+  (closing its files, for one), or revision 5's code itself that makes the
+  difference has not been separated. Three runs would do it: revision 5 with
+  a plain freeze and no calls; a refusing freeze and no calls; a refusing
+  freeze with only the display server's calls. Each can stop the desktop, so
+  they belong on a text console with nothing open.
+
+Refusal therefore does what was wanted while the card is away, and cannot yet
+be followed by the card's return. The daemon's setting stays at `leave`.
