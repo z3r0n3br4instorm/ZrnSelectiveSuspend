@@ -51,7 +51,12 @@ Status words: **built** (exists and tested somewhere), **built, unproven**
 | 38 | [Make IFSCL migrate](ideas.md#38-make-ifscl-migrate) | built |
 | 39 | [Implement OpenGL as well](ideas.md#39-implement-opengl-as-well) | built |
 | 40 | [Names for the two shims](ideas.md#40-names-for-the-two-shims) | built |
-| 46 | [A website that is also the wiki](ideas.md#46-a-website-that-is-also-the-wiki) | built, unproven |
+| 51 | [A surprise power cut, now that X no longer holds the card](ideas.md#51-a-surprise-power-cut-now-that-x-no-longer-holds-the-card) | built |
+| 50 | [Demo videos, for the website](ideas.md#50-demo-videos-for-the-website) | built |
+| 49 | [Measure the shim, then make it faster](ideas.md#49-measure-the-shim-then-make-it-faster) | built |
+| 48 | [Try it on distributions other than Arch](ideas.md#48-try-it-on-distributions-other-than-arch) | built |
+| 47 | [A landing that fits the screen, says "Alpha", and a wiki that warns before it hurts](ideas.md#47-a-landing-that-fits-the-screen-says-alpha-and-a-wiki-that-warns-before-it-hurts) | built |
+| 46 | [A website that is also the wiki](ideas.md#46-a-website-that-is-also-the-wiki) | built |
 | 45 | [Builds and releases on every push](ideas.md#45-builds-and-releases-on-every-push) | built |
 | 44 | [The installer reports too](ideas.md#44-the-installer-reports-too) | built |
 | 43 | [Publish the findings, and a tester kit](ideas.md#43-publish-the-findings-and-a-tester-kit) | built |

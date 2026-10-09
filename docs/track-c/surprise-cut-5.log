@@ -1,0 +1,48 @@
+[  0.000] ==== check at 2026-10-09 20:01:14, application pid 0, gmux base 0x700
+[  0.013] check: bus=de10 module=on driver_frozen=0 nvidia=running [0000:01:00.0 nvidia online; 0000:01:00.1 snd_hda_intel online]
+[  0.040] check: daemon: 0000:01:00.0  state=attached  backend=zss-kmod  removal=not supported  wake=yes  iommu=yes | pid 652782  nvidia-persiste  non-migratable: not started under ZSS_AirLock | pid 31837   teams-for-linux  migratable
+[  0.052] check: application: GONE
+[  0.068] check: X server: answers
+[  0.096] NOT READY: see the lines above
+[  0.000] ==== cut at 2026-10-09 20:01:32, application pid 0, gmux base 0x700
+[  0.013] before: bus=de10 module=on driver_frozen=0 nvidia=running [0000:01:00.0 nvidia online; 0000:01:00.1 snd_hda_intel online]
+[  0.042] before: daemon: 0000:01:00.0  state=attached  backend=zss-kmod  removal=not supported  wake=yes  iommu=yes | pid 652782  nvidia-persiste  non-migratable: not started under ZSS_AirLock | pid 31837   teams-for-linux  migratable
+[  0.055] before: application: GONE
+[  0.076] before: X server: answers
+[  0.088] CUTTING the discrete GPU's power rail now, with its driver running and nothing warned
+[  0.149] the kernel module reported the loss 50 ms after the cut
+[  0.342] + 0.23s: bus=ffff module=lost driver_frozen=0 nvidia=running [0000:01:00.0 nvidia offline; 0000:01:00.1 snd_hda_intel offline]
+[  0.368] + 0.23s: daemon: 0000:01:00.0  state=lost  backend=zss-kmod  removal=not supported  wake=yes  iommu=yes | pid 31837   teams-for-linux  migratable
+[  0.380] + 0.23s: application: GONE
+[  0.394] + 0.23s: X server: answers
+[  0.405] + 0.23s: kernel: zss: 0000:01:00.0: lost (stopped answering)
+[  0.416] + 0.23s: kernel: NVRM: GPU at PCI:0000:01:00: GPU-0b408da4-2e5c-e152-9491-e9f264d11c9e
+[  0.427] + 0.23s: kernel: NVRM: Xid (PCI:0000:01:00): 79, pid=70, GPU has fallen off the bus.
+[  0.438] + 0.23s: kernel: NVRM: GPU 0000:01:00.0: GPU has fallen off the bus.
+[  0.450] + 0.23s: kernel: NVRM: A GPU crash dump has been created. If possible, please run\x0aNVRM: nvidia-bug-report.sh as root to collect this data before\x0aNVRM: the NVIDIA kernel module is unloaded.
+[  0.778] + 0.68s: bus=ffff module=lost driver_frozen=0 nvidia=running [0000:01:00.0 nvidia offline; 0000:01:00.1 snd_hda_intel offline]
+[  0.805] + 0.68s: daemon: 0000:01:00.0  state=lost  backend=zss-kmod  removal=not supported  wake=yes  iommu=yes | pid 31837   teams-for-linux  migratable
+[  0.816] + 0.68s: application: GONE
+[  0.830] + 0.68s: X server: answers
+[  1.388] + 1.27s: bus=ffff module=lost driver_frozen=0 nvidia=running [0000:01:00.0 nvidia offline; 0000:01:00.1 snd_hda_intel offline]
+[  1.416] + 1.27s: daemon: 0000:01:00.0  state=lost  backend=zss-kmod  removal=not supported  wake=yes  iommu=yes | pid 31837   teams-for-linux  migratable
+[  1.427] + 1.27s: application: GONE
+[  1.441] + 1.27s: X server: answers
+[  3.485] + 3.37s: bus=ffff module=lost driver_frozen=0 nvidia=running [0000:01:00.0 nvidia offline; 0000:01:00.1 snd_hda_intel offline]
+[  3.513] + 3.37s: daemon: 0000:01:00.0  state=lost  backend=zss-kmod  removal=not supported  wake=yes  iommu=yes | pid 31837   teams-for-linux  migratable
+[  3.524] + 3.37s: application: GONE
+[  3.538] + 3.37s: X server: answers
+[  6.600] + 6.49s: bus=ffff module=lost driver_frozen=0 nvidia=running [0000:01:00.0 nvidia offline; 0000:01:00.1 snd_hda_intel offline]
+[  6.626] + 6.49s: daemon: 0000:01:00.0  state=lost  backend=zss-kmod  removal=not supported  wake=yes  iommu=yes | pid 31837   teams-for-linux  migratable
+[  6.637] + 6.49s: application: GONE
+[  6.652] + 6.49s: X server: answers
+[ 11.749] +11.63s: bus=ffff module=lost driver_frozen=0 nvidia=running [0000:01:00.0 nvidia offline; 0000:01:00.1 snd_hda_intel offline]
+[ 11.776] +11.63s: daemon: 0000:01:00.0  state=lost  backend=zss-kmod  removal=not supported  wake=yes  iommu=yes | pid 31837   teams-for-linux  migratable
+[ 11.787] +11.63s: application: GONE
+[ 11.801] +11.63s: X server: answers
+[ 16.893] +16.78s: bus=ffff module=lost driver_frozen=0 nvidia=running [0000:01:00.0 nvidia offline; 0000:01:00.1 snd_hda_intel offline]
+[ 16.921] +16.78s: daemon: 0000:01:00.0  state=lost  backend=zss-kmod  removal=not supported  wake=yes  iommu=yes | pid 31837   teams-for-linux  migratable
+[ 16.933] +16.78s: application: GONE
+[ 16.953] +16.78s: X server: answers
+[ 16.965] observation over; the rail is still OFF and nothing was restored
+[ 16.979] summary: loss seen by the module after 0.050199031829833984, application moved after None, application GONE, X answers

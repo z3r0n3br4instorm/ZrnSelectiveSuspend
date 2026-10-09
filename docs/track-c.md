@@ -487,3 +487,80 @@ So the cause is not known. What is known:
 
 Refusal therefore does what was wanted while the card is away, and cannot yet
 be followed by the card's return. The daemon's setting stays at `leave`.
+
+## Fifth power cut: the card out of X (9 October 2026, 20:01)
+
+Since 9 October the X server no longer has the NVIDIA card: X runs on the Intel
+GPU alone and frames drawn on the card reach the screen through ZSS_AirLock's
+presenter. The question was what a surprise cut does now. Meant as an idle cut,
+it was not one: `zssctl detach` was refused (nvidia-persistenced cannot be
+moved) and the cut went ahead with Teams still on the card, idle. Logs:
+`surprise-cut-5.log`, `surprise-cut-5-dmesg.log`, `surprise-cut-5-zssd.log`.
+
+| Step | Result |
+| :--- | :--- |
+| Rail cut | The kernel module reported the loss after 50 ms |
+| Driver | Not frozen (`loss_while_busy = leave`, and Teams held the card): `Xid 79 ... GPU has fallen off the bus`, 20 ms after the module noticed |
+| X server | **Answered throughout**, 17 s of checks. With the card out of X nothing in the display server waited on the dead driver |
+| Teams | Recovered onto the Intel GPU by the layer when it next drew (`lost contents: 22`) |
+| `zssctl on` | Power restored and the card answered (`0fd510de`). Then **the daemon hung**: to reload a driver that had seen the loss it unbound `nvidia` from the card, and `nv_pci_remove` waits for ever (`os_delay` loop) while `nvidia_modeset` still holds the GPU |
+| systemd | Watchdog after 20 s, SIGABRT, SIGKILL: the process stays, in the kernel, on one CPU core. A new `zssd` started next to it |
+| Desktop | Usable; one core busy. The laptop was powered down, as the author had asked for this case |
+
+What it shows:
+
+- **Taking the card out of X did what was hoped for the display server**: a
+  card lost under a running driver no longer stalls the desktop at all.
+- **The recovery path has the bug the lending path was written to avoid.**
+  Lending unloads `nvidia_uvm`, `nvidia_drm` and `nvidia_modeset` first,
+  requires the driver to have no user left, and limits the unbind to 15 s in a
+  child process. The reload after a loss does none of that and calls the unbind
+  directly in the daemon. Fixed afterwards: `driver_rebind()` in
+  `src/daemon/lend.c` unloads the stacked modules, checks the driver has no
+  user, unbinds in a child with a 15 s limit and refuses instead of hanging;
+  `zssctl on` uses it. Not yet tried against a real cut.
+- Not tried: unloading `nvidia_drm` and `nvidia_modeset` by hand while the
+  unbind waited, which should let it finish; the action was not permitted in
+  the unattended session. The busy cut (a program rendering) was not run.
+
+## Seventh and eighth power cuts: the card back without a reboot (9 October 2026, 22:17 and 22:24)
+
+Driver patch revision 6, and the daemon changes below. `vkcube` was rendering
+on the card under ZSS_AirLock, `btop` had the card open outside it, VS Code
+was registered. Logs: `surprise-cut-7.log`, `surprise-cut-8.log`.
+
+| Step | Result |
+| :--- | :--- |
+| Rail cut | The kernel module reported the loss after 100 ms. The driver found out first (`Xid 79`, raised against `btop`'s poll, 32 ms earlier) |
+| X server | Answered throughout |
+| `vkcube` | Rebuilt on the Intel GPU after 3.5 to 3.8 s, nothing lost |
+| VS Code | Its GPU process died; VS Code started another, on the Intel GPU |
+| Daemon | Hid the card's device files and driver files at once, so that nothing new could reach the driver that had given the card up |
+| `zssctl on` | **The card came back, no reboot**: marked unplugged, taken off the bus, rail on, bridge rescanned, `nvidia` bound to it as a new device (3.7 s and 7.2 s) |
+| After | `nvidia-smi` answered; a new `zss-run vkcube` rendered on the card |
+
+How it works. Once NVIDIA's driver has seen its card vanish it will not use it
+again, and every way of taking it off the card waits for ever: the unbind on
+the clients still holding the device (its own `nvidia_modeset` among them),
+the unload of `nvidia_drm` inside NVKMS. The driver already allows a device to
+leave with clients open in one case, an eGPU pulled from its port
+(`is_external_gpu` in `nv_pci_remove`). Revision 6 adds `unplugged
+PCI-ADDRESS` to `/proc/driver/nvidia/zss_hold`, which marks the card that way.
+The daemon then removes the card's functions from the bus with the rail still
+off, switches the rail on, rescans the bridge above the card, and the driver
+probes it as a new device (`nvidia_replug()` in `src/daemon/lend.c`).
+
+What is still missing:
+
+- **Programs that were moved off cannot go back.** NVIDIA's library inside
+  each of them still belongs to the card that was given up; moving `vkcube`
+  back crashed it (`libGLX_nvidia.so`). They now stay where they were rebuilt,
+  and programs started afterwards use the card.
+- **NVIDIA's display modules keep serving the card given up.** `nvidia_drm`
+  and `nvidia_modeset` know nothing of the card found again, so a program that
+  presents through NVIDIA's own driver (not through ZSS_AirLock) crashes in
+  `libnvidia-glcore.so`. The daemon tries to load them afresh at the end of
+  the replug, but a program still holding the old card's render node keeps
+  them in use; a later attempt, once nothing holds them, is not written yet.
+- The new card is `/dev/nvidia1`: the old minor stays allocated until its last
+  client closes.

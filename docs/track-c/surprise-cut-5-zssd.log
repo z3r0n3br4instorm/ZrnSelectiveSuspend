@@ -1,0 +1,12 @@
+Oct 09 20:01:32 mbpzrn zssd[31771]: zssd: 0000:01:00.0: attached -> lost
+Oct 09 20:01:32 mbpzrn zssd[31771]: zssd: 0000:01:00.0: evacuating applications to 0000:00:02.0
+Oct 09 20:02:16 mbpzrn zssd[31771]: zssd: teams-for-linux (pid 31837) recovered; lost contents: 22
+Oct 09 20:02:19 mbpzrn zssd[31771]: zssd: 0000:01:00.0: lost -> attaching
+Oct 09 20:02:38 mbpzrn systemd[1]: zssd.service: Watchdog timeout (limit 20s)!
+Oct 09 20:02:38 mbpzrn systemd[1]: zssd.service: Killing process 31771 (zssd) with signal SIGABRT.
+Oct 09 20:04:09 mbpzrn systemd[1]: zssd.service: State 'stop-watchdog' timed out. Killing.
+Oct 09 20:04:09 mbpzrn systemd[1]: zssd.service: Killing process 31771 (zssd) with signal SIGKILL.
+Oct 09 20:05:39 mbpzrn systemd[1]: zssd.service: Processes still around after SIGKILL. Ignoring.
+Oct 09 20:05:39 mbpzrn zssd[752555]: zssd: managing 0000:01:00.0 with backend zss-kmod
+Oct 09 20:05:39 mbpzrn zssd[752555]: zssd: nothing to recover
+Oct 09 20:07:09 mbpzrn systemd[1]: zssd.service: State 'stop-post' timed out. Terminating.

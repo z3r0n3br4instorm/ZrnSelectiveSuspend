@@ -173,6 +173,12 @@ struct zss_real {
     void *map;
     bool standin; /* image standing in for a swapchain image; on a swapchain: h is a presenter (present.c) */
     bool borrowed; /* image owned by a real swapchain: never destroyed directly */
+    void *synced;  /* `map`, once the whole shadow has been copied into it (watch.c) */
+};
+
+/* Bytes [off, end) of a shadow. */
+struct zss_span {
+    VkDeviceSize off, end;
 };
 
 struct zss_slot {
@@ -209,6 +215,11 @@ struct zss_obj {
             VkMemoryPropertyFlags flags;
             uint8_t *shadow;
             bool mapped;
+            bool watched;             /* the shadow knows its written pages (watch.c) */
+            uint64_t scanned;         /* the sync pass that last asked it */
+            bool scan_ok;             /* that pass got an answer; otherwise all of it counts */
+            struct zss_span *written; /* what it said */
+            uint32_t nwritten, capwritten;
         } mem;
         struct {
             VkBufferCreateInfo ci;
@@ -450,6 +461,9 @@ VkResult zss_backing_alloc(struct zss_dev *dev, const VkMemoryRequirements *req,
                            VkDeviceMemory *mem, void **map);
 void zss_dset_apply(struct zss_dev *dev, struct zss_obj *set);
 void zss_sync_to_device(struct zss_dev *dev, struct zss_obj *only_mem);
+uint8_t *zss_shadow_alloc(VkDeviceSize size, bool *watched);
+void zss_shadow_free(uint8_t *p, VkDeviceSize size, bool watched);
+bool zss_shadow_written(uint8_t *p, VkDeviceSize size, struct zss_span **spans, uint32_t *n, uint32_t *cap);
 void zss_sync_from_device(struct zss_dev *dev, struct zss_obj *only_mem);
 void zss_surface_repaint(struct zss_driver *drv, VkSurfaceKHR outer);
 void zss_cmd_track_submit_effects(struct zss_dev *dev, struct zss_obj *cb);

@@ -59,7 +59,7 @@ stub() {
 # Run it; it unpacks itself and starts. To only unpack: sh \$0 --unpack-only DIR
 set -e
 VERSION="$VERSION"
-SKIP=\$(awk '/^__ARCHIVE_BELOW__\$/ { print NR + 1; exit 0 }' "\$0")
+SKIP=@SKIP@   # the archive's first line; written in by make-bundle.sh, so that nothing but tail and tar is needed
 if [ "\${1:-}" = --unpack-only ]; then DEST="\${2:?--unpack-only DIR}"; UNPACK_ONLY=1; shift 2; else DEST=$dest; fi
 mkdir -p "\$DEST"
 tail -n +"\$SKIP" "\$0" | tar -xzf - -C "\$DEST"
@@ -80,7 +80,10 @@ STUB
 make_run() {
     local name="$1" root="$2" dest="$3" start="$4" file="$OUT/$5"
     echo "$VERSION" > "$root/VERSION"
-    { stub "$name" "$dest" "$start"; tar -czf - -C "$root" .; } > "$file"
+    local head
+    head="$(stub "$name" "$dest" "$start")"
+    head="${head//@SKIP@/$(( $(printf '%s\n' "$head" | wc -l) + 1 ))}"
+    { printf '%s\n' "$head"; tar -czf - -C "$root" .; } > "$file"
     chmod 755 "$file"
     echo "$file ($(du -h "$file" | cut -f1))"
 }

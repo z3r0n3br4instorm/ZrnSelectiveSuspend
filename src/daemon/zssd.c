@@ -98,7 +98,7 @@ const char *state_name(enum gpu_state s)
     return "?";
 }
 
-static void logmsg(const char *fmt, ...)
+void logmsg(const char *fmt, ...)
 {
     va_list ap;
 
@@ -1134,35 +1134,35 @@ static void do_attach(struct client *req, struct gpu *g, bool restore, const cha
     g->rebind_free = false;
     pci_driver(g->pci, bound, sizeof(bound));
     if (lost && g->kmod && !gpu_driver_frozen(g) && !strcmp(bound, "nvidia")) {
-        char who[300] = "";
-        pid_t holders[128];
-        int nh = find_holders(g, holders, 128);
-
-        for (int i = 0; i < nh; i++) {
-            char comm[64];
-
-            pid_comm(holders[i], comm, sizeof(comm));
-            if (service_listed(comm))
-                continue;
-            snprintf(who + strlen(who), sizeof(who) - strlen(who), "%s%s (pid %d)", who[0] ? ", " : "", comm, holders[i]);
-        }
-        if (who[0]) {
-            char msg[640];
-
-            snprintf(msg, sizeof(msg),
-                     "the driver saw the device vanish and will not use it again until it is reloaded, which it cannot be "
-                     "while these have the device open: %.300s. Log out of the session (that restarts the display server); "
-                     "the device is taken back once nothing holds it", who);
-            if (req) {
-                send_result(req, false, "", msg, g);
-            } else if (strncmp(g->last_refusal, who, sizeof(g->last_refusal) - 1)) {
-                logmsg("%s: %s", g->pci, msg);
-                snprintf(g->last_refusal, sizeof(g->last_refusal), "%s", who);
-            }
+        /*
+         * The driver saw the card vanish and gave it up: it cannot be unbound
+         * or unloaded without waiting for ever. It is taken off the bus and
+         * found again instead, the way the driver handles an unplugged eGPU
+         * (lend.c). Programs still holding the old card get errors from it;
+         * ZSS_AirLock's have moved already.
+         */
+        progress(req, "Bringing back %s, which its driver gave up: off the bus and found again", g->pci);
+        t = now_ms();
+        if (nvidia_replug(g, err) < 0) {
+            progress(req, "  FAILED: %s", err);
+            send_result(req, false, "", err, g);
             return;
         }
-        services_stop(g);
-        g->rebind_free = true;
+        g->written_off = false;
+        gpu_unhide(g);
+        services_start(g);
+        set_state(g, GS_ATTACHED);
+        progress(req, "  found again with driver %s (%.2f s)", bound, (double)(now_ms() - t) / 1000.0);
+        /*
+         * Programs that were moved off stay where they are: NVIDIA's own
+         * library inside each of them still belongs to the card that was given
+         * up, and moving one back to the card found again crashed it. Programs
+         * started from now on use the card.
+         */
+        (void)restore;
+        progress(req, "  programs that were moved off stay where they are; programs started now use the card");
+        send_result(req, true, "", "", g);
+        return;
     }
     if (lost && g->seen && !g->kmod && !gpu_returned(g)) {
         send_result(req, false, "", "the device is still absent", g);
@@ -1819,6 +1819,23 @@ static void check_bus(void)
         set_busy(true);
         do_evacuate(&gpus[i]);
         set_busy(false);
+    }
+    /*
+     * A card whose NVIDIA driver saw it vanish stays written off until the
+     * machine restarts, and a program that opens it then (nvidia-smi, nvtop)
+     * waits on that driver, which can take the desktop with it. Hidden at
+     * once, as a card switched off on request is.
+     */
+    for (int i = 0; i < ngpus; i++) {
+        struct gpu *g = &gpus[i];
+        char what[600];
+        int n;
+
+        if (busy || g->written_off || g->state != GS_LOST || !g->kmod || gpu_driver_frozen(g) || strcmp(g->driver, "nvidia"))
+            continue;
+        g->written_off = true;
+        n = gpu_hide(g, what, sizeof(what));
+        logmsg("%s: its driver saw it vanish; hidden from programs until the machine is restarted (%d): %s", g->pci, n, what);
     }
     if (auto_attach)
         check_reappeared();

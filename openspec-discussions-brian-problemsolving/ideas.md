@@ -1028,5 +1028,143 @@ the release workflow now also publishes `zss-installer.run` and
 downloads: `--unpack-only` unpacked and then ran the installer anyway. Fixed
 and checked.
 
-**Status: built, unproven.** Rendered and checked locally; not yet published,
-and the one-liner works only after the next release is built.
+**Status: built.** Published at `zerone-laboratories.github.io/zss/` from the
+`Zerone-Laboratories/zss` repository; release v0.1.0 exists and the one-line
+install downloads it.
+
+## 47. A landing that fits the screen, says "Alpha", and a wiki that warns before it hurts
+
+**As proposed.** "the landing should fit the screen", "add some icons of the
+current tested platform, Arch logo, X Server, Nvidia logo, vulkan and opengl",
+"next to ZrnSelectiveSuspend, add a tag saying Alpha. add a warning for the
+landing page, saying more compatibility will be added in the future and also
+show supported OpenGL and vulkan versions", "this looks generic ... this should
+metion without crashing the running session", "in each entry, it should
+mention the prerequisits and assumptions of the system state, so the users
+wont accidentally crash the X server or wayland", "a menu has square brackets
+on left and right like [ Use ]. Add a search function". Later: "i saw some
+repeated stuff in the website, can you check the descriptions and proofread
+it". Partly quoted from the session summary.
+
+**What came of it.** All of it, in the hairline style. The landing is one
+screen at 1440x780 and wider; the platform logos are Simple Icons (CC0), drawn
+in the page's own ink. The Alpha note gives Vulkan 1.1, OpenGL 3.2 / ES 3.1
+through Zink, and X11 (Wayland recognised, untested). Every task section has a
+Needs / Assumes / Watch out block, written from what the code actually refuses
+and allows. Writing them turned up something the old text got wrong: the
+login manager is not among the processes never frozen (only PID 1, logind,
+elogind and seatd are), and a compositor missing from the daemon's list of
+display servers would be frozen and stop the desktop. The pages now say so.
+The author wrote the search; the proofreading removed text the new blocks
+repeated, a "ZSS GPU Power Down system" that named nothing that exists, and a
+claim that the build fetches the Vulkan headers (it uses the bundled copy).
+
+**Status: built.** Published.
+
+## 48. Try it on distributions other than Arch
+
+**As proposed.** "fix this, and also run a deployment to a non-tested non arch
+distros as well".
+
+**What came of it.** The release build broke on GitHub because the generators
+read the system's newer Vulkan registry while compiling against the bundled
+headers; the build now always uses the bundled pair (the author committed the
+fix). Then containers: from source, Ubuntu 24.04, Fedora 44 and openSUSE
+Tumbleweed build and pass the tests; Debian 12's Meson (1.0) is too old for
+the project. The released downloads, built on Arch, ran on Ubuntu 24.04 and
+Fedora but not on Debian 12 (they needed glibc 2.38, through C23 `strtol` and
+`sscanf`) nor on a minimal openSUSE (the self-extractor needed `awk`). The
+workflow now builds the downloads on Ubuntu 22.04 (glibc 2.35) with Meson from
+pip, and the self-extractor carries its own offset.
+
+Checked in containers: built on Ubuntu 22.04 the way the workflow now does
+(tests pass; the programs need glibc 2.34), the downloads then installed,
+checked, uninstalled and ran the tester kit on Debian 12, Ubuntu 22.04 and
+24.04, Fedora 44 and openSUSE Tumbleweed. The workflow itself has not run on
+GitHub yet.
+
+**Status: built.** The new workflow runs on the next push.
+
+## 49. Measure the shim, then make it faster
+
+**As proposed.** "run some tests with and without the shim and see the
+performance differences, and try to optimize stuff".
+
+**What came of it.** The same programs with and without ZSS_AirLock, three
+runs each. Two real costs came out. A program drawing on the NVIDIA card was
+held to 60 frames a second whatever it asked for, because the presenter that
+copies its frames to the Intel screen always used a FIFO swapchain; it now
+uses the program's own mode where the screen's GPU has it. And OpenGL through
+Zink ran at a third of its speed, because every submission copied every
+mapped buffer whole from the layer's shadow to the GPU: 5.3 GB a second for
+glxgears. Now the kernel says which pages were written (userfaultfd write
+protection and PAGEMAP_SCAN, Linux 6.7), and only those are copied.
+
+Measured back to back with the screen on, medians of three: vkcube on NVIDIA
+under the layer went from 59.6 to 861 frames a second (about 1530 without the
+layer); glxgears through Zink on NVIDIA from 59.9 to 1077; on Intel from 458
+to 549 (1175 without the layer; an earlier, quieter run gave 350 to 655).
+Everything else stayed within the noise. The moving tests, which compare
+pixels after each move, pass.
+
+On the way: two moving tests failed and looked like a regression; they failed
+on the old build too, because the screen had gone into power saving and a
+FIFO swapchain waits for vblanks that a sleeping screen does not give.
+
+**Status: built.** In the working tree, not yet installed or committed.
+
+## 50. Demo videos, for the website
+
+**As proposed.** "record a video of detaching and reattaching the GPU (because
+its clean and empty) on workspace two with intel gpu monitor is active and
+nvidia-smi loop is runnung this is for demonstrationand then also demo the GPU
+passthrough on a live system", "and add it to the website and push that",
+"dont make it look like an AI did it tho".
+
+**What came of it.** Two recordings of the real desktop, typed at a person's
+pace. The first: `zssctl off` and `on` with `intel_gpu_top`, `nvidia-smi` and
+a spinning `vkcube` on screen (off in 0.66 s, on in 1.03 s, the cube never
+stops). The second: `zssctl lend`, a CachyOS live guest in QEMU with the card,
+`lspci` inside it, shutdown, `zssctl reclaim` (lent in 1.1 s, back in 4.6 s).
+The guest's own driver found the real GK107 but stopped there: the Mac Edition
+card has no video BIOS for `nouveau` to read; a ROM file for QEMU is the next
+step. Both videos are on the website with plain captions that say so.
+
+**Status: built.** Published.
+
+## 51. A surprise power cut, now that X no longer holds the card
+
+**As proposed.** "finally this should be done finally because if not other
+stuff are gonna get fucked up, test the suprise power cut on gpu because we
+are unbound it from the kernel now".
+
+**What came of it.** Run last, after everything else was saved
+(`docs/track-c.md`, "Fifth power cut"). The author's reasoning held for the
+display server: with the card out of X, the desktop answered throughout a cut
+under a running driver, where earlier cuts stalled or stopped it. Teams, idle
+on the card, was rebuilt on the Intel GPU when it next drew. The bring-back
+then failed in a new way: to reload the driver after the loss, the daemon
+unbinds it, and NVIDIA's remove waits for ever while its own modeset module
+still holds the card, taking the daemon with it into the kernel. Lending
+already avoids exactly this (unload the stacked modules, check, time-limited
+unbind); the recovery path has to use the same code. The laptop was powered
+down, as the author had asked for a frozen machine. The cut was meant to be an
+idle one and was not: the detach before it was refused and I went ahead
+without reading the answer.
+
+After the reboot the bring-back was changed to use the lending code
+(`driver_rebind()` in `src/daemon/lend.c`): stacked modules unloaded first,
+the driver checked for users, the unbind done by a child with a 15 s limit.
+
+Then the author asked whether a lost card could be passed to a small VM,
+brought up and suspended there, and handed back. It could not: the card was
+fine, the host's driver was what had given up, and passing the card to a VM
+starts with the same unbind that hangs. Looking for why the unbind hangs led
+to the way out: NVIDIA's driver lets an eGPU leave with clients still open.
+Patch revision 6 marks the lost card that way, and the daemon takes it off the
+bus and rescans. Two busy cuts on 9 October came back with no reboot
+(`docs/track-c.md`, seventh and eighth). Programs that were moved off stay on
+the Intel GPU, and NVIDIA's own display modules still serve the old card.
+
+**Status: built.** The busy cut recovers without a reboot; the two remaining
+limits are listed in `docs/track-c.md`.

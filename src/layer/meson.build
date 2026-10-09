@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: GPL-2.0-only
 layer_lib = shared_library('zss_airlock',
   'icd.c', 'gate.c', 'device.c', 'cmd.c', 'swapchain.c', 'format.c', 'migrate.c', 'control.c', 'retain.c',
-  'vk11.c', 'profile.c', 'lower.c', 'present.c', layer_tables,
+  'vk11.c', 'profile.c', 'lower.c', 'present.c', 'watch.c', layer_tables,
   dependencies: [common_dep, vulkan_headers, wsi_headers, threads, dl],
   c_args: ['-fvisibility=hidden'],
   # The layer runs a thread of its own and keeps the application's objects. A

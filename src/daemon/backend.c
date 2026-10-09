@@ -238,6 +238,24 @@ static int gmux_set(struct gpu *g, bool on, char *err)
     return -1;
 }
 
+/*
+ * The power rail alone, with no check through the device: for a card that has
+ * been taken off the bus, whose configuration space cannot be read.
+ */
+int gmux_rail(struct gpu *g, bool on, char *err)
+{
+    unsigned char first = 1, second = on ? 3 : 0;
+
+    if (gmux_base < 0 && gmux_probe(g, err) < 0)
+        return -1;
+    if (port_rw(gmux_base + GMUX_PORT_DISCRETE_POWER, &first, true) < 0 ||
+        port_rw(gmux_base + GMUX_PORT_DISCRETE_POWER, &second, true) < 0) {
+        snprintf(err, ZSSD_ERR, "cannot write the gmux power port: %s", strerror(errno));
+        return -1;
+    }
+    return 0;
+}
+
 static int gmux_off(struct gpu *g, char *err)
 {
     return gmux_set(g, false, err);
@@ -471,6 +489,12 @@ static int kmod_power(struct gpu *g, const char *what, char *err)
     return -1;
 }
 
+/* The module manages the device again, after it has been taken off the bus and found anew. */
+int gpu_kmod_manage(struct gpu *g, char *err)
+{
+    return kmod_manage(g, err);
+}
+
 /* A request to the module by name ("lend", "unlend", "reclaim"), for a device it manages. */
 int gpu_kmod_request(struct gpu *g, const char *what, char *err)
 {
@@ -508,12 +532,8 @@ static int kmod_on(struct gpu *g, char *err)
          */
         pci_driver(g->pci, driver, sizeof(driver));
         if (kmod_read(g, "needs_rebind", text, sizeof(text)) == 0 && text[0] == '1' && driver[0] &&
-            (strcmp(driver, "nvidia") || g->rebind_free)) {
-            snprintf(path, sizeof(path), "/sys/bus/pci/drivers/%s/unbind", driver);
-            write_text(path, g->pci);
-            snprintf(path, sizeof(path), "/sys/bus/pci/drivers/%s/bind", driver);
-            write_text(path, g->pci);
-        }
+            (strcmp(driver, "nvidia") || g->rebind_free))
+            return driver_rebind(g, err);
         return 0;
     }
     if (errno != ENODEV && errno != ENOENT)

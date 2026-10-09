@@ -86,7 +86,10 @@ void zss_obj_unref(struct zss_obj *o)
         dev->tail = o->prev;
 
     switch (o->kind) {
-    case ZK_MEMORY: free(o->u.mem.shadow); break;
+    case ZK_MEMORY:
+        zss_shadow_free(o->u.mem.shadow, o->u.mem.size, o->u.mem.watched);
+        free(o->u.mem.written);
+        break;
     case ZK_BUFFER:
         free(o->u.buf.saved);
         zss_retain_release(&o->u.buf.ret);
@@ -625,18 +628,58 @@ static uint8_t *shadow_of(const struct zss_obj *o, const struct zss_obj *only_me
     return m->u.mem.shadow + off;
 }
 
+/*
+ * The shadow's pages written since its memory was last asked, once per sync
+ * pass: several objects may be bound to one allocation, and asking again
+ * would find nothing for the second.
+ */
+static bool written_spans(struct zss_obj *m, uint64_t pass)
+{
+    if (!m->u.mem.watched)
+        return false;
+    if (m->u.mem.scanned != pass) {
+        m->u.mem.scanned = pass;
+        m->u.mem.scan_ok = zss_shadow_written(m->u.mem.shadow, m->u.mem.size, &m->u.mem.written,
+                                              &m->u.mem.nwritten, &m->u.mem.capwritten);
+    }
+    return m->u.mem.scan_ok;
+}
+
 void zss_sync_to_device(struct zss_dev *dev, struct zss_obj *only_mem)
 {
+    static uint64_t passes;
+    uint64_t pass;
+
     /* A lost device's mappings may no longer be backed by anything. */
     if (dev->lost || !dev->real)
         return;
     pthread_mutex_lock(&zss_lock);
+    pass = ++passes;
     for (struct zss_obj *o = dev->head; o; o = o->next) {
-        VkDeviceSize size;
+        VkDeviceSize size, off;
         uint8_t *src = shadow_of(o, only_mem, &size);
+        struct zss_obj *m;
 
-        if (src && !(o->kind == ZK_BUFFER && o->u.buf.gpu_written))
+        if (!src || (o->kind == ZK_BUFFER && o->u.buf.gpu_written))
+            continue;
+        m = o->kind == ZK_BUFFER ? o->u.buf.mem : o->u.img.mem;
+        off = o->kind == ZK_BUFFER ? o->u.buf.mem_off : o->u.img.mem_off;
+        /* The pages it has been asked about must include everything since this mapping was filled. */
+        if (!written_spans(m, pass) || o->r.synced != o->r.map) {
             memcpy(o->r.map, src, size);
+            o->r.synced = o->r.map;
+            continue;
+        }
+        for (uint32_t i = 0; i < m->u.mem.nwritten; i++) {
+            VkDeviceSize a = m->u.mem.written[i].off, b = m->u.mem.written[i].end;
+
+            if (a < off)
+                a = off;
+            if (b > off + size)
+                b = off + size;
+            if (a < b)
+                memcpy((uint8_t *)o->r.map + (a - off), src + (a - off), b - a);
+        }
     }
     pthread_mutex_unlock(&zss_lock);
 }
@@ -696,7 +739,7 @@ VKAPI_ATTR VkResult VKAPI_CALL zss_MapMemory(VkDevice device, VkDeviceMemory mem
     (void)size;
     (void)flags;
     if (!m->u.mem.shadow)
-        m->u.mem.shadow = calloc(1, m->u.mem.size ? m->u.mem.size : 1);
+        m->u.mem.shadow = zss_shadow_alloc(m->u.mem.size, &m->u.mem.watched);
     if (!m->u.mem.shadow) {
         zss_leave();
         return VK_ERROR_MEMORY_MAP_FAILED;

@@ -944,6 +944,7 @@ static enum zss_outcome relocate(struct zss_dev *dev, struct zss_gpu *target, bo
                 i = 0;
                 for (struct zss_obj *o = dev->head; o; o = o->next) {
                     o->r = snap[i++];
+                    o->r.synced = NULL; /* written pages may have been counted against the new mappings */
                     if (o->kind == ZK_SWAPCHAIN) {
                         zss_swapchain_rollback(o);
                         o->u.sc.retired = o->r.h == 0;

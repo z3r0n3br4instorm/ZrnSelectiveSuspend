@@ -76,6 +76,7 @@ struct gpu {
     pid_t waiting[16];      /* callers asleep on the suspended driver that the device was not woken for */
     int nwaiting;
     bool serving;           /* off on request, but powered for a moment because the display server called */
+    bool written_off;       /* lost, and its driver saw it: hidden until the machine is restarted */
     long long serve_until;  /* when it goes off again */
     long long serve_ended;  /* when it last went off again */
     long long serve_for;    /* ms it stays on per call; grows when calls come close together */
@@ -157,6 +158,11 @@ struct lend_obstacle {
 int lend_obstacles(struct gpu *g, const pid_t *holders, int nh, bool with_group, struct lend_obstacle *out, int max);
 int lend_companions(struct gpu *g, char out[][16], int max);
 int lend_stacked_modules(struct gpu *g, char out[][64], int max);
+void logmsg(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
+int driver_rebind(struct gpu *g, char *err);
+int nvidia_replug(struct gpu *g, char *err);
+int gmux_rail(struct gpu *g, bool on, char *err);
+int gpu_kmod_manage(struct gpu *g, char *err);
 void zssd_keepalive(void); /* zssd.c: tells the service manager the daemon is alive during a long step */
 int lend_hand_over(struct gpu *g, bool with_group, char *err);
 int lend_take_back(struct gpu *g, char *err);

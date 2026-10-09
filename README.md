@@ -144,13 +144,16 @@ and why (MMIO shadowing and a DMA isolator of our own are not planned).
 ## Installing
 
 Each push to `main` publishes a release (GitHub Actions,
-`.github/workflows/release.yml`) with two downloads, built on Arch Linux:
+`.github/workflows/release.yml`) with two downloads, tested on Arch Linux and built
+on Ubuntu 22.04:
 
 - `zss-installer-VERSION.run`: `sh zss-installer-VERSION.run --check` says what
   the machine supports and changes nothing; without `--check` it installs.
 - `zss-tester-VERSION.run`: the tester kit, with the moving tests ready to run.
 
-They need a distribution whose libraries are as new as Arch Linux's. The
+They need glibc 2.34 or later: tried on Debian 12, Ubuntu 22.04 and 24.04,
+Fedora 44 and openSUSE Tumbleweed (install, `--check`, uninstall and the
+tester kit, in containers), and Arch Linux. The
 version is `MAJOR.MINOR` from `meson.build` and a number counted up from the
 last release; `packaging/make-bundle.sh VERSION DIR` makes the same files
 locally. From source:
@@ -389,6 +392,7 @@ build/src/layer/zss-run chromium
 | `ZSS_VULKAN` | `1.0` makes ZSS_AirLock present Vulkan 1.0 only, as it did before |
 | `ZSS_REAL_DRIVER_FILES` | Colon-separated driver manifests for ZSS_AirLock to use instead of the system's |
 | `ZSS_RETAIN` | Where uploaded textures are kept so they survive a lost GPU: `disk` (default), `ram`, or `off` |
+| `ZSS_WRITE_WATCH` | `0` copies a program's mapped memory to the GPU whole at every submission, as before. By default only the pages it wrote since the last submission are copied (Linux 6.7 or later; older kernels fall back to the whole copy) |
 | `ZSS_RETAIN_LIMIT_MB`, `ZSS_RETAIN_QUEUE_MB` | Size cap of the store (4096) and of data waiting to be written (256) |
 | `ZSS_BIND_PCI` | Test aid: makes the software renderer pose as the PCI device at that address |
 | `ZSS_TEST_LOSE_AT_SUBMIT` | Test aid: ZSS_AirLock behaves as if the GPU died at that submit |

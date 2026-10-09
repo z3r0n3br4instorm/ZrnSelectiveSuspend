@@ -1,4 +1,4 @@
-ZSS wake-on-touch for the NVIDIA 470.256.02 kernel modules (revision 5)
+ZSS wake-on-touch for the NVIDIA 470.256.02 kernel modules (revision 6)
 
 While the driver is suspended through /proc/driver/nvidia/suspend, every
 caller waits on a lock until the driver is resumed, in a loop with no timeout.
@@ -53,6 +53,22 @@ and keeps from a program the error that would send it to another GPU.
   device, and can be thawed. Closing a file is put off until the thaw, as
   during a suspend; the driver's own threads wait as before.
 
+Revision 6 adds a way out for a device the driver has given up. When the
+power goes and the driver finds out before it can be frozen, it marks the GPU
+lost and will not use it again; every way of taking it off the device then
+waits for ever, because clients still have the device open (NVIDIA's own
+modeset module among them). The driver already supports exactly this case for
+an eGPU, whose port can be unplugged with clients active.
+
+  /proc/driver/nvidia/zss_hold    write "unplugged 0000:01:00.0": treat that
+                                  device as such an eGPU. Removing the PCI
+                                  device then goes ahead with clients open,
+                                  each finishes on its own last close, and a
+                                  rescan of the bus brings the device back as
+                                  a new one. Nothing is asked of the hardware
+
+  nv_zss_unplugged() is exported beside the rest.
+
 Nothing changes while the driver is running: the fast path is the same single
 trylock as before. Only the open kernel-interface layer is touched.
 
@@ -65,7 +81,7 @@ packaging/zss-nvidia-patch).
 diff -u a/common/inc/nv-linux.h b/common/inc/nv-linux.h
 --- a/common/inc/nv-linux.h
 +++ b/common/inc/nv-linux.h
-@@ -1628,18 +1628,50 @@
+@@ -1628,18 +1628,51 @@
   * the fake signals sent from the freezer in the kernel's system
   * suspend/hibernate paths.
   */
@@ -80,6 +96,7 @@ diff -u a/common/inc/nv-linux.h b/common/inc/nv-linux.h
 +int nv_zss_refusing(void);
 +int nv_zss_set_refuse(int on);
 +int nv_zss_freeze_refusing(void);
++int nv_zss_unplugged(const char *addr);
 +extern void (*nv_zss_modeset_gate)(int closed);
 +extern wait_queue_head_t nv_zss_wake_wq;
 +
@@ -231,7 +248,7 @@ diff -u a/nvidia/nv.c b/nvidia/nv.c
  #if defined(CONFIG_PM)
  static nv_power_state_t nv_system_power_state;
  static nv_pm_action_depth_t nv_system_pm_action_depth;
-@@ -4297,6 +4394,190 @@
+@@ -4297,6 +4394,222 @@
      return status;
  }
  
@@ -419,10 +436,42 @@ diff -u a/nvidia/nv.c b/nvidia/nv.c
 +}
 +EXPORT_SYMBOL_GPL(nv_zss_release);
 +
++/*
++ * The device at `addr` lost its power and the driver saw it go: it will not
++ * be used again, and taking the driver off it waits for ever for clients that
++ * still have it open (NVIDIA's own modeset module among them). Marks it the
++ * way the driver marks an eGPU, whose port can be unplugged with clients
++ * active: removing the PCI device then goes ahead, each client finishes on
++ * its own last close, and a rescan brings the device back as a new one.
++ * Asks nothing of the hardware.
++ */
++int nv_zss_unplugged(const char *addr)
++{
++    nv_linux_state_t *nvl;
++    int ret = -ENODEV;
++
++    LOCK_NV_LINUX_DEVICES();
++    for (nvl = nv_linux_devices; nvl != NULL; nvl = nvl->next)
++    {
++        if (strcmp(pci_name(nvl->pci_dev), addr) == 0)
++        {
++            nvl->nv_state.is_external_gpu = NV_TRUE;
++            ret = 0;
++        }
++    }
++    UNLOCK_NV_LINUX_DEVICES();
++    if (ret == 0)
++    {
++        nv_printf(NV_DBG_ERRORS, "NVRM: ZSS: %s marked unplugged; it can be removed with clients open\n", addr);
++    }
++    return ret;
++}
++EXPORT_SYMBOL_GPL(nv_zss_unplugged);
++
  NV_STATUS
  nv_set_system_power_state(
      nv_power_state_t power_state,
-@@ -4323,6 +4604,13 @@
+@@ -4323,6 +4636,13 @@
  
      down(&nv_system_power_state_lock);
  
@@ -456,7 +505,7 @@ diff -u a/nvidia/nv-mmap.c b/nvidia/nv-mmap.c
 diff -u a/nvidia/nv-procfs.c b/nvidia/nv-procfs.c
 --- a/nvidia/nv-procfs.c
 +++ b/nvidia/nv-procfs.c
-@@ -671,6 +671,155 @@
+@@ -671,6 +671,164 @@
      return single_open(file, nv_procfs_show_suspend, NULL);
  }
  
@@ -506,7 +555,7 @@ diff -u a/nvidia/nv-procfs.c b/nvidia/nv-procfs.c
 +
 +/*
 + * ZSS: /proc/driver/nvidia/zss_hold. Write "freeze", "freezerefuse", "refuse",
-+ * "wait", "thaw" or "release"
++ * "wait", "thaw", "release" or "unplugged PCI-ADDRESS"
 + * (see nv_zss_freeze() and nv_zss_refusing() in nv.c); reads as "running",
 + * "frozen" or "frozen refusing".
 + */
@@ -537,7 +586,7 @@ diff -u a/nvidia/nv-procfs.c b/nvidia/nv-procfs.c
 +    loff_t *pos
 +)
 +{
-+    char kbuf[sizeof("freezerefuse\n")];
++    char kbuf[sizeof("unplugged 0000:00:00.0\n")];
 +    unsigned i;
 +    int ret;
 +
@@ -557,6 +606,15 @@ diff -u a/nvidia/nv-procfs.c b/nvidia/nv-procfs.c
 +    }
 +
 +    count = min(count, sizeof(kbuf) - 1);
++    kbuf[count] = '\0';
++    if (strncasecmp(kbuf, "unplugged ", strlen("unplugged ")) == 0)
++    {
++        char *addr = kbuf + strlen("unplugged ");
++
++        addr[strcspn(addr, " \n")] = '\0';
++        ret = nv_zss_unplugged(addr);
++        return (ret != 0) ? ret : count;
++    }
 +    for (i = 0; i < count && isalpha(kbuf[i]); i++);
 +    kbuf[i] = '\0';
 +
@@ -612,7 +670,7 @@ diff -u a/nvidia/nv-procfs.c b/nvidia/nv-procfs.c
  static nv_proc_ops_t nv_procfs_suspend_fops = {
       NV_PROC_OPS_SET_OWNER()
      .NV_PROC_OPS_OPEN    = nv_procfs_open_suspend,
-@@ -1328,6 +1477,14 @@
+@@ -1328,6 +1486,14 @@
      if (!entry)
          goto failed;
  

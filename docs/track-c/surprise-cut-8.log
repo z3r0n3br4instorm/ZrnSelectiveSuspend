@@ -1,0 +1,44 @@
+[  0.001] ==== cut at 2026-10-09 22:24:52, application pid 17044, gmux base 0x700
+[  0.014] before: bus=de10 module=on driver_frozen=0 nvidia=running [0000:01:00.0 nvidia online; 0000:01:00.1 snd_hda_intel online]
+[  0.048] before: daemon: 0000:01:00.0  state=attached  backend=zss-kmod  removal=not supported  wake=yes  iommu=yes | pid 17044   vkcube           migratable
+[  0.061] before: application: alive, state S, holds ['/dev/dri/renderD128', '/dev/dri/renderD129', '/dev/nvidia-modeset', '/dev/nvidia1', '/dev/nvidiactl']
+[  0.081] before: X server: answers
+[  0.093] CUTTING the discrete GPU's power rail now, with its driver running and nothing warned
+[  0.206] the kernel module reported the loss 101 ms after the cut
+[  0.358] + 0.23s: bus=ffff module=lost driver_frozen=0 nvidia=running [0000:01:00.0 nvidia offline; 0000:01:00.1 snd_hda_intel offline]
+[  0.388] + 0.23s: daemon: 0000:01:00.0  state=lost  backend=zss-kmod  removal=not supported  wake=yes  iommu=yes | pid 17044   vkcube           migratable
+[  0.401] + 0.23s: application: alive, state S, holds ['/dev/dri/renderD128', '/dev/dri/renderD129', '/dev/nvidia-modeset', '/dev/nvidia1', '/dev/nvidiactl']
+[  0.416] + 0.23s: X server: answers
+[  0.428] + 0.23s: kernel: snd_hda_intel 0000:00:1b.0: Unstable LPIB (245472 >= 8192); disabling LPIB delay counting
+[  0.440] + 0.23s: kernel: zss: 0000:01:00.0: lost (stopped answering)
+[  0.452] + 0.23s: kernel: NVRM: GPU at PCI:0000:01:00: GPU-0b408da4-2e5c-e152-9491-e9f264d11c9e
+[  0.463] + 0.23s: kernel: NVRM: Xid (PCI:0000:01:00): 79, pid=56, GPU has fallen off the bus.
+[  0.476] + 0.23s: kernel: NVRM: GPU 0000:01:00.0: GPU has fallen off the bus.
+[  0.488] + 0.23s: kernel: NVRM: A GPU crash dump has been created. If possible, please run\x0aNVRM: nvidia-bug-report.sh as root to collect this data before\x0aNVRM: the NVIDIA kernel module is unloaded.
+[  0.825] + 0.72s: bus=ffff module=lost driver_frozen=0 nvidia=running [0000:01:00.0 nvidia offline; 0000:01:00.1 snd_hda_intel offline]
+[  0.855] + 0.72s: daemon: 0000:01:00.0  state=lost  backend=zss-kmod  removal=not supported  wake=yes  iommu=yes | pid 17044   vkcube           migratable
+[  0.867] + 0.72s: application: alive, state S, holds ['/dev/dri/renderD128', '/dev/dri/renderD129', '/dev/nvidia-modeset', '/dev/nvidia1', '/dev/nvidiactl']
+[  0.886] + 0.72s: X server: answers
+[  1.466] + 1.34s: bus=ffff module=lost driver_frozen=0 nvidia=running [0000:01:00.0 nvidia offline; 0000:01:00.1 snd_hda_intel offline]
+[  1.496] + 1.34s: daemon: 0000:01:00.0  state=lost  backend=zss-kmod  removal=not supported  wake=yes  iommu=yes | pid 17044   vkcube           migratable
+[  1.508] + 1.34s: application: alive, state S, holds ['/dev/dri/renderD128', '/dev/dri/renderD129', '/dev/nvidia-modeset', '/dev/nvidia1', '/dev/nvidiactl']
+[  1.523] + 1.34s: X server: answers
+[  3.576] the daemon reported the application moved away 3.45 s after the cut
+[  3.589] + 3.45s: bus=ffff module=lost driver_frozen=0 nvidia=running [0000:01:00.0 nvidia offline; 0000:01:00.1 snd_hda_intel offline]
+[  3.622] + 3.45s: daemon: 0000:01:00.0  state=lost  backend=zss-kmod  removal=not supported  wake=yes  iommu=yes | pid 17044   vkcube           migratable migrated-away
+[  3.635] + 3.45s: application: alive, state S, holds ['/dev/dri/renderD128', '/dev/dri/renderD129', '/dev/nvidia-modeset', '/dev/nvidia1', '/dev/nvidiactl']
+[  3.652] + 3.45s: X server: answers
+[  6.666] + 6.56s: bus=ffff module=lost driver_frozen=0 nvidia=running [0000:01:00.0 nvidia offline; 0000:01:00.1 snd_hda_intel offline]
+[  6.698] + 6.56s: daemon: 0000:01:00.0  state=lost  backend=zss-kmod  removal=not supported  wake=yes  iommu=yes | pid 17044   vkcube           migratable migrated-away
+[  6.710] + 6.56s: application: alive, state S, holds ['/dev/dri/renderD128', '/dev/dri/renderD129', '/dev/nvidia-modeset', '/dev/nvidia1', '/dev/nvidiactl']
+[  6.727] + 6.56s: X server: answers
+[ 11.742] +11.64s: bus=ffff module=lost driver_frozen=0 nvidia=running [0000:01:00.0 nvidia offline; 0000:01:00.1 snd_hda_intel offline]
+[ 11.781] +11.64s: daemon: 0000:01:00.0  state=lost  backend=zss-kmod  removal=not supported  wake=yes  iommu=yes | pid 17044   vkcube           migratable migrated-away
+[ 11.794] +11.64s: application: alive, state S, holds ['/dev/dri/renderD128', '/dev/dri/renderD129', '/dev/nvidia-modeset', '/dev/nvidia1', '/dev/nvidiactl']
+[ 11.812] +11.64s: X server: answers
+[ 16.828] +16.72s: bus=ffff module=lost driver_frozen=0 nvidia=running [0000:01:00.0 nvidia offline; 0000:01:00.1 snd_hda_intel offline]
+[ 16.861] +16.72s: daemon: 0000:01:00.0  state=lost  backend=zss-kmod  removal=not supported  wake=yes  iommu=yes | pid 17044   vkcube           migratable migrated-away
+[ 16.873] +16.72s: application: alive, state S, holds ['/dev/dri/renderD128', '/dev/dri/renderD129', '/dev/nvidia-modeset', '/dev/nvidia1', '/dev/nvidiactl']
+[ 16.891] +16.72s: X server: answers
+[ 16.903] observation over; the rail is still OFF and nothing was restored
+[ 16.923] summary: loss seen by the module after 0.1008768081665039, application moved after 3.452314853668213, application alive, state S, holds ['/dev/dri/renderD128', '/dev/dri/renderD129', '/dev/nvidia-modeset', '/dev/nvidia1', '/dev/nvidiactl'], X answers

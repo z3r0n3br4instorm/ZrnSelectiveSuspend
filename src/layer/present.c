@@ -434,7 +434,22 @@ struct zss_presenter *zss_presenter_new(struct zss_dev *dev, const VkSwapchainCr
     p->ci.imageUsage = VK_IMAGE_USAGE_TRANSFER_DST_BIT;
     p->ci.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
     p->ci.compositeAlpha = app->compositeAlpha;
-    p->ci.presentMode = VK_PRESENT_MODE_FIFO_KHR; /* every driver has it; the application's own pace is kept by its waits */
+    /*
+     * The application's own mode where the screen's GPU has it: one that asked
+     * not to wait for the display (IMMEDIATE, MAILBOX) would otherwise be held
+     * to the refresh rate, since each present waits for the screen's image.
+     * FIFO otherwise; every driver has it.
+     */
+    p->ci.presentMode = VK_PRESENT_MODE_FIFO_KHR;
+    if (app->presentMode != VK_PRESENT_MODE_FIFO_KHR) {
+        VkPresentModeKHR modes[16];
+        uint32_t nm = 16;
+
+        if (ifn->GetPhysicalDeviceSurfacePresentModesKHR(pd, p->surface, &nm, modes) >= 0)
+            for (uint32_t i = 0; i < nm; i++)
+                if (modes[i] == app->presentMode)
+                    p->ci.presentMode = app->presentMode;
+    }
     p->ci.clipped = VK_TRUE;
     if ((r = screen_swapchain(p)) != VK_SUCCESS) {
         zss_dbg("the screen's GPU did not make a swapchain for the window (VkResult %d); presenting directly", r);
