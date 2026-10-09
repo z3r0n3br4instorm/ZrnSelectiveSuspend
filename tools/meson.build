@@ -4,7 +4,8 @@
 survey_src = custom_target('zss-survey-source',
   output: 'zss_survey_gen.c',
   input: ['gen_survey.py', 'zss_registry.py'],
-  command: [python, '@INPUT0@', '@OUTPUT@'])
+  depend_files: vk_registry,
+  command: [python, '@INPUT0@', '@OUTPUT@', '--registry', vk_registry])
 
 # An ordinary Vulkan layer that only watches; see tools/zss-survey.
 survey_lib = shared_library('VkLayer_zss_survey', survey_src,
@@ -23,4 +24,5 @@ configure_file(input: 'zss_survey.json.in', output: 'VkLayer_zss_survey.json', c
 layer_tables = custom_target('zss-layer-tables',
   output: 'zss_feats_gen.h',
   input: ['gen_layer_tables.py', 'zss_registry.py'],
-  command: [python, '@INPUT0@', '@OUTPUT@'])
+  depend_files: vk_registry,
+  command: [python, '@INPUT0@', '@OUTPUT@', '--registry', vk_registry])

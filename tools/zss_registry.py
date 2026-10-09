@@ -16,10 +16,13 @@ INSTANCE_LEVEL = {"VkInstance", "VkPhysicalDevice"}
 
 def find_registry(hint=None):
     here = os.path.dirname(os.path.abspath(__file__))
-    candidates = [hint, "/usr/share/vulkan/registry/vk.xml"]
+    # The build passes the registry of the headers it compiles against. Without a
+    # hint, prefer that same bundled copy, so that a hand run matches the build.
+    candidates = [hint]
     sub = os.path.join(here, "..", "subprojects")
     if os.path.isdir(sub):
         candidates += [os.path.join(sub, d, "registry", "vk.xml") for d in sorted(os.listdir(sub), reverse=True)]
+    candidates.append("/usr/share/vulkan/registry/vk.xml")
     for c in candidates:
         if c and os.path.exists(c):
             return c

@@ -303,11 +303,9 @@ down. What the laptop needed (the card out of X, the IOMMU, interrupts without
 remapping because of a firmware bug) and how to start the guest:
 [`docs/vm-handover.md`](docs/vm-handover.md).
 
-## When a card is lost without warning
+## When a card is lost unexpectedly
 
-This is the case ZSS exists for and the one that is least finished. What
-happens today on the reference laptop (NVIDIA 470 with the patch, X running,
-kernel module loaded), from four real power cuts:
+When powering down via the ZSS GPU Power Down system, the GPU is safely powered down and recovered cleanly. If the GPU loses power or disconnects unexpectedly while something was actively rendering, the kernel and background system processes stay intact, but the display manager may hang. What happens today on the reference laptop (NVIDIA 470 with the patch, X running, kernel module loaded), from real power cuts:
 
 | The card was | The desktop | Programs on the card | Getting the card back |
 | :--- | :--- | :--- | :--- |
