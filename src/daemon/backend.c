@@ -471,6 +471,23 @@ static int kmod_power(struct gpu *g, const char *what, char *err)
     return -1;
 }
 
+/* A request to the module by name ("lend", "unlend", "reclaim"), for a device it manages. */
+int gpu_kmod_request(struct gpu *g, const char *what, char *err)
+{
+    if (!g->kmod) {
+        snprintf(err, ZSSD_ERR, "ZSS_Interceptor (the zss kernel module) is not managing %s", g->pci);
+        return -1;
+    }
+    return kmod_power(g, what, err);
+}
+
+bool gpu_kmod_lent(struct gpu *g)
+{
+    char state[32];
+
+    return g->kmod && kmod_read(g, "state", state, sizeof(state)) == 0 && !strcmp(state, "lent");
+}
+
 static int kmod_off(struct gpu *g, char *err)
 {
     return kmod_power(g, "off", err);

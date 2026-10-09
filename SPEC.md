@@ -106,14 +106,14 @@ backends and the NVIDIA patch.
 
 ## 1. Executive Summary & Vision
 
-`ZrnSelectiveSuspend` is an in-kernel virtualization and power-orchestration shim. It decouples the physical hardware power state and link status of a PCIe Graphics Processing Unit (GPU) from the software state of the operating system, display servers (Xorg / Wayland), and user applications.
+`ZrnSelectiveSuspend` decouples a PCIe GPU's power and presence from the programs that use it. A user-space shim (ZSS_AirLock) sits between programs and the real graphics drivers and can rebuild a program on another GPU at any moment; a kernel shim (ZSS_Interceptor) quiesces the GPU's driver, cuts and restores power, and notices a card that vanishes; a daemon decides and sequences.
 
-While developed and verified against the demanding dual-GPU architecture of the **Apple MacBookPro9,1** (featuring Apple `gmux` and Intel **Lightridge** Thunderbolt silicon), **`ZrnSelectiveSuspend` is architected from the ground up to be completely vendor- and platform-agnostic**.
+It was developed and verified on the **Apple MacBookPro9,1** (Apple `gmux`, NVIDIA GT 650M, Intel HD 4000, Lightridge Thunderbolt), and is designed to be vendor- and platform-agnostic; the table in `README.md` says how far that has been proven.
 
-The core architecture enables:
-1. **Universal 0W Idle Power Gating:** Cutting physical power rails to any discrete GPU at runtime without unloading kernel modules, disrupting display servers, or terminating client applications.
-2. **Surprise Hot-Removal & Reconnect Immunity:** Allowing PCIe GPUs (internal discrete chips or external eGPUs over Thunderbolt 1/2/3/4, USB4, or OCuLink) to physically vanish and reappear on the bus without causing PCIe bus aborts, CPU Machine Check Exceptions (MCE), or kernel panics.
-3. **Transparent Re-POST & Resurrection:** Cold-initializing resurrected or reconnected GPUs in software, restoring register states, and re-attaching live display pipelines and compute jobs seamlessly.
+What it does:
+1. **Power gating under a running desktop:** a discrete GPU is switched off while the display server and the programs keep running; programs are moved to another GPU first and back afterwards.
+2. **Surviving a card that vanishes:** a GPU that loses power or leaves the bus is noticed, its driver is kept from hanging the machine, and its programs are rebuilt on another GPU.
+3. **Lending a GPU to a virtual machine:** the card is handed to `vfio-pci` and taken back, with the host's programs moved away and returned, and no reboot or log-out.
 
 ---
 
@@ -123,8 +123,8 @@ The initial target hardware provides the ultimate stress-test for this architect
 
 ```
                            ┌───────────────────────────────┐
-                           │      Intel Core i7-3720QM     │
-                           │       (Ivy Bridge Host)       │
+                           │      Intel Core i7-3615QM     │
+                           │       (Ivy Bridge, VT-d)      │
                            └───────┬───────────────┬───────┘
                                    │               │
                     Internal Ring  │               │ PCIe 3.0 x8 (Bridge 00:01.0)
@@ -168,11 +168,12 @@ The initial target hardware provides the ultimate stress-test for this architect
 
 | Component | Identifier | Driver / Modules | Reference Status |
 | :--- | :--- | :--- | :--- |
-| **iGPU** | Intel HD 4000 (`8086:0166`) | `i915` | **Active Primary:** Drives internal LCD via `modesetting` |
-| **dGPU** | NVIDIA GeForce GT 650M Mac Edition (`10de:0fd5`) | `nvidia` (470.256.02) | **Idle / D0:** Powered on in P8 state (~55 °C), unutilized |
-| **Audio** | NVIDIA GK107 HDMI Audio (`10de:0e1b`) | `snd_hda_intel` | **Active / D0** |
-| **Multiplexer** | Apple `gmux` (v1.9.35 classic) | `apple-gmux` | **LPC I/O 0x700–0x7fe:** Muxed to Intel via GRUB |
-| **Thunderbolt** | Intel CV82524 **Lightridge** (`8086:1513`) | `pcieport`, `thunderbolt` | **Host only (0-0):** No downstream devices enumerated |
+| **iGPU** | Intel HD 4000 (`8086:0166`) | `i915` | **Drives the internal panel and runs the X server alone** (`modesetting`) |
+| **dGPU** | NVIDIA GeForce GT 650M Mac Edition (`10de:0fd5`) | `nvidia` 470.256.02 with the ZSS wake-on-touch patch | **Render only:** not in the X configuration, its display nodes on a seat of their own (for lending); programs draw on it through ZSS_AirLock |
+| **Audio** | NVIDIA GK107 HDMI Audio (`10de:0e1b`) | `snd_hda_intel` | Second function of the dGPU; lent with it |
+| **Multiplexer** | Apple `gmux` (v1.9.35 classic) | `apple-gmux` | **LPC I/O 0x700–0x7fe:** muxed to Intel by the boot menu; power port `0x750` used by ZSS_Interceptor |
+| **Thunderbolt** | Intel CV82524 **Lightridge** (`8086:1513`) | `pcieport`, `thunderbolt` | Host only; **shares IOMMU group 2 with the dGPU** (both root ports lack ACS), so it goes with the card when it is lent |
+| **IOMMU** | VT-d (DMAR) | `intel_iommu=on iommu=pt` | On in an added boot entry; **no interrupt remapping** (firmware bug: "ioapic 2 has no mapping iommu") |
 
 ---
 
@@ -198,70 +199,70 @@ outb 0x740 2   # gmux external port = Intel
 ```
 Port `0x740` is the kernel's `GMUX_PORT_SWITCH_EXTERNAL`: it selects which GPU the external port is routed to. Forcing it to `2` routes the external port to Intel. Whether that alone explains the missing external display on this model has not been tested; writing `3` with a monitor connected is the experiment.
 
-### 3.4. Xorg Artificial Invalidation
-In `/etc/X11/xorg.conf.d/10-prime-intel-primary.conf`, marking the dGPU as `Inactive` with `AutoAddGPU "off"` instructs Xorg to ignore all display outputs registered by the NVIDIA driver (`DP-1-0` through `DP-1-5`).
+### 3.4. Xorg and the dGPU
+Until 9 October 2026, `/etc/X11/xorg.conf.d/10-prime-intel-primary.conf` listed the dGPU as an `Inactive` device with `AutoAddGPU "off"`, which kept the NVIDIA outputs (`DP-1-0` to `DP-1-5`) out of the screen. For lending the card to virtual machines it was then taken out of the configuration altogether, and a udev rule puts its display nodes on a seat of their own: X and the login manager open every display node of their seat at start-up, used or not, and a card they hold cannot be handed over. The external port therefore stays dark on Linux until there is a way to route it.
+
+Frames drawn on the dGPU still reach the Intel-driven screen, but the NVIDIA driver no longer hands them across in order without X's help; ZSS_AirLock presents them itself on the Intel GPU (see 4.2).
 
 ---
 
-## 4. Universal Multi-Vendor GPU Architecture
+## 4. Architecture as Built
 
-`ZrnSelectiveSuspend` is split into a **Universal Core Layer** and **Vendor/Platform Hardware Adapters**.
+ZSS is three parts around the GPU's own driver: a user-space shim the
+applications draw through, a daemon that decides and sequences, and a kernel
+shim that touches the hardware. The design this replaced (an MMIO shadow and a
+DMA isolator in the kernel) is kept in section 5 as history.
 
 ```
-═════════════════════════════════════════════════════════════════════════════════
-                       APPLICATION & DISPLAY SERVER LAYER
-             Xorg (GLX / PRIME) / Wayland (wlroots / Mutter / KWin)
-═════════════════════════════════════════════════════════════════════════════════
-                                       │
-                                       ▼
-┌───────────────────────────────────────────────────────────────────────────────┐
-│                          TARGET GPU KERNEL DRIVER                             │
-│   ┌────────────────────┬────────────────────┬────────────────────┬────────┐   │
-│   │   nvidia.ko        │     nouveau        │     amdgpu         │ xe/i915│   │
-│   │ (Proprietary NVRM) │   (Open-Source)    │   (Radeon / ROCm)  │(Intel) │   │
-│   └────────────────────┴────────────────────┴────────────────────┴────────┘   │
-└──────────────────────────────────────┬────────────────────────────────────────┘
-                                       │
-═══════════════════════════════════════╪═════════════════════════════════════════
-                   ZRNSELECTIVESUSPEND UNIVERSAL CORE
-═══════════════════════════════════════╪═════════════════════════════════════════
-                                       │
-     ┌─────────────────────────────────┼─────────────────────────────────┐
-     ▼                                 ▼                                 ▼
-┌──────────────────────────┐ ┌──────────────────────────┐ ┌─────────────────────┐
-│  zrn_pcie_shield         │ │  zrn_mmio_shadow         │ │  zrn_dma_isolator   │
-│  - Root Port AER Masking │ │  - Dynamic PTE Swapper   │ │  - IOMMU DMA Quench │
-│  - Link Down Suppression │ │  - Virtual Dummy Buffer  │ │  - Page Pin Guard   │
-└──────────────────────────┘ └──────────────────────────┘ └─────────────────────┘
-                                       │
-═══════════════════════════════════════╪═════════════════════════════════════════
-                       HARDWARE & PLATFORM ADAPTERS
-═══════════════════════════════════════╪═════════════════════════════════════════
-                                       │
-     ┌─────────────────────────────────┼─────────────────────────────────┐
-     ▼                                 ▼                                 ▼
-┌──────────────────────────┐ ┌──────────────────────────┐ ┌─────────────────────┐
-│  Apple gmux Adapter      │ │  Standard ACPI / PC      │ │  Thunderbolt /      │
-│  - LPC 0x750 FET Gating  │ │  - ACPI _PR3 / D3cold    │ │  OCuLink eGPU       │
-│  - 0x710 / 0x740 Muxing  │ │  - PCIe Slot Power Off   │ │  - Surprise Unplug  │
-└──────────────────────────┘ └──────────────────────────┘ └─────────────────────┘
+ USER SPACE
+ ┌──────────────────────────────────────────────────────────────────────────────┐
+ │  Programs: Vulkan · OpenGL through Zink · Chromium/Electron (ANGLE→Vulkan)   │
+ │  started by zss-run, or by the launch router (ZrnLaunchRouter, separate)     │
+ │        │                                                                     │
+ │        ▼                                                                     │
+ │  ┌───────────────────── ZSS_AirLock (libzss_airlock.so) ──────────────────┐  │
+ │  │  owns every handle · records command buffers · shadows host memory     │  │
+ │  │  portable feature profile · stands in for what a driver lacks          │  │
+ │  │  rebuilds the program on another GPU (asked, or when a GPU is lost)    │  │
+ │  │  presents on the screen's GPU when the drawing GPU cannot (4.2)        │  │
+ │  └───────┬─────────────────────────┬─────────────────────────┬───────────┘  │
+ │          ▼                         ▼                         ▼              │
+ │   NVIDIA Vulkan driver      Mesa (Intel, AMD, nouveau)   llvmpipe (CPU)     │
+ │                                                                              │
+ │  zssd ◄── control socket ── ZSS_AirLock in each program                      │
+ │   ▲   who holds the GPU · move / freeze / stop · off / on · lend / reclaim   │
+ │   └── zssctl · zss-power-event (charger) · zrn_perfd                          │
+ └───┬──────────────────────────────────────────────────────────────────────────┘
+     │ /sys/kernel/zss/<pci>/power   (off · on · lend · unlend · reclaim)
+ KERNEL
+ ┌───▼──────────────────────────────────────────────────────────────────────────┐
+ │  ZSS_Interceptor (zss.ko)                                                    │
+ │   quiesce the driver through its own sleep code · save / restore PCI state  │
+ │   loss guard (silence → disconnected mark, error handlers or driver freeze) │
+ │   pause across system sleep · "lent": hands off, reset by power cycle back  │
+ │   power backends:  gmux (Apple)  │  acpi (_PR3)  │  test                      │
+ ├──────────────────────────────────────────────────────────────────────────────┤
+ │  GPU driver: nvidia (+ wake-on-touch / freeze patch) · amdgpu · i915 · xe ·  │
+ │  nouveau          ── or, while lent ──          vfio-pci (to a VM)           │
+ └──────────────────────────────────────────────────────────────────────────────┘
 ```
 
-### 4.1. Supported Driver Stacks
+### 4.1. Driver Stacks
 
-#### A. NVIDIA Proprietary Driver (`nvidia.ko` / NVRM)
-* **Target:** Kepler, Maxwell, Pascal, Turing, Ampere, Ada Lovelace, Blackwell.
-* **Mechanism:** Integrates with `/proc/driver/nvidia/suspend` to freeze the command dispatch engine, captures BAR0 (`16MB`) and BAR1 (`256MB`) memory spaces, and shadows them to a RAM scratchpad.
+#### A. NVIDIA Proprietary Driver (`nvidia.ko`)
+* **Tested:** 470.256.02 (Kepler) on the reference laptop.
+* **Mechanism:** the driver is suspended through `/proc/driver/nvidia/suspend` and resumed the same way. A patch adds two things: a caller arriving while the driver is suspended asks for a wake and sleeps instead of spinning, and the driver can be frozen (shut to every caller, nothing asked of the card) when the card vanishes. For lending, the modules stacked on the driver are unloaded first and the driver must have no user left.
 
-#### B. Open-Source Linux DRM/KMS (`nouveau`, `amdgpu`, `xe`, `i915`)
-* **Target:** AMD Radeon RX series, Intel Arc Alchemist/Battlemage, open NVIDIA.
-* **Mechanism:** Intercepts DRM runtime PM hooks. Automatically signals TTM (Translation Table Manager) or GEM to evacuate in-flight VRAM allocations to system RAM (`ttm_bo_evict_mm`), quenching GPU DMA activity before the physical link is severed.
+#### B. Open-Source DRM/KMS Drivers (`nouveau`, `amdgpu`, `xe`, `i915`)
+* **Mechanism:** ZSS_Interceptor runs the driver's own runtime sleep and wake callbacks (`quiesce=pm`), which also re-run the card's firmware after power returns.
+* **Tested:** in QEMU only.
 
-#### C. External GPUs (eGPU over Thunderbolt 3/4, USB4, OCuLink)
-* **Target:** Any PCIe GPU housed in an external chassis.
-* **Mechanism:** Instantly traps the PCIe root port interrupt upon physical disconnection, swaps in the dummy MMIO buffer, and holds client render pipelines until the cable is re-inserted.
+#### C. External GPUs and Hot-Plug Slots
+* **Mechanism:** the slot's power is switched by `pciehp` from user space; a card that leaves the bus is reported by ZSS_Interceptor's bus notifier and its programs are rebuilt elsewhere.
+* **Tested:** in QEMU only.
 
----
+### 4.2. Presenting Across GPUs
+A program may draw on one GPU while another drives the screen. Mesa's drivers hand frames across in order themselves (DRI3). The NVIDIA proprietary driver does that only when the X server has its card. Without it, ZSS_AirLock gives the program ordinary images on its own GPU, keeps the window's real swapchain on a small device of its own on the screen's GPU, and at each present reads the frame back, waits for it, copies it in and presents it there. Moves switch between this and direct presenting.
 
 ## 5. The Core Subsystems
 
@@ -320,50 +321,38 @@ When re-energizing a GPU from a 0W cold state or reconnecting an eGPU:
 
 ---
 
-## 6. Operating Modes & State Machine
+## 6. Device States
+
+The states `zssctl status` reports for a managed GPU. The original three
+operating modes (Eco, Offload, Docked) became the first two of these; Docked
+was dropped with the display daemon.
 
 ```
-                   ┌──────────────────────────────┐
-                   │         STATE 0: ECO         │
-                   │   Power Gate: 0.00 W         │
-                   │   MMIO: Shadowed to RAM      │
-                   │   PTEs: Virtual Dummy        │
-                   │   Root Port: AER Masked      │
-                   └──────┬────────────────▲──────┘
-                          │                │
-            On-Demand     │                │ Inactivity
-            Wake Request  │                │ Timeout
-                          ▼                │
-                   ┌───────────────────────┴──────┐
-                   │       STATE 1: OFFLOAD       │
-                   │   Power Gate: De-asserted    │
-                   │   PCIe Link: Full Link Speed │
-                   │   MMIO: Real Hardware Map    │
-                   │   Panel: Driven by Primary   │
-                   │   Task: prime-run rendering  │
-                   └──────┬────────────────▲──────┘
-                          │                │
-            External      │                │ External
-            Display In    │                │ Display Out
-                          ▼                │
-                   ┌───────────────────────┴──────┐
-                   │       STATE 2: DOCKED        │
-                   │   Power: Active (Full)       │
-                   │   External Port: Active Link │
-                   │   Server: Output Sink Bound  │
-                   │   Outputs: Multi-Mon Active  │
-                   └──────────────────────────────┘
+                        zssctl off · idle timer · charger unplugged
+          ┌──────────┐ ──────────────── detaching ───────────────► ┌─────────────┐
+          │          │                                              │ powered-off │◄──┐ display server
+          │ attached │ ◄─────────────── attaching ──────────────── │   (0 W)     │   │ calls: powered
+          │          │       zssctl on · wake request · charger      └──────┬──────┘   │ for a moment,
+          └─┬──▲───┬─┘                                                      └──────────┘ then off again
+            │  │   │
+     lend   │  │   │ card stops answering, or leaves the bus
+            │  │   ▼
+            │  │ ┌──────┐   zssctl on (power restored, driver thawed),
+            │  │ │ lost │ ──or the card answers again──────────────► attached
+            │  │ └──────┘
+            ▼  │ reclaim: power cycle, host drivers back, programs returned
+          ┌────┴────┐
+          │  lent   │   card on vfio-pci, owned by a virtual machine;
+          └─────────┘   ZSS does not watch, wake or power it
 ```
 
-### State Definitions
-
-| State | dGPU Power | Display Server Status | Primary Screen | External Ports |
+| State | Card power | Host driver | Programs that were on it | Display server |
 | :--- | :--- | :--- | :--- | :--- |
-| **State 0: Eco** | **0.00 W** | Driver frozen, MMIO in RAM | Primary iGPU | Inactive |
-| **State 1: Offload** | **Active (Scaled)** | Active for offload (`prime-run`) | Primary iGPU | Inactive |
-| **State 2: Docked** | **Active (Full)** | Secondary Provider Attached | Primary iGPU | **Active (Lightridge / DP)** |
-
----
+| **attached** | on | bound | running on it | may use it |
+| **powered-off** | **off (0 W)** | suspended | moved to another GPU, or frozen | served on demand (patched NVIDIA driver) |
+| **lost** | unknown | frozen, or told through its error handlers | rebuilt on another GPU, or parked | carries on |
+| **lent** | on | **none** (`vfio-pci`) | moved to another GPU | must not hold the card |
+| detaching / attaching | changing | changing | being moved | — |
 
 ## 7. Roadmap
 
@@ -374,16 +363,18 @@ When re-energizing a GPU from a 0W cold state or reconnecting an eGPU:
 * **System integration**: service, installer, the NVIDIA wake-on-touch patch through DKMS, power-off under a running X session, freezing, hiding, serving the display server (`zss-system-integration`).
 * **Kernel module**: the power sequence, state save and restore, loss guard, `gmux` backend verified on the reference laptop (`zss-kernel-shim`).
 * **Unannounced loss of an idle card**: noticed in about 50 ms, the NVIDIA driver frozen before it finds out, card and driver brought back by `zssctl on` without a reboot (driver patch revision 4).
+* **A wider Vulkan surface and OpenGL** (`zss-vulkan-12-and-opengl`, in progress): Vulkan 1.1, the portable profile, in-place swapchain rebuild, secondary command buffers, OpenGL through Zink with dynamic rendering and `VK_KHR_maintenance5` stood in for on NVIDIA 470, and frames presented across GPUs in order. Chromium, Electron apps, VS Code and a Unity game (IFSCL, both renderers) move between the reference laptop's GPUs.
+* **Lending a GPU to a virtual machine** (`zss-vm-passthrough`): lent, used by a QEMU guest and reclaimed on the reference laptop with the desktop and its programs running throughout.
 
 ### Next, in the order they unblock real users
 
 1. **Unannounced loss of a card in use.** Decide what a frozen driver does with callers other than the display server (sleeping keeps an application from being moved), then try closing the stuck programs before the driver is resumed.
 2. **Try the module on an open driver on real hardware** (`amdgpu`, `i915`/`xe` or `nouveau`), and settle how the display server is handled there.
 3. **Try the `acpi` backend** on a hybrid laptop that has firmware power resources.
-4. **A wider Vulkan surface in ZSS_AirLock**, and an OpenGL path, so that more applications can be moved rather than frozen. Vulkan 1.1, the portable profile and in-place swapchain rebuild are done, and Chromium moves between the two GPUs of the reference laptop (`zss-vulkan-12-and-opengl`, in progress). OpenGL programs now run under it through Zink, with dynamic rendering and `VK_KHR_maintenance5` provided by ZSS_AirLock where a driver lacks them (the NVIDIA 470 driver). Vulkan 1.2, OpenGL 3.3, and a browser through a real power-off are next.
-5. **Notice a monitor plugged in while the card is off** (the gmux hot-plug interrupt on the reference laptop).
-
-5. **Handing a detached GPU to a virtual machine** (`zss-vm-passthrough`, specified, not started): a third state beside "on" and "off", in which the host's driver lets go of the card and a VM takes it, and the way back.
+4. **Vulkan 1.2 and OpenGL 3.3** in ZSS_AirLock, so that more programs start under it.
+5. **Testers on other hardware**, through the tester kit (`tester/`): the report and the moving tests on machines with other GPUs and drivers.
+6. **Programs register again with a restarted daemon**; today they have to be restarted to be moved.
+7. **External displays with the dGPU out of X** on the reference laptop.
 
 ### Open, with no test bed yet
 

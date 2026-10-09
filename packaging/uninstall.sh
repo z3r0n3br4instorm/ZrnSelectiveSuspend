@@ -38,7 +38,7 @@ rm -rf "$D"/usr/src/zss-[0-9]*
 
 rm -f "$D$PREFIX/sbin/zssd" "$D$PREFIX/sbin/zss-nvidia-patch" "$D$PREFIX/sbin/zss-power-event" "$D$PREFIX/bin/zssctl" "$D$PREFIX/bin/zss-run" \
       "$D/etc/systemd/system/zssd.service" "$D/etc/systemd/system/zss-nvidia-check.service" \
-      "$D/etc/pacman.d/hooks/65-zss-nvidia-patch.hook"
+      "$D/etc/pacman.d/hooks/65-zss-nvidia-patch.hook" "$D/etc/udev/rules.d/72-zss-lend-seat.rules"
 rm -rf "$D$PREFIX/lib/zss" "$D$PREFIX/share/zss" "$D$PREFIX/share/doc/zss"
 if [ "$PURGE" = 1 ]; then
     rm -rf "$D/etc/zss"

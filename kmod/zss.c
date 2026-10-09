@@ -46,13 +46,18 @@
 #include <linux/sysfs.h>
 #include <linux/workqueue.h>
 
-#define ZSS_VERSION "0.2.1"
+#define ZSS_VERSION "0.3.0"
 #define ZSS_MAX_FUNCS 8
 #define ZSS_GUARD_MS 100
 #define ZSS_ANSWER_MS 3000
 #define ZSS_SETTLE_MS 5000 /* after a device comes back, how long silence is not taken for a loss */
 
-enum zss_state { ZSS_ON, ZSS_OFF, ZSS_LOST, ZSS_FAILED };
+/*
+ * ZSS_LENT: handed to a guest (zss-vm-passthrough). The host has no driver on
+ * it and the module leaves it alone: no loss guard, no power changes, until
+ * it is taken back.
+ */
+enum zss_state { ZSS_ON, ZSS_OFF, ZSS_LOST, ZSS_FAILED, ZSS_LENT };
 enum zss_quiesce { ZQ_NONE, ZQ_PM, ZQ_EXTERNAL };
 
 /* Faults the test backend can be told to produce (the "test_fault" file). */
@@ -125,7 +130,7 @@ static DEFINE_MUTEX(zss_lock);
  */
 static bool zss_sleeping;
 
-static const char *const state_names[] = { "on", "off", "lost", "failed" };
+static const char *const state_names[] = { "on", "off", "lost", "failed", "lent" };
 static const char *const quiesce_names[] = { "none", "pm", "external" };
 
 #define to_zss(k) container_of(k, struct zss_dev, kobj)
@@ -643,6 +648,93 @@ static int zss_power_off(struct zss_dev *zd, const char *reason)
 	return 0;
 }
 
+/* ---- lending to a guest ---------------------------------------------------------------- */
+
+/*
+ * Lending is in two halves. User space does the binding (driver_override,
+ * unbind, probe: the kernel's stable interface for it). The module does what
+ * only it can: it stops guarding the device before the host driver lets go,
+ * keeps the PCI state the host's driver will need again, and resets the
+ * device by cutting its power when it comes back, since nothing is known
+ * about the state a guest leaves it in.
+ */
+static int zss_lend(struct zss_dev *zd)
+{
+	int ret;
+
+	if (zd->state != ZSS_ON) {
+		zss_fail(zd, "only a device that is on can be lent (it is %s)", state_names[zd->state]);
+		return -EINVAL;
+	}
+	ret = zss_save(zd);
+	if (ret) {
+		zss_fail(zd, "could not save the PCI state: %d", ret);
+		return ret;
+	}
+	zss_set_state(zd, ZSS_LENT, "lent");
+	return 0;
+}
+
+/* The hand-over did not complete: the device is the host's again, untouched. */
+static int zss_unlend(struct zss_dev *zd)
+{
+	if (zd->state != ZSS_LENT)
+		return -EINVAL;
+	zd->silent = 0;
+	zd->settle_until = jiffies + msecs_to_jiffies(ZSS_SETTLE_MS);
+	zss_set_state(zd, ZSS_ON, "hand-over undone");
+	return 0;
+}
+
+static int zss_reclaim(struct zss_dev *zd)
+{
+	int ret, i;
+
+	if (zd->state != ZSS_LENT) {
+		zss_fail(zd, "the device is not lent (it is %s)", state_names[zd->state]);
+		return -EINVAL;
+	}
+	if (zd->removed) {
+		zss_fail(zd, "the device has left the bus");
+		return -ENODEV;
+	}
+	/* Power is not cut under a driver; whoever lent it unbinds the guest's side first. */
+	for (i = 0; i < zd->nfn; i++) {
+		if (zd->fn[i]->dev.driver) {
+			zss_fail(zd, "%s is still bound to %s", pci_name(zd->fn[i]), zd->fn[i]->dev.driver->name);
+			return -EBUSY;
+		}
+	}
+	zss_mark(zd, true);
+	ret = zd->backend->power_off(zd);
+	if (!ret && !zss_wait_answer(zd, false))
+		ret = -EBUSY;
+	if (ret) {
+		/* Not reset. It stays lent, so that nothing binds a host driver to a device in an unknown state. */
+		zss_fail(zd, "backend %s could not cut power to reset the device: %d", zd->backend->name, ret);
+		zd->backend->power_on(zd);
+		zss_wait_answer(zd, true);
+		zss_mark(zd, false);
+		return ret;
+	}
+	ret = zd->backend->power_on(zd);
+	if (!ret && !zss_wait_answer(zd, true))
+		ret = -ETIMEDOUT;
+	if (ret) {
+		zss_fail(zd, "the device did not come back after its reset: %d", ret);
+		zss_set_state(zd, ZSS_FAILED, "no answer after reset");
+		return ret;
+	}
+	zss_mark(zd, false);
+	zss_restore(zd);
+	zd->silent = 0;
+	zd->needs_rebind = false;
+	zd->settle_until = jiffies + msecs_to_jiffies(ZSS_SETTLE_MS);
+	zd->cycles++;
+	zss_set_state(zd, ZSS_ON, "reclaimed");
+	return 0;
+}
+
 /* ---- loss guard ---------------------------------------------------------------------- */
 
 static void zss_guard(struct work_struct *work)
@@ -745,7 +837,18 @@ static ssize_t power_store(struct kobject *kobj, struct kobj_attribute *attr, co
 		else
 			ret = zss_power_off(zd, "requested");
 	} else if (sysfs_streq(buf, "on")) {
-		ret = zd->state == ZSS_ON ? 0 : zss_power_on(zd, "requested");
+		if (zd->state == ZSS_LENT) {
+			zss_fail(zd, "the device is lent; reclaim it");
+			ret = -EBUSY;
+		} else {
+			ret = zd->state == ZSS_ON ? 0 : zss_power_on(zd, "requested");
+		}
+	} else if (sysfs_streq(buf, "lend")) {
+		ret = zd->state == ZSS_LENT ? 0 : zss_lend(zd);
+	} else if (sysfs_streq(buf, "unlend")) {
+		ret = zss_unlend(zd);
+	} else if (sysfs_streq(buf, "reclaim")) {
+		ret = zss_reclaim(zd);
 	} else {
 		ret = -EINVAL;
 	}
@@ -1037,6 +1140,12 @@ static int zss_release(struct zss_dev *zd, bool force)
 	int ret = 0;
 
 	mutex_lock(&zd->lock);
+	/* A lent device is not given up on request: a guest may be using it. Unloading the module leaves it as it is. */
+	if (zd->state == ZSS_LENT && !force) {
+		zss_fail(zd, "the device is lent; reclaim it first");
+		mutex_unlock(&zd->lock);
+		return -EBUSY;
+	}
 	if (zd->state == ZSS_OFF || zd->state == ZSS_FAILED)
 		ret = zss_power_on(zd, "unmanaged");
 	if (ret && !force) {

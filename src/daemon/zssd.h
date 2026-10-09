@@ -11,7 +11,8 @@
 #define ZSSD_ERR 256
 
 /* GS_LOST: the device left the bus without a detach. */
-enum gpu_state { GS_ATTACHED, GS_DETACHING, GS_POWERED_OFF, GS_SAFE_TO_REMOVE, GS_ATTACHING, GS_LOST };
+/* GS_LENT: no host driver on it; handed to the passthrough driver for a virtual machine (lend.c). */
+enum gpu_state { GS_ATTACHED, GS_DETACHING, GS_POWERED_OFF, GS_SAFE_TO_REMOVE, GS_ATTACHING, GS_LOST, GS_LENT };
 
 /* How the kernel driver lets go of the device before power is cut. */
 enum release_strategy { RS_UNBIND, RS_SUSPEND };
@@ -109,6 +110,7 @@ struct holder_facts {
     bool migratable;
     bool display_server;
     bool listed_service; /* in stop_services */
+    bool system;         /* init or the login manager: holds device nodes for a session, never to be frozen */
     bool wake_support;   /* the driver can signal a waiting caller */
     bool console;        /* the screen is on the text console for the duration */
     bool freezable;      /* a requested power-off in place: outsiders are frozen, not refused */
@@ -144,6 +146,23 @@ const struct backend *backend_by_name(const char *name);
 const struct backend *backend_detect(struct gpu *g);
 int driver_suspend(struct gpu *g, char *err);
 int driver_resume(struct gpu *g, char *err);
+int gpu_kmod_request(struct gpu *g, const char *what, char *err);
+bool gpu_kmod_lent(struct gpu *g);
+
+/* lend.c */
+struct lend_obstacle {
+    char reason[300];
+    char remedy[300];
+};
+int lend_obstacles(struct gpu *g, const pid_t *holders, int nh, bool with_group, struct lend_obstacle *out, int max);
+int lend_companions(struct gpu *g, char out[][16], int max);
+int lend_stacked_modules(struct gpu *g, char out[][64], int max);
+void zssd_keepalive(void); /* zssd.c: tells the service manager the daemon is alive during a long step */
+int lend_hand_over(struct gpu *g, bool with_group, char *err);
+int lend_take_back(struct gpu *g, char *err);
+int lend_holders(struct gpu *g, pid_t *pids, int max);
+bool lend_recorded(const struct gpu *g);
+void lend_forget(const struct gpu *g);
 
 /* sysfs.c */
 int read_text(const char *path, char *buf, size_t n);

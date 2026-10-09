@@ -15,6 +15,15 @@
 #          --no-kernel-module   do not install the kernel module
 #          --no-start           install everything but leave the service as it is
 #                               (for when the next step is a reboot anyway)
+#          --vm-passthrough     also prepare the GPU for lending to virtual machines
+#                               (zssctl lend): a udev rule keeps the display server
+#                               and the login manager off the card's display nodes.
+#                               The IOMMU still has to be switched on by you; see --check
+#
+# When it has run (not with --check or --destdir), what this machine has for ZSS
+# is collected with tester/zss_report.py (facts only) together with this
+# installer's own log: kept as ~/.zss/debug.log when all went well, and saved
+# as a full report, with an offer to send it, when something failed.
 #
 # The bootloader's configuration is never modified. The initial ramdisk is
 # regenerated only if the GPU driver is part of it, and that is announced first.
@@ -29,8 +38,10 @@ CHECK=0
 PATCH=ask
 KMOD=ask
 START=yes
+VMPASS=no
 KMOD_VERSION="$(sed -n 's/^PACKAGE_VERSION="\(.*\)"/\1/p' "$REPO/kmod/dkms.conf")"
 
+ORIG_ARGS="$*"
 while [ $# -gt 0 ]; do
     case "$1" in
         --check) CHECK=1; shift ;;
@@ -41,12 +52,75 @@ while [ $# -gt 0 ]; do
         --kernel-module) KMOD=yes; shift ;;
         --no-kernel-module) KMOD=no; shift ;;
         --no-start) START=no; shift ;;
-        *) sed -n '3,20p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
+        --vm-passthrough) VMPASS=yes; shift ;;
+        *) sed -n '3,24p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
     esac
 done
 
-say() { echo "$*"; }
-die() { echo "install.sh: $*" >&2; exit 1; }
+INSTALL_LOG=""
+PROBLEMS=0
+say() { echo "$*"; [ -n "$INSTALL_LOG" ] && echo "$*" >> "$INSTALL_LOG"; }
+warn() { PROBLEMS=$((PROBLEMS + 1)); say "warning: $*"; }
+die() { PROBLEMS=$((PROBLEMS + 1)); echo "install.sh: $*" >&2; [ -n "$INSTALL_LOG" ] && echo "install.sh: $*" >> "$INSTALL_LOG"; exit 1; }
+
+# ---- the record of this run -----------------------------------------------------------
+
+# The person who ran the installer (through sudo), and their home folder.
+owner_home() {
+    local u="${SUDO_USER:-$(id -un)}"
+    getent passwd "$u" | cut -d: -f6
+}
+
+finish() {
+    local rc=$? home report="" answer
+    [ -n "$INSTALL_LOG" ] || return
+    [ "$rc" != 0 ] && [ "$PROBLEMS" = 0 ] && PROBLEMS=1
+    home="$(owner_home)"
+    if [ -z "$home" ] || [ ! -f "$REPO/tester/zss_report.py" ] || ! command -v python3 >/dev/null 2>&1; then
+        rm -f "$INSTALL_LOG"
+        return
+    fi
+    install -d -m 755 "$home/.zss"
+    if [ "$PROBLEMS" = 0 ]; then
+        python3 "$REPO/tester/zss_report.py" --quiet --no-tests --include install.log="$INSTALL_LOG" \
+                --debug-log "$home/.zss/debug.log" >/dev/null 2>&1
+        echo "a record of this machine and of the install is in $home/.zss/debug.log"
+    else
+        echo ""
+        echo "Something went wrong ($PROBLEMS problem(s) above). Collecting a report of this machine and of the install..."
+        report="$(python3 "$REPO/tester/zss_report.py" --quiet --no-tests --include install.log="$INSTALL_LOG" \
+                  --out "$home/.zss" --debug-log "$home/.zss/debug.log" 2>/dev/null | tail -1)"
+        if [ -n "$report" ] && [ -f "$report" ]; then
+            echo "Report saved: $report"
+            echo "It contains no computer or user names, serial numbers or network addresses."
+            printf "Send it to the developer (%s)? [Y/n] " "$(sed -n 's/^REPORT_TO = "\(.*\)"/\1/p' "$REPO/tester/zss_report.py")"
+            read -r answer 2>/dev/null </dev/tty || answer=n
+            case "$answer" in
+                n|N|no) echo "Not sent. You can send it later: it stays in $home/.zss" ;;
+                *) send_report "$report" ;;
+            esac
+        else
+            echo "The report could not be written; the install's own messages are above."
+        fi
+    fi
+    [ -n "${SUDO_USER:-}" ] && chown -R "$SUDO_USER": "$home/.zss" 2>/dev/null
+    rm -f "$INSTALL_LOG"
+}
+
+# Opens the person's mail program as them (not as root), with the address and a summary filled in.
+send_report() {
+    local u="${SUDO_USER:-$(id -un)}"
+    if [ -n "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ] &&
+       sudo -u "$u" env DISPLAY="${DISPLAY:-}" WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-}" XAUTHORITY="${XAUTHORITY:-}" \
+            DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$(id -u "$u")/bus" \
+            python3 -c 'import sys; sys.path.insert(0, sys.argv[1]); import zss_report as z, json; \
+r = json.load(open(sys.argv[2]))["results"]; sys.exit(0 if z.open_mail(r, sys.argv[3]) else 1)' \
+            "$REPO/tester" "${1%.tar.gz}/report.json" "$1" 2>/dev/null; then
+        echo "Your mail program is opening; attach $1 and send."
+    else
+        echo "Please attach $1 to an email to $(sed -n 's/^REPORT_TO = "\(.*\)"/\1/p' "$REPO/tester/zss_report.py")."
+    fi
+}
 
 # ---- what does this machine support? -------------------------------------------------
 
@@ -90,10 +164,49 @@ detect() {
     fi
 }
 
+# Lending the GPU to a virtual machine (zssctl lend): what this machine has for it.
+vm_report() {
+    local group others="" d cls irq
+    if [ -z "$GPU" ]; then
+        say "  VM passthrough              no discrete GPU"
+        return
+    fi
+    if [ ! -e "/sys/bus/pci/devices/$GPU/iommu_group" ]; then
+        if [ -e /sys/firmware/acpi/tables/DMAR ] || [ -e /sys/firmware/acpi/tables/IVRS ]; then
+            say "  VM passthrough              needs the IOMMU: add intel_iommu=on (Intel) or amd_iommu=on (AMD)"
+            say "                              to the kernel command line yourself; this installer never edits the bootloader"
+        else
+            say "  VM passthrough              no: the firmware describes no IOMMU"
+        fi
+        return
+    fi
+    group="$(basename "$(readlink "/sys/bus/pci/devices/$GPU/iommu_group")")"
+    for d in /sys/kernel/iommu_groups/"$group"/devices/*; do
+        d="$(basename "$d")"
+        case "$d" in "${GPU%.*}".*) continue ;; esac
+        cls="$(cat "/sys/bus/pci/devices/$d/class" 2>/dev/null)"
+        case "$cls" in 0x0604*) continue ;; esac
+        others="$others $d"
+    done
+    if [ -n "$others" ]; then
+        say "  VM passthrough              possible with zssctl lend --with-group; sharing the GPU's group:$others"
+        say "                              (they lose their host drivers while it is lent)"
+    else
+        say "  VM passthrough              possible: the GPU is alone in IOMMU group $group"
+    fi
+    irq="$(journalctl -k -b 2>/dev/null | grep -c 'Failed to enable irq remapping\|Not enabling interrupt remapping')"
+    [ "${irq:-0}" -gt 0 ] && say "                              no interrupt remapping (firmware): a VM needs vfio_iommu_type1 allow_unsafe_interrupts=Y"
+    if [ -e /etc/udev/rules.d/72-zss-lend-seat.rules ]; then
+        say "                              the display server is kept off the card (udev rule installed)"
+    else
+        say "                              the display server will hold the card: install with --vm-passthrough"
+    fi
+}
+
 report() {
     say "ZrnSelectiveSuspend: what this machine supports"
     say ""
-    say "  Application migration       yes (Vulkan 1.1 applications started with zss-run)"
+    say "  Application migration       yes (Vulkan 1.1, and OpenGL through Zink, for programs started with zss-run)"
     if [ -z "$GPU" ]; then
         say "  Discrete GPU                none found"
     else
@@ -131,6 +244,8 @@ report() {
     else
         say "  IOMMU                       off: nothing confines the GPU's memory access"
     fi
+    vm_report
+
     say ""
     if [ "$BACKEND" = none ]; then
         say "Only application migration will be installed. The GPU driver will not be modified."
@@ -141,6 +256,13 @@ report() {
         say "With the driver patch the GPU can be powered off under the running desktop."
     fi
 }
+
+# From here the run is recorded (see finish); --check and a staging root are not installs.
+if [ "$CHECK" = 0 ] && [ -z "$DESTDIR" ]; then
+    INSTALL_LOG="$(mktemp /tmp/zss-install-XXXXXX.log)"
+    trap finish EXIT
+    say "== install.sh $(date '+%F %T')  options: ${ORIG_ARGS:-none}"
+fi
 
 detect
 report
@@ -165,6 +287,7 @@ install -m 755 "$HERE/zss-nvidia-patch" "$D$PREFIX/sbin/zss-nvidia-patch"
 install -m 755 "$HERE/zss-power-event" "$D$PREFIX/sbin/zss-power-event"
 install -m 644 "$REPO"/patches/* "$D$PREFIX/share/zss/patches/"
 install -m 644 "$REPO/README.md" "$D$PREFIX/share/doc/zss/README.md"
+install -m 644 "$REPO/docs/vm-handover.md" "$D$PREFIX/share/doc/zss/vm-handover.md"
 install -m 644 "$HERE/zssd.service" "$HERE/zss-nvidia-check.service" "$D/etc/systemd/system/"
 
 # The manifest lives outside the loader's search path on purpose: only
@@ -231,7 +354,7 @@ if [ "$BACKEND" != none ] && [ "$VALIDATED" = yes ] && [ "$PATCH" != no ]; then
         systemctl enable zss-nvidia-check.service >/dev/null 2>&1
         if [ "$IN_INITRD" = yes ]; then
             say "regenerating the initial ramdisk because the NVIDIA driver is part of it"
-            mkinitcpio -P || say "warning: mkinitcpio failed; run it by hand before rebooting"
+            mkinitcpio -P || warn "mkinitcpio failed; run it by hand before rebooting"
         fi
         say "driver patched: reboot for it to take effect"
     else
@@ -268,10 +391,35 @@ if [ "$KMOD" = yes ]; then
        dkms install "zss/$KMOD_VERSION" --force >/dev/null 2>&1; then
         say "kernel module zss $KMOD_VERSION built and installed through DKMS"
     else
-        say "warning: the kernel module did not build (see: dkms status zss); ZSS runs without it"
+        warn "the kernel module did not build (see: dkms status zss); ZSS runs without it"
     fi
 else
     [ -d "/usr/src/zss-$KMOD_VERSION" ] && say "the kernel module was left as it is" || say "the kernel module was not installed"
+fi
+
+# ---- lending to virtual machines ------------------------------------------------------
+
+if [ "$VMPASS" = yes ]; then
+    if [ -z "$GPU" ]; then
+        say "--vm-passthrough: no discrete GPU found; nothing set up"
+    else
+        # X and the login manager open every display node of their seat when a session starts, used or not,
+        # and a card they hold cannot be lent. On a seat of its own, the main session never opens them.
+        cat > /etc/udev/rules.d/72-zss-lend-seat.rules <<RULE
+# Written by ZrnSelectiveSuspend's install.sh --vm-passthrough; removed by uninstall.sh.
+# The GPU's display nodes go on a seat of their own, so that the display server and the
+# login manager never open them and the card can be lent to a virtual machine (zssctl lend).
+# Programs still reach the card through its render node and its driver's own nodes.
+SUBSYSTEM=="drm", KERNEL=="card*", ENV{ID_PATH}=="pci-$GPU*", TAG=="seat", ENV{ID_SEAT}="seat-zss-lend"
+RULE
+        udevadm control --reload 2>/dev/null
+        say "VM passthrough: the display server will leave $GPU alone from the next boot"
+        say "  If X lists the card in its configuration (xorg.conf.d), take it out; outputs wired to"
+        say "  the card stop working while it is not in X. See $PREFIX/share/doc/zss/vm-handover.md"
+        if [ ! -e "/sys/bus/pci/devices/$GPU/iommu_group" ]; then
+            say "  The IOMMU is off: add intel_iommu=on (or amd_iommu=on) to the kernel command line."
+        fi
+    fi
 fi
 
 systemctl daemon-reload

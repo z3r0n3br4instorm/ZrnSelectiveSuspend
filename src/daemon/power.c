@@ -43,6 +43,13 @@ enum holder_verdict holder_verdict(const struct holder_facts *f, const char **wh
     }
     if (f->listed_service)
         return HV_STOP;
+    /*
+     * init and the login manager keep a session's device nodes open on its
+     * behalf (the display server asks them for the nodes). They ask nothing
+     * of the device themselves, and freezing either would stop the machine.
+     */
+    if (f->system)
+        return HV_ALLOW;
     if (f->display_server) {
         /* On the console nobody is looking at the desktop, so it may wait for the device. */
         if (f->wake_support || f->console)

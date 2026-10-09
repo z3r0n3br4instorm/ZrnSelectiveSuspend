@@ -16,8 +16,8 @@ GPUs are named by PCI address, for example `0000:01:00.0`. The word
 
 | Message | Accepted from |
 | :--- | :--- |
-| `register`, `state`, `outcome`, `status`, `subscribe` | any local user |
-| `detach`, `attach`, `resume`, `off`, `on` | root, members of the admin group (`--group`, default `zss`), and the user the daemon runs as unless `--no-owner-access` is given |
+| `register`, `state`, `outcome`, `status`, `subscribe`, `lend-check` | any local user |
+| `detach`, `attach`, `resume`, `off`, `on`, `lend`, `reclaim` | root, members of the admin group (`--group`, default `zss`), and the user the daemon runs as unless `--no-owner-access` is given |
 
 A refused request gets `result` with `ok: false` and `message: "permission denied"`, and nothing changes.
 
@@ -218,3 +218,17 @@ Ends `detach`, `attach` and `resume`.
 ### `subscribe`
 From then on the connection receives an `event` for every state change:
 `gpu`, `old`, `new`.
+
+## Lending to a virtual machine
+
+Requests from a control client; see [`vm-handover.md`](vm-handover.md).
+
+| Message | Fields | Answer |
+| :--- | :--- | :--- |
+| `lend-check` | `gpu` | read-only: `function` (`pci`, `driver`) for each function of the card, `affected` (`pid`, `name`, `what`) for each program that would be moved or stopped, `obstacle` (`reason`, `remedy`) for each thing in the way, then `result` (`ok` true if there is none) |
+| `lend` | `gpu`, optional `to` | the same messages, then `progress` lines and `result`; with any obstacle nothing is changed |
+| `reclaim` | `gpu`, `return` (bool, default true) | `progress` lines and `result`; refused while a process holds the lent card |
+
+A lent GPU has the state `lent` in `gpu` and `event` messages. In a status
+listing, a process that holds a lent card is a `client` entry with the class
+`guest`. `off`, `on`, `detach` and `attach` are refused for a lent GPU.

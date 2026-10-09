@@ -126,6 +126,9 @@ struct zss_driver {
     bool has_surface, has_xcb, has_xlib, has_wayland;
     struct zss_surface surfaces[ZSS_MAX_SURFACES];
     int ndevices; /* live real VkDevices */
+    /* Display-device nodes the driver opened while starting, by descriptor and device number (icd.c). */
+    struct { int fd; dev_t dev; } opened[16];
+    int nopened;
 };
 
 /* One virtual physical device, as the application sees it. */
@@ -168,7 +171,7 @@ struct zss_real {
     uint64_t h;
     VkDeviceMemory backing;
     void *map;
-    bool standin; /* image standing in for a retired swapchain image */
+    bool standin; /* image standing in for a swapchain image; on a swapchain: h is a presenter (present.c) */
     bool borrowed; /* image owned by a real swapchain: never destroyed directly */
 };
 
@@ -265,6 +268,7 @@ struct zss_obj {
         struct {
             bool signaled;
             bool timeline;   /* VK_KHR_timeline_semaphore: a counter instead of a flag */
+            bool virtual_acquire; /* "signalled" by an acquire of a presented-through swapchain: not waited on for real (present.c) */
             uint64_t value;  /* the counter as last known: read from the device, or the highest signalled */
         } sem;
         struct {
@@ -462,6 +466,15 @@ void zss_cmd_reset(struct zss_obj *cb);
 void zss_cmd_replay(struct zss_dev *dev, struct zss_obj *cb);
 void zss_cmd_track_submit(struct zss_dev *dev, struct zss_obj *cb);
 void zss_image_dirty(struct zss_obj *img, bool carried);
+struct zss_presenter;
+struct zss_queue;
+bool zss_present_needed(struct zss_gpu *gpu);
+struct zss_driver *zss_present_driver(struct zss_gpu *gpu);
+struct zss_presenter *zss_presenter_new(struct zss_dev *dev, const VkSwapchainCreateInfoKHR *app);
+void zss_presenter_destroy(struct zss_presenter *p, bool drawing_side_gone);
+void zss_presenter_give_up(struct zss_presenter *p);
+VkResult zss_presenter_show(struct zss_presenter *p, struct zss_dev *dev, struct zss_queue *q, struct zss_obj *img,
+                            const VkSemaphore *waits, uint32_t nwaits);
 void zss_cmd_set_layout(struct zss_obj *img, const VkImageSubresourceRange *r, VkImageLayout layout);
 void zss_cmd_track_rendering(const void *rendering);
 void zss_cmd_exec_begin_rendering(struct zss_dev *dev, VkCommandBuffer cb, void *rendering);

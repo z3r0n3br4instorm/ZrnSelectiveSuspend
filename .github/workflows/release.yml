@@ -1,0 +1,95 @@
+# SPDX-License-Identifier: GPL-2.0-only
+#
+# On every push to main: build ZSS, run the tests that need no GPU, check that
+# the kernel module compiles, build the installer and the tester kit, and
+# publish them as a new release with the next version number.
+#
+# Version numbers are MAJOR.MINOR.PATCH. MAJOR.MINOR comes from meson.build's
+# project version; PATCH counts up from the highest existing tag vMAJOR.MINOR.*
+# (the first release of a new MAJOR.MINOR is .0). Raise the version in
+# meson.build to start a new series.
+name: build and release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+# One release at a time, in push order, so that two pushes never take the same number.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    # Arch Linux, like the reference machine: the same compiler, Mesa and Vulkan versions.
+    container: archlinux:latest
+    steps:
+      - name: Install build tools
+        run: |
+          pacman -Syu --noconfirm --needed base-devel git meson ninja python glslang \
+            vulkan-icd-loader vulkan-headers libxcb libx11 wayland libglvnd \
+            linux-headers patch github-cli
+
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # every tag, to find the next version number
+
+      - name: Trust the checkout
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - name: Build
+        run: |
+          meson setup build --buildtype=release
+          ninja -C build
+
+      - name: Test (the suites that need no GPU, display or virtual machine)
+        run: meson test -C build --print-errorlogs json retain protocol rules packaging tester-report
+
+      - name: Check that the kernel module compiles
+        run: |
+          kdir="$(ls -d /usr/lib/modules/*/build | head -1)"
+          cp -r kmod /tmp/kmod-check
+          make -C /tmp/kmod-check KDIR="$kdir"
+
+      - name: Work out the version
+        id: version
+        run: |
+          base="$(sed -n "s/^  version: '\([0-9]*\.[0-9]*\)\..*',/\1/p" meson.build)"
+          [ -n "$base" ] || { echo "no version in meson.build" >&2; exit 1; }
+          last="$(git tag -l "v$base.*" | sed "s/^v$base\.//" | grep -E '^[0-9]+$' | sort -n | tail -1)"
+          next="$base.$(( ${last:--1} + 1 ))"
+          echo "version=$next" >> "$GITHUB_OUTPUT"
+          echo "release v$next"
+
+      # The unversioned copies give .../releases/latest/download/zss-installer.run a
+      # fixed name, for the website's one-line install.
+      - name: Build the installer and the tester kit
+        run: |
+          v="${{ steps.version.outputs.version }}"
+          packaging/make-bundle.sh "$v" dist
+          cp "dist/zss-installer-$v.run" dist/zss-installer.run
+          cp "dist/zss-tester-$v.run" dist/zss-tester.run
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          v="${{ steps.version.outputs.version }}"
+          cat > notes.md <<EOF
+          Built from \`${GITHUB_SHA::12}\` on Arch Linux.
+
+          - **zss-installer-$v.run**: installs ZSS. \`sh zss-installer-$v.run --check\` says what this machine supports and changes nothing; without \`--check\` it installs (asks for your password).
+          - **zss-tester-$v.run**: the tester kit. It collects what this machine has for ZSS, runs the moving tests (no graphics card is switched off) and saves a report to send by email. It changes nothing.
+
+          \`zss-installer.run\` and \`zss-tester.run\` are the same files under names that stay the same from release to release.
+
+          Both need a distribution whose libraries are as new as Arch Linux's.
+          EOF
+          gh release create "v$v" dist/*.run \
+            --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
+            --title "ZrnSelectiveSuspend $v" --notes-file notes.md --generate-notes

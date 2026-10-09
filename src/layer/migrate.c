@@ -315,9 +315,9 @@ static VkResult capture(struct zss_dev *dev)
             r = capture_buffer(dev, o);
         else if (o->kind == ZK_IMAGE && o->r.backing && !o->u.img.swapchain)
             r = capture_image(dev, o);
-        else if (o->kind == ZK_IMAGE && o->u.img.swapchain && o->r.borrowed && !o->u.img.pending &&
-                 (o->u.img.ci.usage & VK_IMAGE_USAGE_TRANSFER_SRC_BIT) &&
-                 (o->u.img.ci.usage & VK_IMAGE_USAGE_TRANSFER_DST_BIT))
+        else if (o->kind == ZK_IMAGE && o->u.img.swapchain && !o->u.img.pending &&
+                 (o->r.standin || ((o->u.img.ci.usage & VK_IMAGE_USAGE_TRANSFER_SRC_BIT) &&
+                                   (o->u.img.ci.usage & VK_IMAGE_USAGE_TRANSFER_DST_BIT))))
             /*
              * A window's images are not required to keep what was presented
              * from them, but drivers do, and applications that redraw only
@@ -508,7 +508,7 @@ static VkResult build(struct zss_dev *dev, struct zss_gpu *target)
             continue;
         }
         /* An image of a swapchain that was just rebuilt is the driver's, already in place. */
-        if (o->kind == ZK_IMAGE && o->u.img.swapchain && o->r.borrowed && o->r.h)
+        if (o->kind == ZK_IMAGE && o->u.img.swapchain && o->r.h)
             continue;
         r = zss_real_create(dev, o);
         if (r == VK_SUCCESS && o->kind == ZK_BUFFER)
@@ -914,7 +914,12 @@ static enum zss_outcome relocate(struct zss_dev *dev, struct zss_gpu *target, bo
          * old swapchain has to go before the new one can be made. Should the
          * rebuild then fail, the application is told to make a new one.
          */
-        if (o->kind == ZK_SWAPCHAIN && o->r.h && target && dev->gpu && target->drv == dev->gpu->drv && !abandon) {
+        if (o->kind == ZK_SWAPCHAIN && o->r.h && o->r.standin) {
+            /* Presented through the screen's GPU: that presenter holds the window; it goes now (present.c). */
+            zss_presenter_destroy((struct zss_presenter *)(uintptr_t)o->r.h, abandon);
+            o->r = (struct zss_real){ 0 };
+        }
+        if (o->kind == ZK_SWAPCHAIN && o->r.h && target && dev->gpu && zss_present_driver(target) == dev->gpu->drv && !abandon) {
             dev->fn.DestroySwapchainKHR(dev->real, (VkSwapchainKHR)(uintptr_t)o->r.h, NULL);
             o->r.h = 0;
         }

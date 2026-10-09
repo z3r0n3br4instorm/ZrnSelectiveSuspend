@@ -51,9 +51,14 @@ Status words: **built** (exists and tested somewhere), **built, unproven**
 | 38 | [Make IFSCL migrate](ideas.md#38-make-ifscl-migrate) | built |
 | 39 | [Implement OpenGL as well](ideas.md#39-implement-opengl-as-well) | built |
 | 40 | [Names for the two shims](ideas.md#40-names-for-the-two-shims) | built |
-| 41 | [Lend a detached GPU to a virtual machine](ideas.md#41-lend-a-detached-gpu-to-a-virtual-machine) | specified |
+| 46 | [A website that is also the wiki](ideas.md#46-a-website-that-is-also-the-wiki) | built, unproven |
+| 45 | [Builds and releases on every push](ideas.md#45-builds-and-releases-on-every-push) | built |
+| 44 | [The installer reports too](ideas.md#44-the-installer-reports-too) | built |
+| 43 | [Publish the findings, and a tester kit](ideas.md#43-publish-the-findings-and-a-tester-kit) | built |
+| 42 | [Present frames on the screen's GPU](ideas.md#42-present-frames-on-the-screens-gpu) | built |
+| 41 | [Lend a detached GPU to a virtual machine](ideas.md#41-lend-a-detached-gpu-to-a-virtual-machine) | works on the laptop, with a real guest |
 
 Standing constraints the author set along the way, which shaped several of the
 answers: external displays must keep working (so the NVIDIA driver stays loaded
-in X); the bootloader's configuration is not to be touched; and the laptop is a
+in X; lifted by the author on 9 October 2026, when the card left X for lending); the bootloader's configuration is not to be touched; and the laptop is a
 work machine that must not be left unbootable.

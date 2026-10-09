@@ -93,6 +93,7 @@ const char *state_name(enum gpu_state s)
     case GS_SAFE_TO_REMOVE: return "safe-to-remove";
     case GS_ATTACHING: return "attaching";
     case GS_LOST: return "lost";
+    case GS_LENT: return "lent";
     }
     return "?";
 }
@@ -130,6 +131,31 @@ static void progress(struct client *req, const char *fmt, ...)
         zj_begin(&o, "progress");
         zj_add_str(&o, "text", line);
         zss_send(req->fd, &o);
+    }
+}
+
+/*
+ * While the daemon is moving programs between GPUs it says so with a file
+ * (<runtime dir>/moving). A program that slows background programs down by
+ * stopping them (a power manager) can look for it and leave them running for
+ * that long: a stopped program cannot answer a request to move, and the
+ * operation would time out.
+ */
+static void set_busy(bool on)
+{
+    char path[400];
+
+    busy = on;
+    snprintf(path, sizeof(path), "%s/moving", zssd_cfg.runtime_dir ? zssd_cfg.runtime_dir : "/run/zss");
+    if (on) {
+        FILE *f = fopen(path, "w");
+
+        if (f) {
+            fprintf(f, "%d\n", (int)getpid());
+            fclose(f);
+        }
+    } else {
+        unlink(path);
     }
 }
 
@@ -620,12 +646,13 @@ static int off_blockers(struct client *req, struct gpu *g, const pid_t *holders,
         f.registered = false;
         f.display_server = is_display_server(holders[i], comm);
         f.listed_service = service_listed(comm);
+        f.system = holders[i] == 1 || !strcmp(comm, "systemd-logind") || !strcmp(comm, "elogind") || !strcmp(comm, "seatd");
         switch (holder_verdict(&f, &why)) {
         case HV_STOP:
             SEEN("%s%s (service, will be stopped)", seen[0] ? ", " : "", comm);
             break;
         case HV_ALLOW:
-            SEEN("%s%s (display server, idle)", seen[0] ? ", " : "", comm);
+            SEEN("%s%s (%s)", seen[0] ? ", " : "", comm, f.system ? "holds the node for a session, left alone" : "display server, idle");
             break;
         case HV_FREEZE:
             /* Freezing the terminal the request came from would leave no way to ask for the device back. */
@@ -698,6 +725,13 @@ static bool will_freeze(const struct gpu *g, pid_t pid)
             return true;
     return false;
 }
+
+/*
+ * Set by do_lend: the release sequence stops once every application has left
+ * the device, changes neither the driver nor the power, and sends no result
+ * for a success (its caller carries on from there).
+ */
+static bool release_move_only;
 
 static bool do_release(struct client *req, struct gpu *g, const char *to, bool off, bool console, bool automatic)
 {
@@ -840,6 +874,8 @@ static bool do_release(struct client *req, struct gpu *g, const char *to, bool o
         return false;
     }
 
+    if (release_move_only)
+        return true;
     if (g->backend->dry_run) {
         g->dry_detached = true;
         set_state(g, GS_ATTACHED);
@@ -1228,6 +1264,244 @@ static void do_attach(struct client *req, struct gpu *g, bool restore, const cha
     send_result(req, !failed[0], "", failed[0] ? failed : "attached", g);
 }
 
+/* ---- lending to a virtual machine (zss-vm-passthrough) --------------------------------- */
+
+void zssd_keepalive(void)
+{
+    watchdog_ping();
+}
+
+/*
+ * What stands in the way of lending `g`, and what lending would do to the
+ * programs using it. One function for the check and for the refusal, so that
+ * the check cannot pass something the operation then trips over. Returns the
+ * number of obstacles; with `tell`, each is sent to `req` along with the
+ * card's functions and the affected programs.
+ */
+static int lend_survey(struct client *req, struct gpu *g, bool tell, bool with_group)
+{
+    struct lend_obstacle obs[24];
+    char funcs[ZSSD_MAX_FUNCS][16];
+    int gi = (int)(g - gpus), nh, n, nf;
+    pid_t holders[128];
+    struct zj_out o;
+
+    if (g->state == GS_POWERED_OFF || g->state == GS_SAFE_TO_REMOVE) {
+        n = 0;
+        snprintf(obs[n].reason, sizeof(obs[n].reason), "the card is powered off");
+        snprintf(obs[n++].remedy, sizeof(obs[0].remedy), "switch it on without bringing programs back, then lend it: zssctl on %s --stay", g->pci);
+        nh = 0;
+    } else if (g->state != GS_ATTACHED || g->dry_detached) {
+        n = 0;
+        snprintf(obs[n].reason, sizeof(obs[n].reason), "the card is %s", g->dry_detached ? "detached in a dry run" : state_name(g->state));
+        snprintf(obs[n++].remedy, sizeof(obs[0].remedy), "only an attached card can be lent");
+        nh = 0;
+    } else {
+        char err[ZSSD_ERR] = "";
+
+        /* Finds out, among other things, whether the kernel module will manage the card. */
+        if (g->backend && !g->backend->dry_run)
+            g->backend->probe(g, err);
+        nh = find_holders(g, holders, 128);
+        n = lend_obstacles(g, holders, nh, with_group, obs, 20);
+    }
+
+    nf = pci_functions(g->pci, funcs, ZSSD_MAX_FUNCS);
+    for (int i = 0; tell && i < nf; i++) {
+        char drv[64];
+
+        pci_driver(funcs[i], drv, sizeof(drv));
+        zj_begin(&o, "function");
+        zj_add_str(&o, "pci", funcs[i]);
+        zj_add_str(&o, "driver", drv);
+        zss_send(req->fd, &o);
+    }
+    if (tell && with_group) {
+        char others[16][16];
+        int no = lend_companions(g, others, 16);
+
+        /* Not the card's, but in its isolation group: they go with it and lose their host drivers for the time. */
+        for (int i = 0; i < no; i++) {
+            char drv[64];
+
+            pci_driver(others[i], drv, sizeof(drv));
+            zj_begin(&o, "function");
+            zj_add_str(&o, "pci", others[i]);
+            zj_add_str(&o, "driver", drv);
+            zj_add_bool(&o, "companion", true);
+            zss_send(req->fd, &o);
+        }
+    }
+    for (int i = 0; i < nh; i++) {
+        struct client *c = client_by_pid(holders[i]);
+        const char *what;
+        char comm[64];
+
+        pid_comm(holders[i], comm, sizeof(comm));
+        if (is_display_server(holders[i], comm))
+            continue; /* an obstacle already */
+        if (c) {
+            what = "moved to another GPU";
+        } else if (service_listed(comm)) {
+            what = "stopped, and started again when the card is back";
+        } else {
+            /* Not frozen, as for a power-off: a frozen program still has the card open, and its driver could not let go. */
+            if (n < 24) {
+                snprintf(obs[n].reason, sizeof(obs[n].reason), "%s (pid %d) has the card open and was not started under ZSS_AirLock", comm, (int)holders[i]);
+                snprintf(obs[n++].remedy, sizeof(obs[0].remedy), "close it, or start it with zss-run so that it can be moved");
+            }
+            continue;
+        }
+        if (tell) {
+            zj_begin(&o, "affected");
+            zj_add_int(&o, "pid", holders[i]);
+            zj_add_str(&o, "name", comm);
+            zj_add_str(&o, "what", what);
+            zss_send(req->fd, &o);
+        }
+    }
+    for (int i = 0; i < MAX_CLIENTS && nh > 0; i++) {
+        struct client *c = &clients[i];
+
+        if (c->fd < 0 || !wants_migrate(c, gi, holders, nh) || c->view[gi].migratable || n >= 24)
+            continue;
+        snprintf(obs[n].reason, sizeof(obs[n].reason), "%s (pid %d) cannot be moved: %.200s", c->name, (int)c->pid, c->view[gi].reason);
+        snprintf(obs[n++].remedy, sizeof(obs[0].remedy), "close it");
+    }
+    if (tell && g->state == GS_ATTACHED) {
+        char mods[16][64];
+        int nm = lend_stacked_modules(g, mods, 16);
+
+        for (int i = 0; i < nm; i++) {
+            zj_begin(&o, "affected");
+            zj_add_int(&o, "pid", 0);
+            zj_add_str(&o, "name", mods[i]);
+            zj_add_str(&o, "what", "kernel module stacked on the card's driver: unloaded, and loaded again when the card is back");
+            zss_send(req->fd, &o);
+        }
+    }
+    for (int i = 0; tell && i < n; i++) {
+        zj_begin(&o, "obstacle");
+        zj_add_str(&o, "reason", obs[i].reason);
+        zj_add_str(&o, "remedy", obs[i].remedy);
+        zss_send(req->fd, &o);
+    }
+    return n;
+}
+
+static void do_lend_check(struct client *req, struct gpu *g, bool with_group)
+{
+    int n = lend_survey(req, g, true, with_group);
+    char msg[96];
+
+    snprintf(msg, sizeof(msg), n ? "%d obstacle(s): the card cannot be lent as things are" : "nothing in the way: the card can be lent", n);
+    send_result(req, n == 0, "", msg, g);
+}
+
+static void do_lend(struct client *req, struct gpu *g, const char *to, bool with_group)
+{
+    char err[ZSSD_ERR] = "", failed[400] = "", msg[400];
+    long long t0 = now_ms();
+    int n = lend_survey(req, g, true, with_group);
+    bool moved;
+
+    if (n > 0) {
+        snprintf(msg, sizeof(msg), "%d obstacle(s): the card was not lent and nothing was changed", n);
+        send_result(req, false, "", msg, g);
+        return;
+    }
+    progress(req, "Lending device: %s  %s", g->pci, g->name);
+    /* Services that hold the card only to keep it initialised go first; they are among its holders. */
+    services_stop(g);
+    for (int tries = 0; tries < 50; tries++) {
+        pid_t holders[128];
+        int nh = find_holders(g, holders, 128), left = 0;
+
+        for (int i = 0; i < nh; i++) {
+            char comm[64];
+
+            pid_comm(holders[i], comm, sizeof(comm));
+            left += service_listed(comm);
+        }
+        if (!left)
+            break;
+        pump(100);
+    }
+    progress(req, "  [1/3] Services stopped: %s", g->stopped[0] ? g->stopped : "none");
+
+    release_move_only = true;
+    moved = do_release(req, g, to, false, false, false);
+    release_move_only = false;
+    if (!moved) {
+        /* The release sequence has answered and put the state back. */
+        services_start(g);
+        return;
+    }
+    progress(req, "  [2/3] Applications have left the card");
+
+    if (lend_hand_over(g, with_group, err) < 0) {
+        progress(req, "  FAILED: %s; giving the card back to the host", err);
+        services_start(g);
+        restore_clients(g, failed, sizeof(failed), req);
+        set_state(g, GS_ATTACHED);
+        send_result(req, false, "", err, g);
+        return;
+    }
+    progress(req, "  [3/3] Every function%s handed to the passthrough driver; the card is powered and left alone",
+             with_group ? ", and the devices sharing its isolation group," : "");
+    set_state(g, GS_LENT);
+    progress(req, "Device %s is lent (%.2f s). A virtual machine can take it now.", g->pci, (double)(now_ms() - t0) / 1000.0);
+    progress(req, "Take it back, once the virtual machine has stopped, with: zssctl reclaim %s", g->pci);
+    send_result(req, true, "", "lent", g);
+}
+
+static void do_reclaim(struct client *req, struct gpu *g, bool restore)
+{
+    char err[ZSSD_ERR] = "", failed[400] = "", msg[300];
+    long long t0 = now_ms();
+    pid_t holders[16];
+    int nh;
+
+    if (g->state != GS_LENT) {
+        send_result(req, false, "", "the device is not lent", g);
+        return;
+    }
+    nh = lend_holders(g, holders, 16);
+    if (nh > 0) {
+        char comm[64];
+
+        pid_comm(holders[0], comm, sizeof(comm));
+        snprintf(msg, sizeof(msg), "%s (pid %d) holds the card; stop the virtual machine first", comm, (int)holders[0]);
+        send_result(req, false, "", msg, g);
+        return;
+    }
+    progress(req, "Reclaiming device: %s  %s", g->pci, g->name);
+    set_state(g, GS_ATTACHING);
+    if (lend_take_back(g, err) < 0) {
+        /* Still without a host driver: it stays "lent", and reclaiming can be tried again. */
+        progress(req, "  FAILED: %s", err);
+        set_state(g, GS_LENT);
+        send_result(req, false, "", err, g);
+        return;
+    }
+    progress(req, "  [1/3] Card reset by a power cycle; host drivers bound again");
+    services_start(g);
+    progress(req, "  [2/3] Services started: %s", g->stopped[0] ? g->stopped : "none");
+    g->idle_since = now_ms();
+    if (restore)
+        restore_clients(g, failed, sizeof(failed), req);
+    progress(req, "  [3/3] Applications: %s", restore ? (failed[0] ? failed : "returned to the card")
+                                                      : "left where they are (zssctl attach brings them back)");
+    set_state(g, GS_ATTACHED);
+    {
+        pid_t unused[1];
+
+        find_holders(g, unused, 1); /* refresh the node cache: the host driver made its nodes anew */
+    }
+    progress(req, "Device %s is the host's again (%.2f s).", g->pci, (double)(now_ms() - t0) / 1000.0);
+    send_result(req, !failed[0], "", failed[0] ? failed : "attached", g);
+}
+
 /* A device that comes back on its own is treated as an attach request. */
 static void check_reappeared(void)
 {
@@ -1249,9 +1523,9 @@ static void check_reappeared(void)
         if (!g->reappear_said)
             logmsg("%s reappeared; attaching", g->pci);
         g->reappear_said = true;
-        busy = true;
+        set_busy(true);
         do_attach(NULL, g, true, "the device reappeared");
-        busy = false;
+        set_busy(false);
     }
 }
 
@@ -1308,9 +1582,9 @@ static void serve_end(struct gpu *g)
         driver_resume(g, which);
     }
     /* It cannot go off again: give it back completely rather than leave it half hidden. */
-    busy = true;
+    set_busy(true);
     do_attach(NULL, g, false, err);
-    busy = false;
+    set_busy(false);
 }
 
 /* Something called into the suspended driver, or a key was pressed on the console. */
@@ -1403,9 +1677,9 @@ static void check_wake(void)
             g->quick_wakes = 0;
             g->idle_wait = 0;
         }
-        busy = true;
+        set_busy(true);
         do_attach(NULL, g, false, why);
-        busy = false;
+        set_busy(false);
     }
     console_key = false;
     wake_event = false;
@@ -1457,14 +1731,14 @@ static void check_idle(void)
             continue;
 
         snprintf(before, sizeof(before), "%s", g->last_refusal);
-        busy = true;
+        set_busy(true);
         if (!do_release(NULL, g, "", true, false, true)) {
             /* Say why once, then keep quiet until the reason changes. */
             if (strcmp(before, g->last_refusal))
                 logmsg("%s: idle, but not powered off: %s", g->pci, g->last_refusal);
             g->idle_since = now_ms();
         }
-        busy = false;
+        set_busy(false);
     }
 }
 
@@ -1542,9 +1816,9 @@ static void check_bus(void)
     for (int i = 0; i < ngpus; i++) {
         if (busy || !gpus[i].loss_pending)
             continue;
-        busy = true;
+        set_busy(true);
         do_evacuate(&gpus[i]);
-        busy = false;
+        set_busy(false);
     }
     if (auto_attach)
         check_reappeared();
@@ -1618,6 +1892,23 @@ static void do_status(struct client *req, const char *only)
         zj_add_int(&o, "idle_wait", (g->idle_wait ? g->idle_wait : zssd_cfg.idle_timeout) / 1000);
         zss_send(req->fd, &o);
 
+        if (g->state == GS_LENT) {
+            pid_t guests[16];
+            int ng = lend_holders(g, guests, 16);
+
+            for (int i = 0; i < ng; i++) {
+                char comm[64];
+
+                pid_comm(guests[i], comm, sizeof(comm));
+                zj_begin(&o, "client");
+                zj_add_str(&o, "gpu", g->pci);
+                zj_add_int(&o, "pid", guests[i]);
+                zj_add_str(&o, "name", comm);
+                zj_add_str(&o, "class", "guest");
+                zj_add_str(&o, "reason", "holds the lent card");
+                zss_send(req->fd, &o);
+            }
+        }
         nh = find_holders(g, holders, 128);
         for (int i = 0; i < nh; i++) {
             char comm[64];
@@ -1729,7 +2020,17 @@ static void handle(struct client *c, struct zj_msg *m)
         c->subscribed = true;
     } else if (zj_is(m, "status")) {
         do_status(c, zj_str(m, "gpu", ""));
-    } else if (zj_is(m, "detach") || zj_is(m, "attach") || zj_is(m, "resume") || zj_is(m, "off") || zj_is(m, "on")) {
+    } else if (zj_is(m, "lend-check")) {
+        /* Read-only, like status. */
+        g = gpu_find(zj_str(m, "gpu", ""));
+        if (!g)
+            send_result(c, false, "", "not a managed GPU", NULL);
+        else if (busy)
+            send_result(c, false, "", "another operation is in progress", NULL);
+        else
+            do_lend_check(c, g, zj_bool(m, "with_group", false));
+    } else if (zj_is(m, "detach") || zj_is(m, "attach") || zj_is(m, "resume") || zj_is(m, "off") || zj_is(m, "on") ||
+               zj_is(m, "lend") || zj_is(m, "reclaim")) {
         if (!authorised(c)) {
             send_result(c, false, "", "permission denied", NULL);
             return;
@@ -1738,7 +2039,7 @@ static void handle(struct client *c, struct zj_msg *m)
             send_result(c, false, "", "another operation is in progress", NULL);
             return;
         }
-        busy = true;
+        set_busy(true);
         if (zj_is(m, "resume")) {
             do_resume(c, (pid_t)zj_int(m, "pid", 0));
         } else {
@@ -1748,6 +2049,12 @@ static void handle(struct client *c, struct zj_msg *m)
 
                 snprintf(msg, sizeof(msg), "%s is not a managed GPU", zj_str(m, "gpu", "(none)"));
                 send_result(c, false, "", msg, NULL);
+            } else if (zj_is(m, "lend")) {
+                do_lend(c, g, zj_str(m, "to", ""), zj_bool(m, "with_group", false));
+            } else if (zj_is(m, "reclaim")) {
+                do_reclaim(c, g, zj_bool(m, "return", true));
+            } else if (g->state == GS_LENT) {
+                send_result(c, false, "", "the device is lent to a virtual machine; take it back with: zssctl reclaim", g);
             } else if (zj_is(m, "detach")) {
                 do_release(c, g, zj_str(m, "to", ""), false, false, false);
             } else if (zj_is(m, "off")) {
@@ -1762,7 +2069,7 @@ static void handle(struct client *c, struct zj_msg *m)
                 do_attach(c, g, true, "requested");
             }
         }
-        busy = false;
+        set_busy(false);
     }
 }
 
@@ -1941,6 +2248,21 @@ static int recover(void)
         /* Whatever a dead daemon hid comes back, whether or not it got as far as cutting power. */
         if (gpu_unhide(g))
             logmsg("%s: made visible again", g->pci);
+        /* A card lent before the daemon was restarted is still lent: the kernel says so. */
+        if (g->backend && !g->backend->dry_run && lend_recorded(g)) {
+            g->backend->probe(g, err);
+            if (gpu_kmod_lent(g)) {
+                g->state = GS_LENT;
+                logmsg("%s is lent to a virtual machine; leaving it alone", g->pci);
+                found++;
+                continue;
+            }
+            /* The hand-over was interrupted before the module was told, or after it took the card back. */
+            logmsg("%s: an interrupted hand-over is undone", g->pci);
+            err[0] = '\0';
+            if (lend_take_back(g, err) < 0)
+                logmsg("%s: %s", g->pci, err);
+        }
         if (!g->backend || !marker_read(g))
             continue;
         found++;
@@ -1953,6 +2275,7 @@ static int recover(void)
         g->nfrozen = 0;
         marker_remove(g);
     }
+    set_busy(false); /* removes a marker a dead daemon left behind */
     if (!found)
         logmsg("nothing to recover");
     return 0;

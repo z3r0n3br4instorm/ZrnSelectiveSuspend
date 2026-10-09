@@ -1,4 +1,4 @@
-# The `zss` kernel module
+# ZSS_Interceptor: the `zss` kernel module
 
 `zss.ko` is the part of ZSS that touches the hardware. It is optional: the
 daemon uses it when it is loaded and falls back to its own, narrower power
@@ -59,6 +59,7 @@ Everything is under `/sys/kernel/zss/`, root only.
 | `version` | module version |
 | `PCI/state` | `on`, `off`, `lost` or `failed` |
 | `PCI/power` | write `off` or `on` |
+| `PCI/power` (lending) | write `lend`: the PCI state is saved and the device is left alone (state `lent`: no loss guard, no power requests, not unmanaged on request). `unlend`: back to `on`, nothing else done. `reclaim`: refused while any function has a driver; otherwise the device is reset by a power cycle through the backend, its PCI state restored, and it is `on` with no driver bound. Binding and unbinding drivers is user space's part. |
 | `PCI/backend`, `PCI/quiesce` | what was chosen |
 | `PCI/functions` | each function, its driver, and `online` or `offline` |
 | `PCI/last_error` | why the last request failed |

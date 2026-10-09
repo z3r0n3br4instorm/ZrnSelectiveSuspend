@@ -19,8 +19,12 @@ The check SHALL report all obstacles it finds, not only the first, each with a o
 - **THEN** the check reports it, says whether the firmware offers one, and names the kernel parameter that enables it
 
 #### Scenario: The card shares its isolation group
-- **WHEN** a device that is not a function of the card is in the same isolation group
-- **THEN** the check reports each such device by address and name
+- **WHEN** a device that is neither a function of the card nor a bridge is in the same isolation group, and the user has not asked for the group to go with the card
+- **THEN** the check reports each such device by address and driver, and says that asking for the group to go with the card removes the obstacle at the cost of that device's host driver
+
+#### Scenario: The group goes with the card
+- **WHEN** the user asks for the group to go with the card
+- **THEN** those devices are listed among what will be handed over, marked as sharing the group, and are not obstacles
 
 #### Scenario: The display server holds the card
 - **WHEN** the display server has the card open
@@ -31,8 +35,16 @@ The check SHALL report all obstacles it finds, not only the first, each with a o
 - **THEN** the check reports the function and what is missing
 
 #### Scenario: A program blocks the hand-over
-- **WHEN** a program holds the card that would block a power-off
-- **THEN** the check lists it with the same reason a power-off would give
+- **WHEN** a program that cannot be moved has the card open
+- **THEN** the check names it and says to close it or start it under ZSS_AirLock
+
+#### Scenario: The card is the host's only display device
+- **WHEN** the card drives a display and no other display device has a driver
+- **THEN** the check reports that the host would be left without a display; a monitor on a card that is not the host's only display device is no obstacle
+
+#### Scenario: The card cannot be reset on return
+- **WHEN** ZSS_Interceptor is not managing the card
+- **THEN** the check reports that a lent card could not be reset when it comes back
 
 ### Requirement: A clean result says what will happen
 When there is no obstacle the check SHALL list every function of the card that will be handed over and every application that will be moved or frozen, and SHALL exit successfully.

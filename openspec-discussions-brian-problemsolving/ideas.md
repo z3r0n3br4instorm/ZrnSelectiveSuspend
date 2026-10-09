@@ -865,5 +865,168 @@ server holds the card, and ZSS never unbinds a driver today. How X comes off
 the card is left as an open question for the author; the task list measures
 before it builds.
 
-**Status: specified.** Nothing built.
+Then: "add the immou kernel parameter to the GRUB, and disconnect the nvidia
+card from X server, we'll figure out a way to route the display port later",
+and "implement other parts of the spec too ... then for the tests we'll
+reboot". Both of the author's earlier rules were lifted for this by the
+author. The boot menu turned out to be hand-written for the gmux, so the
+parameter went in as one added entry rather than a change to the existing
+ones; the NVIDIA card was taken out of the X configuration, with the old file
+kept beside it. The mechanism was then built: a "lent" state in
+ZSS_Interceptor (0.3.0) and in the daemon, `zssctl lend`, `reclaim` and
+`lend --check`, and a new test track in a QEMU guest with an emulated IOMMU,
+which passes. The design changed in one place while building: the daemon does
+the driver binding through the kernel's stable interface, and the module
+guards, saves and resets.
 
+The first boot with the IOMMU on showed two things in the way. The card shares
+its isolation group with the Thunderbolt controller, and the kernel lends a
+group whole; the author: "ites fine if the thunderbolt port dosnt work on
+passthrough", so lending gained `--with-group`. And X opens the card's display
+nodes at start-up even with the card out of its configuration; a udev rule now
+puts those nodes on a seat of their own. The same boot showed two faults in
+what already existed, both fixed: a power-off would have frozen init and the
+login manager, which now hold the card's nodes for X; and the NVIDIA driver
+leaves its render node open after being shut down, which ZSS_AirLock now
+closes.
+
+The first lends on the laptop failed three ways before one worked. The
+author's own power manager was stopping the programs that were asked to move,
+so they could not answer; it and the daemon now cooperate through a marker
+file. Then the NVIDIA driver, asked to let go while its display module still
+held the card, waited for ever with the daemon stuck in the request; lending
+now unloads the modules stacked on the driver, requires the driver to have no
+user left, and time-limits the unbind. Then that display module turned out to
+stay in use for a second or two after programs leave, which the daemon now
+waits out. The fourth attempt lent the card in 2.4 seconds and took it back in
+7.3, with three programs moved to Intel and back.
+
+Then a real guest: CachyOS from its live ISO, in QEMU, with the card passed
+through. Two things the laptop needed on the way: QEMU's window front-end,
+and permission for the passthrough driver to work without interrupt
+remapping, which this MacBook's firmware cannot provide. The author: "it
+worked passthrough worked". After the guest shut down the card came back in
+11 seconds, with its drivers, the NVIDIA driver answering and the programs
+returned to it.
+
+**Status: works on the laptop, with a real guest.** Open: a script for it,
+and what the guest's driver makes of a card without a ROM.
+
+## 42. Present frames on the screen's GPU
+
+**As proposed.** The author saw text in Chromium-based programs flash back to
+an older frame while typing, "it show s the previous frame again before
+showing the current frame". It did not happen with the program on Intel. Of
+three ways out, the author chose: "fix this BS first. ZSS_AirLock presents on
+the screen's GPU itself: render on NVIDIA, copy the finished frame to Intel
+with proper ordering, show it from there".
+
+**What came of it.** Built. When a program draws on a GPU that does not drive
+the screen, and its driver is not one of Mesa's (which hand frames across in
+order themselves), ZSS_AirLock no longer gives it a real swapchain on that GPU.
+The program draws into ordinary images; at each present the layer reads the
+frame back, waits for it, copies it into a swapchain of its own on the
+screen's GPU and presents it there, one frame after another. Moves between
+GPUs switch between this and direct presenting. The frame rate stayed at 60;
+the cost is one copy through memory per frame.
+
+**Status: built.** The author has to say whether the flashing is gone.
+
+**Also asked:** whether the display could be switched between the GPUs at a
+vertical blank, as macOS does.
+
+## 43. Publish the findings, and a tester kit
+
+**As proposed.** "I would like to publish my finidngs, first im guessing there
+is no other opensource tool that does this right ? can you check", then
+"update the README and SPEC, i saw the diagrams in spec is also outdated, and
+update the installer, i also need a way to get testors right ... host the
+installer and the test binary in there, so when it runs in a specific hardware
+it will capture GPU related things driver related things, and other debugging
+stuff with some tests and send me back". On how reports come back: "is there
+a way to directly get the report ? instead of having to configure API
+stuff", settled on the tester's own mail program. The website: "we'll build
+it later". The kit: "Report first, install optional. it would be better if it
+has a GUI as well, QT based", and "it should run those moving tests as well".
+Of the first window: "The GUI looks hedious, make it a bit professional
+looking (no i dont meant vomit gradients and rounded corner bullshit)".
+
+**What came of it.** A search found no open-source tool that moves running
+graphics programs between GPUs, or lends a card in use to a virtual machine
+without closing the session; CUDA and ROCm checkpointing, GFXReconstruct
+replay and GPU Pit Crew each do a neighbouring part. The README and SPEC were
+brought up to date, with new architecture and state diagrams in the SPEC. The
+installer gained `--vm-passthrough` and a passthrough line in `--check`. The
+tester kit (`tester/`) collects GPU, driver, power, IOMMU, Vulkan, OpenGL and
+display facts, runs the moving tests with a dry-run daemon (39 tests on the
+laptop, all passing), removes names and identifiers, and saves a report the
+tester sends by mail; a Qt window does the same, with an optional full test
+that installs ZSS and switches the card off and on once.
+
+**Status: built.** The prebuilt downloads came with idea 45 and the website
+with idea 46.
+
+## 44. The installer reports too
+
+**As proposed.** "the installer should collect these stuff as well, if
+anything fails it should ask to send a report as well, if not save it in
+users home's .zss/debug.log".
+
+**What came of it.** Built. The installer records its own messages and, when
+it ends, runs the tester kit's collector (facts only, no moving tests): on
+success it keeps `~/.zss/debug.log` in the home folder of whoever ran it
+through sudo; on any failure or warning it also saves a full report there and
+asks whether to open the mail program to send it. Tried for real with a
+failing install (a missing build): report, log and question as intended. The
+successful path has not been run. On the way, a slip in an install command of
+mine overwrote `/dev/null` with a file; the author recreated it.
+
+**Status: built.** The successful-install path is untested.
+
+## 45. Builds and releases on every push
+
+**As proposed.** "create a CI/CD that will build the installer binary and
+testing binary when a push is done, it should automatically generate a new
+release tag with the release number."
+
+**What came of it.** A GitHub Actions workflow builds ZSS on Arch Linux on
+every push to `main`, runs the tests that need no GPU, checks that the kernel
+module compiles, makes two self-extracting downloads (the installer and the
+tester kit, by `packaging/make-bundle.sh`) and publishes them as release
+`vMAJOR.MINOR.PATCH`, the patch number counted up from the last tag. Both
+downloads were built and unpacked locally; the tester kit ran its 39 moving
+tests from the unpacked copy alone. The workflow itself has not run yet.
+
+**Status: built.** Untested on GitHub until the first push.
+
+## 46. A website that is also the wiki
+
+**As proposed.** "we are building a website for this ... in the title bar left,
+it will show ZrnSelectiveSuspend, and on right it will show a oneliner command
+that will directly download and install the binary ... on right side there will
+be a image of the MacBook Pro 2012 saying tested on ... on the left side there
+will be a side bar with a wiki like topics (this is basically a wiki) ... every
+inch of stuff this can does should be explained how to in there in a nice way
+... and im thinking github pages". Quoted from the session summary; the
+wording may not be exact.
+
+**What came of it.** One static page in the author's hairline-mono style,
+beside the project rather than inside it (`../ZrnSelectiveSuspend-website`),
+ready for GitHub Pages. The title bar carries the name and the one-line
+install with a copy button. The landing is split as asked: the pitch, the
+measured times (0.43 s off, 2.9 s lend, 11.2 s reclaim) and an honest note on
+what does not work on the left; the laptop "Tested on", its specifications and
+how ZSS runs on it on the right. The sidebar holds 27 wiki topics in four
+groups (start, use, how it works, reference), written from the README, SPEC
+and docs and checked against the code: installing, every `zssctl` and
+`zss-run` option, programs, games and Steam, battery, lending, loss, the
+tester kit, the internals, settings, variables and troubleshooting.
+
+The one-liner needed a fixed download name, which releases did not have, so
+the release workflow now also publishes `zss-installer.run` and
+`zss-tester.run`. Writing the uninstall instructions turned up a bug in the
+downloads: `--unpack-only` unpacked and then ran the installer anyway. Fixed
+and checked.
+
+**Status: built, unproven.** Rendered and checked locally; not yet published,
+and the one-liner works only after the next release is built.

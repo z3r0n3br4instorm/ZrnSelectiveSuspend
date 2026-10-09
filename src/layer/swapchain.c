@@ -41,6 +41,102 @@ static uint64_t now_ns(void)
     return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
 }
 
+/* ---- presented through the screen's GPU (present.c) ------------------------------------ */
+
+static bool through(const struct zss_obj *sc)
+{
+    return sc->r.standin && sc->r.h;
+}
+
+static struct zss_presenter *presenter_of(const struct zss_obj *sc)
+{
+    return (struct zss_presenter *)(uintptr_t)sc->r.h;
+}
+
+/* The application's images, as images of its own GPU the layer makes; they are copied to the screen at each present. */
+static VkResult standin_images(struct zss_dev *dev, struct zss_obj *sc)
+{
+    for (uint32_t i = 0; i < sc->u.sc.nimages; i++) {
+        struct zss_obj *img = sc->u.sc.images[i];
+        VkResult r;
+
+        img->r = (struct zss_real){ 0 };
+        r = zss_real_create(dev, img);
+        if (r != VK_SUCCESS)
+            return r;
+    }
+    return VK_SUCCESS;
+}
+
+/* The application's image records for a swapchain of `n` images, not yet with real images. */
+static void image_records(struct zss_dev *dev, struct zss_obj *o, const VkSwapchainCreateInfoKHR *ci, uint32_t n)
+{
+    o->u.sc.images = calloc(n ? n : 1, sizeof(*o->u.sc.images));
+    o->u.sc.nimages = n;
+    o->u.sc.real_of = calloc(n ? n : 1, sizeof(*o->u.sc.real_of));
+    o->u.sc.undo_real_of = calloc(n ? n : 1, sizeof(*o->u.sc.undo_real_of));
+    for (uint32_t i = 0; i < n; i++)
+        o->u.sc.real_of[i] = i;
+    for (uint32_t i = 0; i < n; i++) {
+        struct zss_obj *img = zss_obj_new(dev, ZK_IMAGE);
+
+        img->u.img.ci = (VkImageCreateInfo){
+            .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+            .flags = (ci->flags & VK_SWAPCHAIN_CREATE_MUTABLE_FORMAT_BIT_KHR) ? VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT : 0,
+            .imageType = VK_IMAGE_TYPE_2D,
+            .format = ci->imageFormat,
+            .extent = { ci->imageExtent.width, ci->imageExtent.height, 1 },
+            .mipLevels = 1,
+            .arrayLayers = ci->imageArrayLayers,
+            .samples = VK_SAMPLE_COUNT_1_BIT,
+            .tiling = VK_IMAGE_TILING_OPTIMAL,
+            .usage = ci->imageUsage,
+            .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+        };
+        img->u.img.layout = calloc(ci->imageArrayLayers ? ci->imageArrayLayers : 1, sizeof(VkImageLayout));
+        img->u.img.swapchain = o;
+        o->u.sc.images[i] = img;
+    }
+}
+
+/* A swapchain whose frames go to the screen through the layer: no real swapchain on the application's device. */
+static VkResult create_through(struct zss_dev *dev, const VkSwapchainCreateInfoKHR *ci, VkSwapchainKHR *out)
+{
+    struct zss_presenter *p;
+    struct zss_obj *o;
+    uint32_t n = ci->minImageCount < 2 ? 2 : ci->minImageCount;
+    VkResult r;
+
+    pthread_mutex_lock(&window_turn);
+    /* The older swapchain lets go of the window first; its frames are not shown any more (window_turn). */
+    if (ci->oldSwapchain) {
+        struct zss_obj *old = ZOBJ(ci->oldSwapchain);
+
+        old->u.sc.superseded = true;
+        if (through(old))
+            zss_presenter_give_up(presenter_of(old));
+    }
+    p = zss_presenter_new(dev, ci);
+    pthread_mutex_unlock(&window_turn);
+    if (!p)
+        return VK_ERROR_INITIALIZATION_FAILED;
+    o = zss_obj_new(dev, ZK_SWAPCHAIN);
+    o->r = (struct zss_real){ .h = (uint64_t)(uintptr_t)p, .standin = true };
+    o->u.sc.ci = *ci;
+    o->u.sc.ci.pNext = zss_chain_keep(o, ci->pNext);
+    o->u.sc.ci.pQueueFamilyIndices = NULL;
+    o->u.sc.ci.queueFamilyIndexCount = 0;
+    o->u.sc.ci.oldSwapchain = VK_NULL_HANDLE;
+    image_records(dev, o, ci, n);
+    r = standin_images(dev, o);
+    if (r != VK_SUCCESS) {
+        zss_DestroySwapchainKHR((VkDevice)dev, ZHANDLE(VkSwapchainKHR, o), NULL);
+        return r;
+    }
+    *out = ZHANDLE(VkSwapchainKHR, o);
+    return VK_SUCCESS;
+}
+
 VKAPI_ATTR VkResult VKAPI_CALL zss_CreateSwapchainKHR(VkDevice device,
                                                       const VkSwapchainCreateInfoKHR *ci,
                                                       const VkAllocationCallbacks *alloc,
@@ -57,6 +153,14 @@ VKAPI_ATTR VkResult VKAPI_CALL zss_CreateSwapchainKHR(VkDevice device,
 
     (void)alloc;
     zss_enter();
+    if (zss_present_needed(dev->gpu)) {
+        r = create_through(dev, ci, out);
+        if (r == VK_SUCCESS) {
+            zss_leave();
+            return r;
+        }
+        zss_dbg("presenting directly from %s after all", dev->gpu->props.deviceName);
+    }
     /* A mutable-format swapchain lists its formats in the chain; only plain values, so passed on as given. */
     real.pNext = NULL;
     for (const VkBaseInStructure *x = ci->pNext; x; x = x->pNext)
@@ -233,6 +337,14 @@ static void first_use(void *arg)
         .pSignalSemaphores = &sem,
     };
 
+    /* Only a fence to signal (an acquire from a presented-through swapchain). */
+    if (u->index == UINT32_MAX) {
+        if (dev->gpu && u->fence) {
+            dev->fn.QueueSubmit(dev->util_queue, 1, &si, (VkFence)(uintptr_t)u->fence->r.h);
+            dev->fn.QueueWaitIdle(dev->util_queue);
+        }
+        return;
+    }
     /* Moved again, or parked, in the meantime: the rebuild that did it has dealt with this image. */
     if (!dev->gpu || u->sc->u.sc.gen != u->gen || !((u->sc->u.sc.fresh >> u->index) & 1))
         return;
@@ -271,6 +383,40 @@ VKAPI_ATTR VkResult VKAPI_CALL zss_AcquireNextImageKHR(VkDevice device, VkSwapch
         if (o->u.sc.retired) {
             zss_leave();
             return VK_ERROR_OUT_OF_DATE_KHR;
+        }
+        if (through(o)) {
+            /*
+             * Presenting is finished with an image by the time the present
+             * returns (present.c), so any image the application does not hold
+             * is ready at once: the semaphore is only marked, and waits on it
+             * are left out (device.c). A fence has to be signalled for real.
+             */
+            uint32_t n = o->u.sc.nimages, k;
+
+            for (k = 0; k < n && ((o->u.sc.acquired >> ((o->u.sc.gen + k) % n)) & 1); k++)
+                ;
+            if (k == n) {
+                zss_leave();
+                return timeout ? VK_TIMEOUT : VK_NOT_READY;
+            }
+            *index = (o->u.sc.gen + k) % n;
+            o->u.sc.gen++;
+            o->u.sc.acquired |= 1ull << *index;
+            if (semaphore) {
+                ZOBJ(semaphore)->u.sem.signaled = true;
+                ZOBJ(semaphore)->u.sem.virtual_acquire = true;
+            }
+            if (fence) {
+                first.fence = ZOBJ(fence);
+                first.sem = NULL;
+                first.index = UINT32_MAX;
+                ZOBJ(fence)->u.fence.signaled = true;
+                ZOBJ(fence)->u.fence.pending = false;
+            }
+            zss_leave();
+            if (fence)
+                zss_control_exclusive(first_use, &first);
+            return VK_SUCCESS;
         }
         /* While any image is still new, the layer has to see which one comes before the application does. */
         fresh = o->u.sc.fresh != 0;
@@ -325,7 +471,7 @@ VKAPI_ATTR VkResult VKAPI_CALL zss_QueuePresentKHR(VkQueue queue, const VkPresen
     VkSwapchainKHR *chains;
     uint32_t *indices;
     bool retired = false;
-    uint32_t replaced = 0;
+    uint32_t replaced = 0, nwaits = 0, nthrough = 0;
     VkResult r, nothing = VK_ERROR_OUT_OF_DATE_KHR;
 
     zss_enter();
@@ -333,8 +479,14 @@ VKAPI_ATTR VkResult VKAPI_CALL zss_QueuePresentKHR(VkQueue queue, const VkPresen
     waits = malloc((info->waitSemaphoreCount + 1) * sizeof(*waits));
     chains = malloc((info->swapchainCount + 1) * sizeof(*chains));
     for (uint32_t i = 0; i < info->waitSemaphoreCount; i++) {
-        waits[i] = ZREAL(VkSemaphore, info->pWaitSemaphores[i]);
-        ZOBJ(info->pWaitSemaphores[i])->u.sem.signaled = false;
+        struct zss_obj *s = ZOBJ(info->pWaitSemaphores[i]);
+
+        s->u.sem.signaled = false;
+        if (s->u.sem.virtual_acquire) {
+            s->u.sem.virtual_acquire = false; /* never signalled for real; nothing to wait for */
+            continue;
+        }
+        waits[nwaits++] = ZREAL(VkSemaphore, info->pWaitSemaphores[i]);
     }
     indices = malloc((info->swapchainCount + 1) * sizeof(*indices));
     for (uint32_t i = 0; i < info->swapchainCount; i++) {
@@ -349,6 +501,8 @@ VKAPI_ATTR VkResult VKAPI_CALL zss_QueuePresentKHR(VkQueue queue, const VkPresen
             retired = true;
         if (sc->u.sc.superseded)
             replaced++;
+        if (through(sc))
+            nthrough++;
     }
     /*
      * A frame for a swapchain the application has since replaced: not handed
@@ -366,21 +520,45 @@ VKAPI_ATTR VkResult VKAPI_CALL zss_QueuePresentKHR(VkQueue queue, const VkPresen
         VkPipelineStageFlags *stages = malloc((info->waitSemaphoreCount + 1) * sizeof(*stages));
         VkSubmitInfo si = {
             .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
-            .waitSemaphoreCount = info->waitSemaphoreCount,
+            .waitSemaphoreCount = nwaits,
             .pWaitSemaphores = waits,
             .pWaitDstStageMask = stages,
         };
 
-        for (uint32_t i = 0; i < info->waitSemaphoreCount; i++)
+        for (uint32_t i = 0; i < nwaits; i++)
             stages[i] = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
-        if (info->waitSemaphoreCount)
+        if (nwaits)
             dev->fn.QueueSubmit(q->real, 1, &si, VK_NULL_HANDLE);
         for (uint32_t i = 0; info->pResults && i < info->swapchainCount; i++)
             info->pResults[i] = nothing;
         free(stages);
         r = nothing;
+    } else if (nthrough) {
+        /*
+         * Shown through the screen's GPU, one swapchain after the other: the
+         * first waits for what the application said; those after it follow.
+         */
+        r = VK_SUCCESS;
+        for (uint32_t i = 0; i < info->swapchainCount; i++) {
+            struct zss_obj *sc = ZOBJ(info->pSwapchains[i]);
+            uint32_t a = info->pImageIndices[i];
+            VkResult one = VK_ERROR_OUT_OF_DATE_KHR;
+
+            if (through(sc) && a < sc->u.sc.nimages) {
+                one = zss_presenter_show(presenter_of(sc), dev, q, sc->u.sc.images[a], waits, i == 0 ? nwaits : 0);
+                if (one == VK_ERROR_DEVICE_LOST) {
+                    zss_lost(dev, one);
+                    one = VK_SUCCESS;
+                }
+            }
+            if (info->pResults)
+                info->pResults[i] = one;
+            if (one != VK_SUCCESS && r == VK_SUCCESS)
+                r = one;
+        }
     } else {
         real.pNext = NULL;
+        real.waitSemaphoreCount = nwaits;
         real.pWaitSemaphores = waits;
         real.pSwapchains = chains;
         real.pImageIndices = indices;
@@ -413,6 +591,8 @@ VKAPI_ATTR VkResult VKAPI_CALL zss_QueuePresentKHR(VkQueue queue, const VkPresen
 void zss_swapchain_retire(struct zss_dev *dev, struct zss_obj *sc)
 {
     (void)dev;
+    if (through(sc))
+        zss_presenter_destroy(presenter_of(sc), true);
     sc->u.sc.retired = true;
     sc->u.sc.gen++;
     sc->r = (struct zss_real){ 0 };
@@ -503,7 +683,44 @@ bool zss_swapchain_rebuild(struct zss_dev *dev, struct zss_obj *sc)
     VkSwapchainKHR real;
     bool blank = false;
 
-    if (!sc->u.sc.real_of || !rebuild_fits(dev, sc, &ci))
+    if (!sc->u.sc.real_of)
+        return false;
+    if (zss_present_needed(dev->gpu)) {
+        /* On a GPU that does not drive the screen: presented through the screen's GPU, as when it was made there. */
+        struct zss_presenter *p = zss_presenter_new(dev, &sc->u.sc.ci);
+
+        if (!p)
+            return why_not("the screen's GPU could not present for it");
+        sc->r = (struct zss_real){ .h = (uint64_t)(uintptr_t)p, .standin = true };
+        sc->u.sc.undo_valid = false;
+        sc->u.sc.fresh = 0;
+        sc->u.sc.retired = false;
+        for (uint32_t i = 0; i < n; i++)
+            sc->u.sc.real_of[i] = i;
+        if (standin_images(dev, sc) != VK_SUCCESS) {
+            zss_presenter_destroy(p, false);
+            sc->r = (struct zss_real){ 0 };
+            return why_not("its images could not be made on the target");
+        }
+        for (uint32_t i = 0; i < n; i++) {
+            struct zss_obj *img = sc->u.sc.images[i];
+            const uint8_t *bytes = img->u.img.saved ? img->u.img.saved : img->u.img.pending;
+            VkDeviceSize size = img->u.img.saved ? img->u.img.saved_size : img->u.img.pending_size;
+
+            if (bytes || img->u.img.layout[0] != VK_IMAGE_LAYOUT_UNDEFINED)
+                zss_image_bring_up(dev, img, bytes, size);
+            if (!bytes && img->u.img.layout[0] != VK_IMAGE_LAYOUT_UNDEFINED)
+                blank = true;
+            free(img->u.img.saved);
+            img->u.img.saved = NULL;
+            free(img->u.img.pending);
+            img->u.img.pending = NULL;
+        }
+        if (blank)
+            zss_surface_repaint(zss_present_driver(dev->gpu), sc->u.sc.ci.surface);
+        return true;
+    }
+    if (!rebuild_fits(dev, sc, &ci))
         return false;
     if (dev->fn.CreateSwapchainKHR(dev->real, &ci, NULL, &real) != VK_SUCCESS)
         return why_not("the target refused to create it");

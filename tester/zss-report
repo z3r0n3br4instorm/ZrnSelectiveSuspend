@@ -1,0 +1,3 @@
+#!/bin/sh
+# zss-report: the tester report in a terminal (see zss_report.py).
+exec python3 "$(dirname "$(readlink -f "$0")")/zss_report.py" "$@"

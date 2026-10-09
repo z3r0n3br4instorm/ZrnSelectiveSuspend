@@ -41,9 +41,12 @@ test_rules = executable('test_rules', 'test_rules.c', '../src/daemon/power.c', '
   include_directories: include_directories('../src/daemon'), dependencies: [common_dep])
 test('rules', test_rules)
 test('packaging', python, args: [files('test_packaging.py')], env: env, timeout: 300)
+test('tester-report', python, args: [files('test_report.py')], env: env, timeout: 600)
 test('track-off', python, args: [files('track_off.py')], env: env, timeout: 300, is_parallel: false)
 test('track-loss', python, args: [files('track_loss.py')], env: env, timeout: 600, is_parallel: false)
 # Boots a QEMU guest; skipped (exit 77) where QEMU or KVM is unavailable.
 test('track-b', python, args: [files('track_b.py')], env: env, timeout: 600, is_parallel: false)
 # The kernel module, built for the running kernel and loaded only inside the guest.
 test('track-k', python, args: [files('track_k.py')], env: env, timeout: 600, is_parallel: false)
+# Lending a card to a virtual machine, in the same guest with an emulated IOMMU.
+test('track-v', python, args: [files('track_v.py')], env: env, timeout: 600, is_parallel: false)

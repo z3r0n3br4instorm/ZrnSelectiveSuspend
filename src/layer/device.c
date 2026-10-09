@@ -1088,7 +1088,12 @@ void zss_real_destroy(struct zss_dev *dev, enum zss_kind kind, struct zss_real *
     case ZK_CPOOL: if (h) dev->fn.DestroyCommandPool(d, H(VkCommandPool), NULL); break;
     case ZK_FENCE: if (h) dev->fn.DestroyFence(d, H(VkFence), NULL); break;
     case ZK_SEMAPHORE: if (h) dev->fn.DestroySemaphore(d, H(VkSemaphore), NULL); break;
-    case ZK_SWAPCHAIN: if (h) dev->fn.DestroySwapchainKHR(d, H(VkSwapchainKHR), NULL); break;
+    case ZK_SWAPCHAIN:
+        if (h && r->standin)
+            zss_presenter_destroy((struct zss_presenter *)(uintptr_t)h, false);
+        else if (h)
+            dev->fn.DestroySwapchainKHR(d, H(VkSwapchainKHR), NULL);
+        break;
     case ZK_OPAQUE_EVENT: if (h) dev->fn.DestroyEvent(d, H(VkEvent), NULL); break;
     case ZK_OPAQUE_QUERYPOOL: if (h) dev->fn.DestroyQueryPool(d, H(VkQueryPool), NULL); break;
     case ZK_OPAQUE_BUFFERVIEW: if (h) dev->fn.DestroyBufferView(d, H(VkBufferView), NULL); break;
@@ -2470,6 +2475,7 @@ VKAPI_ATTR VkResult VKAPI_CALL zss_QueueSubmit(VkQueue queue, uint32_t n, const 
         VkSubmitInfo *real = calloc(n + 1, sizeof(*real));
         VkTimelineSemaphoreSubmitInfo *tl = calloc(n + 1, sizeof(*tl));
         void **scratch = calloc(3 * (size_t)n + 1, sizeof(*scratch));
+        VkPipelineStageFlags **scratch_stages = calloc((size_t)n + 1, sizeof(*scratch_stages));
 
         zss_sync_to_device(dev, NULL);
         for (uint32_t i = 0; i < n; i++) {
@@ -2478,14 +2484,25 @@ VKAPI_ATTR VkResult VKAPI_CALL zss_QueueSubmit(VkQueue queue, uint32_t n, const 
             VkCommandBuffer *cbs = malloc((s->commandBufferCount + 1) * sizeof(*cbs));
             VkSemaphore *signals = malloc((s->signalSemaphoreCount + 1) * sizeof(*signals));
 
-            for (uint32_t j = 0; j < s->waitSemaphoreCount; j++)
-                waits[j] = ZREAL(VkSemaphore, s->pWaitSemaphores[j]);
+            VkPipelineStageFlags *stages = malloc((s->waitSemaphoreCount + 1) * sizeof(*stages));
+            uint32_t nw = 0;
+
+            /* A semaphore "signalled" by a presented-through acquire was never signalled for real; its image is ready. */
+            for (uint32_t j = 0; j < s->waitSemaphoreCount; j++) {
+                if (ZOBJ(s->pWaitSemaphores[j])->u.sem.virtual_acquire)
+                    continue;
+                waits[nw] = ZREAL(VkSemaphore, s->pWaitSemaphores[j]);
+                stages[nw++] = s->pWaitDstStageMask[j];
+            }
             for (uint32_t j = 0; j < s->commandBufferCount; j++)
                 cbs[j] = (VkCommandBuffer)(uintptr_t)((struct zss_obj *)s->pCommandBuffers[j])->r.h;
             for (uint32_t j = 0; j < s->signalSemaphoreCount; j++)
                 signals[j] = ZREAL(VkSemaphore, s->pSignalSemaphores[j]);
             real[i] = *s;
             real[i].pNext = NULL;
+            real[i].waitSemaphoreCount = nw;
+            real[i].pWaitDstStageMask = stages;
+            scratch_stages[i] = stages;
             /* Timeline values are plain numbers: passed on as they are. */
             for (const VkBaseInStructure *x = s->pNext; x; x = x->pNext)
                 if (x->sType == VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO) {
@@ -2505,6 +2522,9 @@ VKAPI_ATTR VkResult VKAPI_CALL zss_QueueSubmit(VkQueue queue, uint32_t n, const 
         for (uint32_t i = 0; i < 3 * n; i++)
             free(scratch[i]);
         free(scratch);
+        for (uint32_t i = 0; i < n; i++)
+            free(scratch_stages[i]);
+        free(scratch_stages);
         free(tl);
         free(real);
     } while (zss_lost(dev, r));
@@ -2515,8 +2535,10 @@ VKAPI_ATTR VkResult VKAPI_CALL zss_QueueSubmit(VkQueue queue, uint32_t n, const 
         for (uint32_t i = 0; i < n; i++) {
             const VkSubmitInfo *s = &submits[i];
 
-            for (uint32_t j = 0; j < s->waitSemaphoreCount; j++)
+            for (uint32_t j = 0; j < s->waitSemaphoreCount; j++) {
                 ZOBJ(s->pWaitSemaphores[j])->u.sem.signaled = false;
+                ZOBJ(s->pWaitSemaphores[j])->u.sem.virtual_acquire = false;
+            }
             for (uint32_t j = 0; j < s->commandBufferCount; j++)
                 zss_cmd_track_submit(dev, (struct zss_obj *)s->pCommandBuffers[j]);
             const VkTimelineSemaphoreSubmitInfo *t = NULL;

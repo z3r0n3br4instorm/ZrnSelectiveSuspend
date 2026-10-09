@@ -1,0 +1,156 @@
+== 2026-10-09 12:17:01 zssctl lend 0000:01:00.0 --with-group
+[ZrnSelectiveSuspend] Lending device: 0000:01:00.0  NVIDIA Corporation GK107M [GeForce GT 650M Mac Edition] (rev a1)
+[ZrnSelectiveSuspend]   [1/3] Services stopped: nvidia-persistenced
+error: teams-for-linux (pid 2978) could not be migrated: no answer within 120 seconds
+0000:01:00.0: attached
+rc=1
+== lspci
+01:00.0 VGA compatible controller [0300]: NVIDIA Corporation GK107M [GeForce GT 650M Mac Edition] [10de:0fd5] (rev a1)
+	Kernel driver in use: nvidia
+01:00.1 Audio device [0403]: NVIDIA Corporation GK107 HDMI Audio Controller [10de:0e1b] (rev a1)
+	Kernel driver in use: snd_hda_intel
+07:00.0 System peripheral [0880]: Intel Corporation CV82524 Thunderbolt Controller [Light Ridge 4C 2010] [8086:1513]
+	Kernel driver in use: thunderbolt
+== status
+0000:01:00.0  state=attached  backend=zss-kmod  removal=not supported  wake=yes  iommu=yes
+    pid 42415   nvidia-persiste  non-migratable: not started under ZSS_AirLock
+    pid 2978    teams-for-linux  migratable
+    pid 5313    code             migratable migrated-away
+== module
+on
+
+== 2026-10-09 12:22:55 second attempt: zssctl lend 0000:01:00.0 --with-group
+0000:01:00.0  state=attached  backend=zss-kmod  removal=not supported  wake=yes  iommu=yes
+    pid 42415   nvidia-persiste  non-migratable: not started under ZSS_AirLock
+    pid 46132   teams-for-linux  migratable
+    pid 5313    code             migratable migrated-away
+[ZrnSelectiveSuspend] Lending device: 0000:01:00.0  NVIDIA Corporation GK107M [GeForce GT 650M Mac Edition] (rev a1)
+[ZrnSelectiveSuspend]   [1/3] Services stopped: nvidia-persistenced
+[ZrnSelectiveSuspend]   [2/3] Applications have left the card
+rc=124
+== lspci
+01:00.0 VGA compatible controller [0300]: NVIDIA Corporation GK107M [GeForce GT 650M Mac Edition] [10de:0fd5] (rev a1)
+01:00.1 Audio device [0403]: NVIDIA Corporation GK107 HDMI Audio Controller [10de:0e1b] (rev a1)
+	Kernel driver in use: snd_hda_intel
+07:00.0 System peripheral [0880]: Intel Corporation CV82524 Thunderbolt Controller [Light Ridge 4C 2010] [8086:1513]
+	Kernel driver in use: thunderbolt
+== status
+
+== 2026-10-09 12:52:44 third attempt (zero-users rule, stacked modules unloaded): zssctl lend 0000:01:00.0 --with-group
+[ZrnSelectiveSuspend] Lending device: 0000:01:00.0  NVIDIA Corporation GK107M [GeForce GT 650M Mac Edition] (rev a1)
+[ZrnSelectiveSuspend]   [1/3] Services stopped: nvidia-persistenced
+[ZrnSelectiveSuspend]   [2/3] Applications have left the card
+[ZrnSelectiveSuspend]   FAILED: the kernel module nvidia_drm is stacked on the card's driver and is in use; it could not be unloaded; giving the card back to the host
+[ZrnSelectiveSuspend]   moving applications: 0 of 3
+[ZrnSelectiveSuspend]   moving applications: 1 of 3 (teams-for-linux, moved)
+[ZrnSelectiveSuspend]   moving applications: 2 of 3 (code, moved)
+[ZrnSelectiveSuspend]   moving applications: 3 of 3 (helium, moved)
+error: the kernel module nvidia_drm is stacked on the card's driver and is in use; it could not be unloaded
+0000:01:00.0: attached
+rc=1
+== lspci
+01:00.0 VGA compatible controller [0300]: NVIDIA Corporation GK107M [GeForce GT 650M Mac Edition] [10de:0fd5] (rev a1)
+	Kernel driver in use: nvidia
+01:00.1 Audio device [0403]: NVIDIA Corporation GK107 HDMI Audio Controller [10de:0e1b] (rev a1)
+	Kernel driver in use: snd_hda_intel
+07:00.0 System peripheral [0880]: Intel Corporation CV82524 Thunderbolt Controller [Light Ridge 4C 2010] [8086:1513]
+	Kernel driver in use: thunderbolt
+== status
+0000:01:00.0  state=attached  backend=zss-kmod  removal=not supported  wake=yes  iommu=yes
+    pid 28405   nvidia-persiste  non-migratable: not started under ZSS_AirLock
+    pid 26129   teams-for-linux  migratable
+    pid 27716   helium           migratable
+    pid 27805   code             migratable
+== module: on
+== nvidia modules: nvidia_uvm(0) nvidia_drm(11) nvidia_modeset(5) nvidia(1023) 
+
+== 2026-10-09 12:54:20 fourth attempt (waits for the display module's users to drain): zssctl lend 0000:01:00.0 --with-group
+[ZrnSelectiveSuspend] Lending device: 0000:01:00.0  NVIDIA Corporation GK107M [GeForce GT 650M Mac Edition] (rev a1)
+[ZrnSelectiveSuspend]   [1/3] Services stopped: nvidia-persistenced
+[ZrnSelectiveSuspend]   [2/3] Applications have left the card
+[ZrnSelectiveSuspend]   [3/3] Every function, and the devices sharing its isolation group, handed to the passthrough driver; the card is powered and left alone
+[ZrnSelectiveSuspend] Device 0000:01:00.0 is lent (2.44 s). A virtual machine can take it now.
+[ZrnSelectiveSuspend] Take it back, once the virtual machine has stopped, with: zssctl reclaim 0000:01:00.0
+0000:01:00.0: lent
+lent
+rc=0
+== lspci
+01:00.0 VGA compatible controller [0300]: NVIDIA Corporation GK107M [GeForce GT 650M Mac Edition] [10de:0fd5] (rev a1)
+	Kernel driver in use: vfio-pci
+01:00.1 Audio device [0403]: NVIDIA Corporation GK107 HDMI Audio Controller [10de:0e1b] (rev a1)
+	Kernel driver in use: vfio-pci
+07:00.0 System peripheral [0880]: Intel Corporation CV82524 Thunderbolt Controller [Light Ridge 4C 2010] [8086:1513]
+	Kernel driver in use: vfio-pci
+== status
+0000:01:00.0  state=lent  backend=zss-kmod  removal=not supported  wake=yes  iommu=yes
+    pid 31832   code             migratable migrated-away
+    pid 31837   teams-for-linux  migratable migrated-away
+    pid 31842   helium           migratable migrated-away
+== module: lent
+== nvidia modules: nvidia(0) 
+
+== 2026-10-09 12:54:31 zssctl reclaim 0000:01:00.0
+[ZrnSelectiveSuspend] Reclaiming device: 0000:01:00.0  NVIDIA Corporation GK107M [GeForce GT 650M Mac Edition] (rev a1)
+[ZrnSelectiveSuspend]   [1/3] Card reset by a power cycle; host drivers bound again
+[ZrnSelectiveSuspend]   [2/3] Services started: none
+[ZrnSelectiveSuspend]   moving applications: 0 of 3
+[ZrnSelectiveSuspend]   moving applications: 1 of 3 (teams-for-linux, moved)
+[ZrnSelectiveSuspend]   moving applications: 2 of 3 (helium, moved)
+[ZrnSelectiveSuspend]   moving applications: 3 of 3 (code, moved)
+[ZrnSelectiveSuspend]   [3/3] Applications: returned to the card
+[ZrnSelectiveSuspend] Device 0000:01:00.0 is the host's again (7.28 s).
+0000:01:00.0: attached
+attached
+rc=0
+== lspci
+01:00.0 VGA compatible controller [0300]: NVIDIA Corporation GK107M [GeForce GT 650M Mac Edition] [10de:0fd5] (rev a1)
+	Kernel driver in use: nvidia
+01:00.1 Audio device [0403]: NVIDIA Corporation GK107 HDMI Audio Controller [10de:0e1b] (rev a1)
+	Kernel driver in use: snd_hda_intel
+07:00.0 System peripheral [0880]: Intel Corporation CV82524 Thunderbolt Controller [Light Ridge 4C 2010] [8086:1513]
+	Kernel driver in use: thunderbolt
+== status
+0000:01:00.0  state=attached  backend=zss-kmod  removal=not supported  wake=yes  iommu=yes
+    pid 33050   nvidia-persiste  non-migratable: not started under ZSS_AirLock
+    pid 31832   code             migratable
+    pid 31837   teams-for-linux  migratable
+    pid 31842   helium           migratable
+== module: on
+== nvidia modules: nvidia_uvm(0) nvidia_drm(11) nvidia_modeset(5) nvidia(1032) 
+== nvidia-smi: NVIDIA GeForce GT 650M, 184 MiB
+
+== 2026-10-09 13:35:27 lend for a virtual machine
+[ZrnSelectiveSuspend] Lending device: 0000:01:00.0  NVIDIA Corporation GK107M [GeForce GT 650M Mac Edition] (rev a1)
+[ZrnSelectiveSuspend]   [1/3] Services stopped: nvidia-persistenced
+[ZrnSelectiveSuspend]   [2/3] Applications have left the card
+[ZrnSelectiveSuspend]   [3/3] Every function, and the devices sharing its isolation group, handed to the passthrough driver; the card is powered and left alone
+[ZrnSelectiveSuspend] Device 0000:01:00.0 is lent (2.87 s). A virtual machine can take it now.
+[ZrnSelectiveSuspend] Take it back, once the virtual machine has stopped, with: zssctl reclaim 0000:01:00.0
+0000:01:00.0: lent
+lent
+rc=0
+	Kernel driver in use: vfio-pci
+	Kernel driver in use: vfio-pci
+	Kernel driver in use: vfio-pci
+
+== 2026-10-09 13:44:30 reclaim after a guest used the card (CachyOS live ISO, the user reports passthrough worked)
+[ZrnSelectiveSuspend] Reclaiming device: 0000:01:00.0  NVIDIA Corporation GK107M [GeForce GT 650M Mac Edition] (rev a1)
+[ZrnSelectiveSuspend]   [1/3] Card reset by a power cycle; host drivers bound again
+[ZrnSelectiveSuspend]   [2/3] Services started: none
+[ZrnSelectiveSuspend]   moving applications: 0 of 2
+[ZrnSelectiveSuspend]   moving applications: 1 of 2 (teams-for-linux, moved)
+[ZrnSelectiveSuspend]   moving applications: 2 of 2 (helium, moved)
+[ZrnSelectiveSuspend]   [3/3] Applications: returned to the card
+[ZrnSelectiveSuspend] Device 0000:01:00.0 is the host's again (11.16 s).
+0000:01:00.0: attached
+attached
+rc=0
+	Kernel driver in use: nvidia
+	Kernel driver in use: snd_hda_intel
+	Kernel driver in use: thunderbolt
+nvidia modules: nvidia_uvm(0) nvidia_drm(8) nvidia_modeset(4) nvidia(730) 
+nvidia-smi: NVIDIA GeForce GT 650M, 118 MiB
+0000:01:00.0  state=attached  backend=zss-kmod  removal=not supported  wake=yes  iommu=yes
+    pid 106402  nvidia-persiste  non-migratable: not started under ZSS_AirLock
+    pid 31837   teams-for-linux  migratable
+    pid 31842   helium           migratable

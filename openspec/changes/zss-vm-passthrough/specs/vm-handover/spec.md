@@ -5,19 +5,30 @@ Lending a GPU that ZSS manages to a virtual machine while the host keeps running
 ## ADDED Requirements
 
 ### Requirement: A managed GPU can be lent
-The system SHALL provide an operation that takes a managed GPU from "attached" or "off" to a state named "lent", in which no host driver is bound to any function of the card, every function is bound to the kernel's passthrough driver, and the card is powered.
+The system SHALL provide an operation that takes an attached managed GPU to a state named "lent", in which no host driver is bound to any function of the card, every function is bound to the kernel's passthrough driver, and the card is powered.
 
 #### Scenario: Lending an attached card
 - **WHEN** the user lends an attached card that passes the preflight check
-- **THEN** applications are moved off it or frozen as they are for a power-off, the host driver is unbound from every function of the card, every function is bound to the passthrough driver, the card is powered, and the card's state is reported as "lent"
+- **THEN** applications under ZSS_AirLock are moved off it, services that hold it only to keep it initialised are stopped, the host driver is unbound from every function of the card, every function is bound to the passthrough driver, the card is powered, and the card's state is reported as "lent"
 
 #### Scenario: Lending a card that is off
 - **WHEN** the user lends a card that is in the "off" state
-- **THEN** the card is powered, handed over without the host driver using it in between, and reported as "lent"
+- **THEN** the operation is refused, nothing is changed, and the error says to switch the card on without returning applications to it and then lend it (a driver has to be awake to let go of its device)
 
 #### Scenario: A virtual machine can take a lent card
 - **WHEN** a card is "lent" and a virtual machine configured to pass that card through is started
 - **THEN** the virtual machine starts with the card assigned to it, without any further action through ZSS
+
+### Requirement: Devices sharing the card's isolation group go with it only when asked
+The system SHALL hand devices that share the card's isolation group (bridges excepted) to the passthrough driver together with the card only when the user asks for it, and SHALL give them back to their host drivers when the card is reclaimed or the hand-over fails.
+
+#### Scenario: Asked for
+- **WHEN** the user lends a card and asks for its group to go with it
+- **THEN** every such device loses its host driver for as long as the card is lent, and has it again after reclaim
+
+#### Scenario: Not asked for
+- **WHEN** the user lends a card that shares its group, without asking for the group to go with it
+- **THEN** lending is refused and nothing is changed
 
 ### Requirement: Lending is refused when it cannot be done safely
 The system SHALL refuse to lend a card when the preflight check finds an obstacle, SHALL change nothing in that case, and SHALL name every obstacle found.
@@ -26,9 +37,9 @@ The system SHALL refuse to lend a card when the preflight check finds an obstacl
 - **WHEN** the user lends a card and the preflight check reports one or more obstacles
 - **THEN** the operation fails, the card and all applications are as they were, and the error lists each obstacle
 
-#### Scenario: A program that cannot be moved or frozen holds the card
-- **WHEN** a program that blocks a power-off today holds the card
-- **THEN** lending is refused for the same reason and with the same message as a power-off
+#### Scenario: A program that cannot be moved holds the card
+- **WHEN** a program that was not started under ZSS_AirLock, or one ZSS_AirLock cannot move, has the card open
+- **THEN** lending is refused and the program is named; it is not frozen as it would be for a power-off, because a frozen program still has the card open and the host driver could not let go
 
 ### Requirement: A failed hand-over is undone
 The system SHALL return the card to the host driver and applications to the card when any step of lending fails after applications have been moved.
@@ -59,9 +70,9 @@ The system SHALL provide an operation that takes a "lent" card back: the card is
 - **WHEN** a virtual machine still holds the card and the user reclaims it
 - **THEN** the operation is refused, the virtual machine is not disturbed, and the error names the process holding the card
 
-#### Scenario: The host driver does not come back
-- **WHEN** the host driver fails to bind after the power cycle
-- **THEN** the card is left powered off, the state is reported as "off" with the failure, applications stay where they are, and a later power-on can be attempted
+#### Scenario: The card cannot be reset, or the host driver does not come back
+- **WHEN** the power cycle fails, or the host driver fails to bind after it
+- **THEN** the state stays "lent", the failure is reported, applications stay where they are, and reclaiming can be attempted again
 
 ### Requirement: The state survives a daemon restart
 The system SHALL recognise a lent card after the daemon restarts and SHALL NOT bind a host driver to it or power it off on start-up or shutdown.
@@ -71,7 +82,7 @@ The system SHALL recognise a lent card after the daemon restarts and SHALL NOT b
 - **THEN** the card is reported as "lent", the virtual machine keeps running, and reclaiming works afterwards
 
 ### Requirement: Status shows the lent state and its holder
-The status output and the D-Bus interface SHALL report a lent card as "lent" and SHALL name the process holding it, if any.
+The status output SHALL report a lent card as "lent" and SHALL name the process holding it, if any.
 
 #### Scenario: Status with a running guest
 - **WHEN** the user asks for status while a virtual machine holds a lent card

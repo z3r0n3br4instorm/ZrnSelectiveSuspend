@@ -9,16 +9,24 @@ moves back when it returns. It is meant to work with any GPU and any driver.
 Today some parts do, and some work only on the one machine they were built on.
 The table below says which.
 
-> **Status (October 2026).** Working on real hardware: a MacBookPro9,1 powers
-> its NVIDIA GT 650M off and on under a running X session in about 0.3 s, with
-> applications moved to the Intel GPU and back, through ZSS_Interceptor (the `zss` kernel module)
-> or without it. On the same laptop, a card that loses power **without
-> warning while idle** is now brought back, driver included, with no reboot.
-> A card lost **while a program is rendering on it** is not: the desktop
-> survives, the program does not move, and the card needs a reboot. Working in
-> a virtual machine only: powering off a GPU with an open-source driver, and
-> hot-removal of a PCIe card. See "What is universal and what is not" and
-> "When a card is lost without warning".
+> **Status (October 2026).** Working on real hardware, a MacBookPro9,1 with an
+> NVIDIA GT 650M and an Intel HD 4000:
+>
+> - **Power off and on under a running X session** in about 0.3 s, with
+>   applications moved to the Intel GPU and back.
+> - **Lending the card to a virtual machine** and taking it back, with no
+>   reboot and no log-out: programs moved away, the card handed to `vfio-pci`, a
+>   QEMU guest using it, then the card reset and returned with its programs.
+> - **Moving Vulkan programs, OpenGL programs (through Zink), browsers and
+>   Electron apps, and Unity games** between the two GPUs while they draw.
+> - **A card that loses power without warning while idle** is brought back,
+>   driver included, with no reboot.
+>
+> Not working yet: a card lost **while a program is rendering on it** (the
+> desktop survives, the program does not move, the card needs a reboot).
+> Working in a virtual machine only: powering off a GPU with an open-source
+> driver, and hot-removal of a PCIe card. See "What is universal and what is
+> not" and "When a card is lost without warning".
 
 ---
 
@@ -26,7 +34,10 @@ The table below says which.
 
 | Part | Works with | Tested on |
 | :--- | :--- | :--- |
-| Moving applications between GPUs (ZSS_AirLock) | Any Vulkan driver: NVIDIA, Mesa (Intel, AMD, Nouveau), software | NVIDIA 470, Intel `anv`, llvmpipe |
+| Moving applications between GPUs (ZSS_AirLock) | Any Vulkan driver: NVIDIA, Mesa (Intel, AMD, Nouveau), software | NVIDIA 470, Intel `hasvk`, llvmpipe |
+| Moving OpenGL applications (through Mesa's Zink) | Any Vulkan driver; ZSS_AirLock stands in for dynamic rendering and `VK_KHR_maintenance5` where a driver lacks them | NVIDIA 470, Intel `hasvk` (OpenGL 3.2) |
+| Showing frames drawn on one GPU on a screen driven by another, in order | Drivers that do not hand frames across themselves (the NVIDIA proprietary driver without its card in X) | NVIDIA 470 to Intel |
+| Lending a GPU to a virtual machine and taking it back (`zssctl lend`, `reclaim`) | Any PCI GPU behind an IOMMU, with ZSS_Interceptor; the display server must not hold the card | MacBookPro9,1 with a QEMU guest; QEMU with an emulated IOMMU |
 | Recovering applications when a GPU vanishes | Any Vulkan driver | QEMU, by pulling a virtual card |
 | Daemon, `zssctl`, rules for who may hold a GPU, freezing, idle timer | Any GPU | Host tests and QEMU |
 | Quiescing the driver before a power cut (kernel module, `quiesce=pm`) | Any driver that survives a laptop suspend: `amdgpu`, `i915`, `xe`, `nouveau`, and others | **QEMU's `bochs` driver only** |
@@ -63,8 +74,12 @@ is built around:
   application it is the Vulkan driver; underneath it loads the real drivers.
   It keeps enough state to rebuild the application on another GPU, and does so
   when asked or when the GPU is lost. Its messages begin `[ZSS_AirLock]`.
+  When a program draws on a GPU that does not drive the screen and its driver
+  cannot hand frames across in order, ZSS_AirLock presents them itself on the
+  screen's GPU (`ZSS_PRESENT=direct` turns that off).
 - **The daemon** (`zssd`) decides and sequences: who is using the GPU, what to
-  move, freeze or stop, then driver suspend and the power cut, and the reverse.
+  move, freeze or stop, then driver suspend and the power cut, and the reverse;
+  and for lending, the hand-over of the card to `vfio-pci` and back.
 - **ZSS_Interceptor** (the kernel module `zss.ko`, optional) is the kernel
   shim, the part that touches the hardware. The module's file, its `/sys`
   entries and its kernel messages keep the short name `zss`. What it does: it quiesces the driver through the driver's own sleep code, saves
@@ -114,8 +129,9 @@ and why (MMIO shadowing and a DMA isolator of our own are not planned).
 ## Project Structure
 
 * [`SPEC.md`](SPEC.md) - Long-term architecture, multi-vendor design, and failure analysis. Not a description of what exists.
-* [`openspec/changes/`](openspec/changes/) - Proposal, design, specs and tasks for each milestone: `zss-happy-path` (orderly detach and attach), `zss-device-loss` (a GPU that disappears), `zss-system-integration` (service, installer, power-off under a desktop), `zss-kernel-shim` (ZSS_Interceptor).
-* [`src/layer/`](src/layer/) - The graphics layer: a Vulkan driver shim that makes applications migratable.
+* [`openspec/changes/`](openspec/changes/) - Proposal, design, specs and tasks for each milestone: `zss-happy-path` (orderly detach and attach), `zss-device-loss` (a GPU that disappears), `zss-system-integration` (service, installer, power-off under a desktop), `zss-kernel-shim` (ZSS_Interceptor), `zss-vulkan-12-and-opengl` (wider Vulkan, OpenGL through Zink, applications), `zss-vm-passthrough` (lending a GPU to a virtual machine).
+* [`tester/`](tester/) - The tester kit: a report of what a machine has for ZSS, with the moving tests, in a window or a terminal.
+* [`src/layer/`](src/layer/) - ZSS_AirLock: a Vulkan driver shim that makes applications migratable.
 * [`src/daemon/`](src/daemon/) - `zssd`, which runs detach, attach, off and on, and the power backends.
 * [`src/zssctl/`](src/zssctl/) - Command-line client.
 * [`kmod/`](kmod/) - ZSS_Interceptor (the `zss` kernel module) and its DKMS files.
@@ -126,6 +142,18 @@ and why (MMIO shadowing and a DMA isolator of our own are not planned).
 * [`include/`](include/) - Register maps for the reference platform.
 
 ## Installing
+
+Each push to `main` publishes a release (GitHub Actions,
+`.github/workflows/release.yml`) with two downloads, built on Arch Linux:
+
+- `zss-installer-VERSION.run`: `sh zss-installer-VERSION.run --check` says what
+  the machine supports and changes nothing; without `--check` it installs.
+- `zss-tester-VERSION.run`: the tester kit, with the moving tests ready to run.
+
+They need a distribution whose libraries are as new as Arch Linux's. The
+version is `MAJOR.MINOR` from `meson.build` and a number counted up from the
+last release; `packaging/make-bundle.sh VERSION DIR` makes the same files
+locally. From source:
 
 ```sh
 meson setup build && ninja -C build
@@ -144,6 +172,20 @@ against (470.256.02 so far, patch revision 5); it then survives kernel updates, 
 re-applies it after a driver update. The stock modules are kept and restored at
 boot if the patched driver does not load. `zss-nvidia-patch status` shows where
 things stand, and `zss-nvidia-patch remove` puts the stock driver back.
+
+At the end of an install the installer records what the machine has for ZSS
+(the facts the tester kit collects, without the moving tests) together with
+its own messages. When everything went well that is kept as `~/.zss/debug.log`;
+when something failed, a full report is saved in `~/.zss/` as well and the
+installer offers to open your mail program to send it. Computer and user names,
+serial numbers and network addresses are removed first; nothing is sent
+without you.
+
+`--vm-passthrough` also prepares the GPU for lending to virtual machines: a
+udev rule keeps the display server and the login manager off the card's display
+nodes. The IOMMU has to be switched on by you (`intel_iommu=on` or
+`amd_iommu=on` on the kernel command line); `--check` says whether it is, and
+whether the card shares its isolation group with other devices.
 
 The installer also offers the **kernel module** (`--kernel-module` to accept
 without being asked, `--no-kernel-module` to decline). It is built through
@@ -235,6 +277,32 @@ manager (`zrn_perfd`) calls it on every charger change once it is installed
 at `/usr/local/sbin/zss-power-event`. `--dry-run` shows the dialog and
 switches nothing.
 
+## Lending the GPU to a virtual machine
+
+```sh
+zssctl lend --check 0000:01:00.0   # what stands in the way, and what would be affected; changes nothing
+zssctl lend 0000:01:00.0           # programs moved away, card handed to vfio-pci
+zssctl reclaim 0000:01:00.0        # card reset by a power cycle, host driver back, programs returned
+```
+
+While it is lent the card belongs to the guest: ZSS does not watch, wake or
+power it, and `off`, `on`, `detach` and `attach` are refused. `reclaim` is
+refused while a virtual machine holds it, and `zssctl status` names the process
+that does. A card that shares its IOMMU group with other devices is lent with
+`--with-group`: they go with it and lose their host drivers until it comes back.
+
+Before handing the card over, the kernel modules stacked on its driver (for
+NVIDIA: `nvidia_uvm`, `nvidia_drm`, `nvidia_modeset`) are unloaded, and the
+driver must have no user left; a driver asked to let go of a card still in use
+waits for ever, so the lend is refused instead. The modules are loaded again on
+reclaim.
+
+On the reference laptop, 9 October 2026: lent in 2.9 s, used by a QEMU guest
+booted from a CachyOS live image, and reclaimed in 11.2 s after the guest shut
+down. What the laptop needed (the card out of X, the IOMMU, interrupts without
+remapping because of a firmware bug) and how to start the guest:
+[`docs/vm-handover.md`](docs/vm-handover.md).
+
 ## When a card is lost without warning
 
 This is the case ZSS exists for and the one that is least finished. What
@@ -262,6 +330,15 @@ obvious next thing and has not been tried.
 Three of the tests that produced this table ended with the laptop reset or
 hung. Details, timings and logs: [`docs/track-c.md`](docs/track-c.md).
 
+## Help test it
+
+The tester kit in [`tester/`](tester/) collects what a machine has for ZSS
+(graphics cards, drivers, power control, IOMMU, Vulkan and OpenGL) and runs the
+moving tests with a test daemon that switches nothing off. It changes nothing,
+sends nothing by itself, and removes names and identifiers from the report.
+`tester/zss-report-gui` opens it in a window; `tester/zss-report` runs it in a
+terminal. See [`tester/README.md`](tester/README.md).
+
 ## Building and trying it
 
 ```sh
@@ -278,8 +355,9 @@ build/src/zssctl/zssctl detach 0000:01:00.0
 build/src/zssctl/zssctl attach 0000:01:00.0
 ```
 
-Applications run under ZSS_AirLock see a Vulkan 1.1 device. Programs that need a
-newer Vulkan version do not start under it yet.
+Applications run under ZSS_AirLock see a Vulkan 1.1 device with the extensions
+it can carry across a move. Programs that need Vulkan 1.2 or more do not start
+under it yet.
 
 An OpenGL program. `--gl` runs it on Mesa's Zink, which draws OpenGL through
 Vulkan, so that it is under ZSS_AirLock like any Vulkan program and can be moved
@@ -307,6 +385,8 @@ build/src/layer/zss-run chromium
 | `ZSS_DEBUG` | Makes ZSS_AirLock log what it loads and why a device is not migratable |
 | `ZSS_ALLOW_SOFTWARE` | Lets a parked application resume on a software renderer |
 | `ZSS_START_ON` | The GPU a program starts on: `dedicated` (what `zss-run` uses by default: the discrete card), a PCI address, part of a GPU's name, or `any`. `zss-run --on GPU` sets it. The other GPUs are not listed to the program but it can still be moved to them |
+| `ZSS_PRESENT` | `direct`: every swapchain on the GPU the program draws on, as drivers do. `copy`: through the screen's GPU even for Mesa drivers. Default: through the screen's GPU only where needed |
+| `ZSS_TRAP` | Debugging aid: a Vulkan command the program calls that ZSS_AirLock does not provide stops it with the command's name |
 | `ZSS_PROFILE` | `portable` (default): each GPU reports what all GPUs the program may be moved to have. `native`: each reports its own |
 | `ZSS_VULKAN` | `1.0` makes ZSS_AirLock present Vulkan 1.0 only, as it did before |
 | `ZSS_REAL_DRIVER_FILES` | Colon-separated driver manifests for ZSS_AirLock to use instead of the system's |

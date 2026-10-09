@@ -39,6 +39,9 @@ int main(void)
     expect("display server, stock driver, on the console",
            (struct holder_facts){ .display_server = true, .console = true }, HV_ALLOW);
 
+    expect("init or the login manager is never frozen", (struct holder_facts){ .system = true, .freezable = true }, HV_ALLOW);
+    expect("init or the login manager, nothing freezable", (struct holder_facts){ .system = true }, HV_ALLOW);
+
     /* Process names are cut to fifteen characters by the kernel. */
     if (!service_listed("nvidia-persiste") || !service_listed("other.service") || service_listed("Xorg") ||
         service_listed("nvidia") || service_listed("")) {

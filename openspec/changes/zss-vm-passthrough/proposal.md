@@ -5,11 +5,11 @@ ZSS can already take every application off a GPU and power the card down while t
 ## What Changes
 
 - A third state for a managed GPU beside "attached" and "off": **lent**. The host's driver is unbound from every function of the card, the card is left powered and bound to the kernel's passthrough driver (`vfio-pci`), and ZSS stops watching and waking it.
-- `zssctl lend <pci>` and `zssctl reclaim <pci>`. Lending moves or freezes applications exactly as `off` does today, then hands the card over. Reclaiming power-cycles the card, gives it back to the host's driver, and returns applications as `on` does.
+- `zssctl lend <pci>` and `zssctl reclaim <pci>`. Lending moves applications off the card as `off` does today (a program that cannot be moved blocks it, since a frozen one would still hold the card), then hands the card over. Reclaiming power-cycles the card, gives it back to the host's driver, and returns applications as `on` does.
 - `zssctl lend --check <pci>`: says, without changing anything, whether this machine can lend the card and, if not, each reason and what would remove it (no IOMMU, the card shares an isolation group with something else, the display server holds the card, a function of the card has no passthrough driver).
 - ZSS_Interceptor learns to release a device with its power on, and to refuse to take back a device a guest still holds.
 - ZSS does **not** start, stop or configure virtual machines, and does **not** edit the bootloader. It produces a card that a VM manager can take, and takes it back.
-- Status output and the D-Bus interface show the new state and who holds a lent card.
+- Status output shows the new state and who holds a lent card.
 
 ## Capabilities
 

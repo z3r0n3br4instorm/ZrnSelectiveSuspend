@@ -14,6 +14,7 @@
 #include <string.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/sysmacros.h>
 #include <unistd.h>
 
 #define ZSS_MAX_DRIVERS 16
@@ -291,6 +292,35 @@ static bool driver_load(struct zss_driver *drv)
     return true;
 }
 
+/* The process's open descriptors on display-device nodes (DRM character devices, major 226). */
+struct drm_fd {
+    int fd;
+    dev_t dev;
+};
+
+static int drm_fds(struct drm_fd *out, int max)
+{
+    DIR *d = opendir("/proc/self/fd");
+    struct dirent *de;
+    int n = 0;
+
+    if (!d)
+        return 0;
+    while ((de = readdir(d)) && n < max) {
+        struct stat st;
+        int fd = atoi(de->d_name);
+
+        if (de->d_name[0] == '.' || fd == dirfd(d))
+            continue;
+        if (fstat(fd, &st) == 0 && S_ISCHR(st.st_mode) && major(st.st_rdev) == 226) {
+            out[n].fd = fd;
+            out[n++].dev = st.st_rdev;
+        }
+    }
+    closedir(d);
+    return n;
+}
+
 VkResult zss_driver_open(struct zss_driver *drv)
 {
     PFN_vkEnumerateInstanceExtensionProperties enum_ext;
@@ -299,6 +329,8 @@ VkResult zss_driver_open(struct zss_driver *drv)
     VkExtensionProperties ext[128];
     uint32_t next = 128, napi = VK_API_VERSION_1_0, nenabled = 0;
     const char *enabled[8];
+    struct drm_fd before[64], after[64];
+    int nbefore, nafter;
     VkApplicationInfo app = { .sType = VK_STRUCTURE_TYPE_APPLICATION_INFO, .pApplicationName = "zss" };
     VkInstanceCreateInfo ci = { .sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO, .pApplicationInfo = &app };
     VkResult r;
@@ -307,6 +339,7 @@ VkResult zss_driver_open(struct zss_driver *drv)
         return VK_SUCCESS;
     if (!driver_load(drv))
         return VK_ERROR_INCOMPATIBLE_DRIVER;
+    nbefore = drm_fds(before, 64);
 
     enum_ext = (PFN_vkEnumerateInstanceExtensionProperties)drv->gipa(NULL, "vkEnumerateInstanceExtensionProperties");
     enum_ver = (PFN_vkEnumerateInstanceVersion)drv->gipa(NULL, "vkEnumerateInstanceVersion");
@@ -348,20 +381,86 @@ VkResult zss_driver_open(struct zss_driver *drv)
 #undef X
     memset(drv->surfaces, 0, sizeof(drv->surfaces));
     driver_enumerate(drv, false);
+    /* What the driver has opened of the display devices so far is noted; see zss_driver_close. */
+    drv->nopened = 0;
+    nafter = drm_fds(after, 64);
+    for (int i = 0; i < nafter && drv->nopened < 16; i++) {
+        bool was = false;
+
+        for (int k = 0; k < nbefore; k++)
+            was = was || (before[k].fd == after[i].fd && before[k].dev == after[i].dev);
+        if (!was) {
+            drv->opened[drv->nopened].fd = after[i].fd;
+            drv->opened[drv->nopened++].dev = after[i].dev;
+        }
+    }
     zss_dbg("opened driver %s", drv->lib);
     return VK_SUCCESS;
 }
 
 static void x_link_close(VkIcdWsiPlatform platform, void *link);
 
+/*
+ * Whether an open display-device node that appeared while `drv` was starting
+ * is one the driver leaked, and so the layer's to close.
+ *
+ * What appeared in that time is not proof of who opened it: another thread
+ * of the application may have opened a node of its own just then. So this is
+ * kept to the one case that was measured: the NVIDIA proprietary driver
+ * (470.256.02) opens the render node of its own card when an instance is
+ * made and never closes it, and nothing else in a process opens that card's
+ * nodes. Mesa's drivers close what they open, and an application does open
+ * nodes of the GPU its display server runs on, so nothing of theirs is
+ * touched.
+ */
+static bool node_is_drivers_leak(const struct zss_driver *drv, dev_t dev)
+{
+    char link[64], path[PATH_MAX];
+    ssize_t len;
+
+    if (!strstr(drv->lib, "nvidia"))
+        return false;
+    snprintf(link, sizeof(link), "/sys/dev/char/%u:%u", major(dev), minor(dev));
+    len = readlink(link, path, sizeof(path) - 1);
+    if (len <= 0)
+        return false;
+    path[len] = '\0';
+    for (int g = 0; g < zss_ngpus; g++)
+        if (zss_gpus[g]->drv == drv && zss_gpus[g]->pci[0] && zss_gpus[g]->props.vendorID == 0x10de &&
+            strstr(path, zss_gpus[g]->pci))
+            return true;
+    return false;
+}
+
 void zss_driver_close(struct zss_driver *drv)
 {
+    int left = 0;
+
     if (!drv->inst || drv->ndevices > 0)
         return;
     for (int i = 0; i < ZSS_MAX_SURFACES; i++)
         if (drv->surfaces[i].owned && drv->fn.DestroySurfaceKHR)
             drv->fn.DestroySurfaceKHR(drv->inst, drv->surfaces[i].real, NULL);
     drv->fn.DestroyInstance(drv->inst, NULL);
+    /*
+     * The NVIDIA 470 driver leaves its card's render node open for good.
+     * With that descriptor in the process the GPU still counts as in use,
+     * and cannot be powered off or handed over. What was noted when the
+     * driver started, is still the same open node, and is that leak
+     * (node_is_drivers_leak) is closed here.
+     */
+    for (int i = 0; i < drv->nopened; i++) {
+        struct stat st;
+
+        if (fstat(drv->opened[i].fd, &st) == 0 && S_ISCHR(st.st_mode) && st.st_rdev == drv->opened[i].dev &&
+            node_is_drivers_leak(drv, st.st_rdev)) {
+            close(drv->opened[i].fd);
+            left++;
+        }
+    }
+    drv->nopened = 0;
+    if (left)
+        zss_dbg("closed %d display-device node(s) that %s left open", left, drv->lib);
     /* Only now, with the driver done, are its connections to the display server closed. */
     for (int i = 0; i < ZSS_MAX_SURFACES; i++)
         x_link_close(drv->surfaces[i].platform, drv->surfaces[i].link);

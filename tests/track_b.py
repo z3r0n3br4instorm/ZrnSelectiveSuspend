@@ -24,6 +24,9 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 BUILD = os.path.abspath(os.environ.get("ZSS_BUILD") or os.path.join(HERE, "..", "build"))
 KERNEL_RELEASE = os.uname().release
 MODULES = ["fs/netfs/netfs", "net/9p/9pnet", "net/9p/9pnet_virtio", "fs/9p/9p", "drivers/gpu/drm/tiny/bochs"]
+# A track that needs more in the guest says so (track_v: an emulated IOMMU and the passthrough driver).
+MODULES += [m for m in os.environ.get("ZSS_GUEST_MODULES", "").split(",") if m]
+GUEST_IOMMU = os.environ.get("ZSS_GUEST_IOMMU") == "1"
 GPU_ID, PORT_ID = "gpu1", "rp1"
 TIMEOUT = 540
 
@@ -190,7 +193,9 @@ def main():
             # device as soon as the guest powers the slot off, which a real slot does not do.
             "-global", "ICH9-LPC.acpi-pci-hotplug-with-bridge-support=off",
             "-kernel", kernel, "-initrd", image,
-            "-append", "console=ttyS0 panic=-1 loglevel=4",
+            "-append", "console=ttyS0 panic=-1 loglevel=4" + (" intel_iommu=on" if GUEST_IOMMU else ""),
+            *(["-device", "intel-iommu"] if GUEST_IOMMU else []),
+            *[a for a in os.environ.get("ZSS_GUEST_QEMU", "").split() if a],
             "-serial", f"file:{serial}",
             "-qmp", f"unix:{qmp_path},server=on,wait=off",
             "-device", f"pcie-root-port,id={PORT_ID},chassis=1,slot=1",
